@@ -1,0 +1,373 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module implements the ICMP (Internet Control Messaging Protocol), which
+;   is layered on IP (Internet Protocol).
+;
+;   The ICMP protocol is defined in RFC 792.  The documentation in this module
+;   assumes a basic undestanding of ICMP.
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;     I/O pins:
+;
+;     Global flags:
+;
+;     Preprocessor symbols not defined in the NETWORK.INS.ASPIC include file:
+;
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     [v lbank_icmp] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+;
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+;
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+.icmp    code
+;
+;*******************************************************************************
+;
+;   Subroutine NET_ICMP_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  net_icmp_init, noregs
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_BYTE
+;
+;   Get the next received packet byte into REG0.  REG10:REG9 is assumed to
+;   contain the number of bytes left to read in the packet.  If this is 0 on
+;   entry, then it is not altered and the 0 data byte is returned.  Otherwise
+;   the next data byte is read from the IP packet and REG10:REG9 decremented
+;   by 1.
+;
+         locsub  get_byte, noregs
+
+         clrf    reg0        ;init the returned byte to 0
+         movf    reg9, w
+         iorwf   reg10, w
+         bz      gby_leave   ;no more bytes to read, return the 0 in REG0 ?
+;
+;   The remaining byte count is not zero.  Decrement the count and read the
+;   next byte from the IP packet.
+;
+         movlw   1           ;decrement the number of bytes left
+         subwf   reg9
+         movlw   0
+         subwfb  reg10
+
+         gcall   ip_recv_read ;read the next IP packet byte into REG0
+
+gby_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine CKWORD
+;
+;   Update the checksum in REG3:REG2 with the word in REG1:REG0.  This is done
+;   by performing a "one's complement add" of the new word into the checksum.  A
+;   one's complement add is the same as a normal two's complement add with the
+;   carry recirculated.  In other words, the carry out of the high bit is added
+;   back into the low bit.
+;
+         locsub  ckword, noregs
+
+         movf    reg0, w     ;add in new low byte
+         addwf   reg2
+         movf    reg1, w     ;add in new high byte
+         addwfc  reg3
+         movlw   0
+         addwfc  reg2        ;add the carry back into the checksum accumulator
+         addwfc  reg3
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_WORD
+;
+;   Read the next two bytes from the received IP packet and return them as a
+;   16 bit word in REG1:REG0.  The remaining byte count in REG10:REG9 is
+;   updated.
+;
+         locsub  get_word, noregs
+
+         mcall   get_byte    ;get high byte into REG0
+         movff   reg0, reg1  ;move it into position
+         mcall   get_byte    ;get low byte into REG0
+         check_yield         ;let other tasks run if needed
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_CKWORD
+;
+;   Reads the next two bytes from the packet, returns them in REG1:REG0 as a 16
+;   bit word, and updates the checksum in REG3:REG2 with that word.  REG10:REG9
+;   is assumed to contain the number of bytes left in the message.  It is
+;   decremented for each byte read until it reaches 0.  When 0, a 0 data byte
+;   will be returned.
+;
+         locsub  get_ckword, noregs
+
+         mcall   get_word    ;get next received packet word into REG1:REG0
+         mcall   ckword      ;update the checksum in REG3:REG2
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine PUT_CKWORD
+;
+;   Write the 16 bit word in REG1:REG0 to the IP transmit packet identified by
+;   REG8.  The checksum in REG3:REG2 is updated to include the data word.
+;
+         locsub  put_ckword, noregs
+
+         mcall   ckword      ;update the checksum to this data word
+         pushreg reg0        ;temp save low byte on stack
+         movff   reg1, reg0
+         gcall   ip_xmit_write ;write the high byte
+         popreg  reg0
+         gcall   ip_xmit_write ;write the low byte
+         check_yield         ;let other tasks run if needed
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine ICMP_RECV_PACKET
+;
+;   Process a received ICMP packet.  This routine is run by the network
+;   background processing task from the IP module when a IP packet is received
+;   with the protocol ID of ICMP, which is 1.
+;
+;   The received packet is currently open, and must be left open.  When done,
+;   this routine must jump or call to DONE_PACKET, or execute a RETURN at the
+;   same nesting level as on entry.  The data stack is currently empty, and
+;   the call stack contains the single entry to DONE_PACKET.  Extraneous data
+;   may be left on both stacks when jumping to DONE_PACKET.  All the REGn
+;   general registers may be trashed.
+;
+;   The REGn registers currently contain:
+;
+;     REG3:REG2  -  Number of IP payload bytes.
+;
+;     REG7:REG6:REG5:REG4  -  Source IP address.
+;
+;   The current IP payload read offset is set to 0.  In other words, if no
+;   call to IP_RECV_OFS is made, the next call to IP_RECV_READ will return the
+;   first IP packet payload byte.
+;
+;   This ICMP module only handles incoming echo requests and sends out echo
+;   replies in response.  This implements the minimum to respond to "ping"
+;   requests.  All other ICMP packets are ignored.
+;
+         glbent  icmp_recv_packet
+;
+;   Save the number of IP data bytes in REG12:REG11 and init the number of bytes
+;   left to read from the IP packet in REG10:REG9.
+;
+         movf    reg2, w
+         movwf   reg9
+         movwf   reg11
+         movf    reg3, w
+         movwf   reg10
+         movwf   reg12
+
+         movlw   8           ;compute DATA LENGTH - 8
+         subwf   reg9, w
+         movlw   0
+         subwfb  reg10, w
+         btfsc   wreg, 7     ;data length is at least 8 ?
+         return              ;no, too short to be echo request
+;
+;   Examine the ICMP fields and look for any reason to discard this packet.  The
+;   checksum is accumulated in REG3:REG2 as the fields are read.
+;
+         clrf    reg2        ;init the checksum accumulator
+         clrf    reg3
+
+         mcall   get_ckword  ;get TYPE, CODE
+         movf    reg1, w
+         xorlw   8
+         skip_z
+         return              ;type is not 8 (echo request)
+         movf    reg0
+         skip_z
+         return              ;code is not 0
+
+loop_check unbank            ;back here until all data words read
+         mcall   get_ckword  ;get next data word and accumulate into checksum
+         movf    reg9, w
+         iorwf   reg10, w
+         skip_z              ;done reading the whole packet ?
+         jump    loop_check
+         ;
+         ;   The whole ICMP packet has been read and its checksum accumulated
+         ;   in REG3:REG2.  This value must be FFFFh now for the checksum to
+         ;   check.
+         ;
+         movf    reg2, w
+         andwf   reg3
+         xorlw   h'FF'
+         skip_z              ;checksum checks ?
+         return              ;no, outta here
+;
+;   We have a valid ICMP echo request packet.  The registers currently contain:
+;
+;     REG7:REG6:REG5:REG4  -  Source IP address
+;
+;     REG12:REG11  -  Total number of bytes in ICMP packet.
+;
+;   Continue only if ARP resolution for the source IP address is immediately
+;   available.  On the first echo request from a host, it is probably not.
+;   However, the ARP request will cause a ARP packet to be sent, so that IP
+;   address should be in the cache after that.  This means we probably won't
+;   respond to the first echo request from a new host.  Oh well.  We should
+;   however respond to subsequent requests.
+;
+/if icmp_reply_arp then
+         stack_makebuf 4, fsr0l ;allocate space for IP address, point FSR0 to it
+         movff   reg7, postinc0 ;write the IP source IP address into the buffer
+         movff   reg6, postinc0
+         movff   reg5, postinc0
+         movff   reg4, postdec0
+         movf    postdec0    ;restore FSR0 pointing to start of buffer
+         movf    postdec0
+         gcall   arp_resolve ;try to get MAC address for source IP address
+         popstack 4          ;remove IP address from stack
+         movf    fsr0l, w
+         iorwf   fsr0h, w
+         skip_nz             ;MAC address was found for this IP address ?
+         return              ;no, abort if don't have MAC address immediately
+  /endif                     ;end of get reply dest MAC adr by resolving IP adr
+;
+;   Send the ICMP reply packet.
+;
+         movff   reg11, reg0 ;pass number of data bytes needed in REG1:REG0
+         movff   reg12, reg1
+         gcall   ip_xmit_open ;create new IP transmit packet, ID into REG8
+         btfsc   reg8, 7     ;got valid ID, IP packet was created ?
+         return              ;no, abort
+;
+;   Set the reply packet destination MAC address to the request packet source
+;   address.  Technically this is probably a cheat, but puts less burden on our
+;   limited ARP cache.  In practise this should be no problem for this little
+;   embedded system.  Unless something malicious is going on, it should be fine
+;   to send the reply packet to the same MAC address it claims to be from.
+;
+/if [not icmp_reply_arp] then
+         stack_makebuf 6, reg2 ;alloc space for MAC adr, buf adr into REG3:REG2
+         movff   reg2, fsr0l ;point FSR0 to start of MAC adr buffer
+         movff   reg3, fsr0h
+         gcall   netp_recv_src ;get the request packet source MAC address
+         movff   reg2, fsr0l
+         movff   reg3, fsr0h
+         gcall   ip_xmit_dest_mac ;set destination MAC address
+         popstack 6          ;deallocate the temporary MAC address buffer
+  /endif                     ;end of get reply dest MAC adr from request src adr
+
+         movff   reg4, reg0  ;pass IP address in REG3:REG2:REG1:REG0
+         movff   reg5, reg1
+         movff   reg6, reg2
+         movff   reg7, reg3
+/if icmp_reply_arp
+  /then                      ;do ARP resolution to get dest MAC adr
+         gcall   ip_xmit_dest ;set outgoing packet destination addresses
+         btfss   status, c   ;success setting destination addresses ?
+         jump    reply_abort ;no
+  /else                      ;dest MAC adr already set from request src MAC adr
+         gcall   ip_xmit_dest_ip ;set outgoing destination IP address only
+  /endif
+
+         loadk8  reg0, 1     ;set the IP protocol ID to 1
+         gcall   ip_xmit_prot
+;
+;   Copy the received packet data to the transmit packet with a few
+;   modifications.  The TYPE will be set to 0 to indicate a echo reply.  The
+;   checksum will be recomputed.  The remainder of the ICMP message is copied
+;   verbatim.
+;
+         loadk16 reg0, 4
+         gcall   ip_recv_ofs ;set received packet read offset
+         gcall   ip_xmit_ofs ;set transmit packet write offset
+
+         clrf    reg2        ;init checksum accumulator
+         clrf    reg3
+
+         movlw   4           ;init REG10:REG9 to number of bytes left to copy
+         subwf   reg11, w
+         movwf   reg9
+         movlw   0
+         subwfb  reg12, w
+         movwf   reg10
+loop_copy unbank
+         mcall   get_word    ;get received word into REG1:REG0, update bytes left
+         mcall   put_ckword  ;write word to transmit packet, update checksum
+         movf    reg9, w
+         iorwf   reg10, w
+         skip_z              ;hit end of packet ?
+         jump    loop_copy   ;no, go back to copy next word
+
+         loadk16 reg0, 0
+         gcall   ip_xmit_ofs ;set write location to start of packet
+         loadk16 reg0, h'0000' ;TYPE in high byte, CODE in low
+         mcall   put_ckword  ;write TYPE:CODE word to transmit packet
+         ;
+         ;   The only remaining field to write is the ICMP checksum.  The
+         ;   checksum has been accumulated on all the other fields and is in
+         ;   REG3:REG2.  The complement of this checksum is written to the
+         ;   transmit packet.
+         ;
+         comf    reg2, w     ;put complement of the checksum into REG1:REG0
+         movwf   reg0
+         comf    reg3, w
+         movwf   reg1
+         mcall   put_ckword  ;write the ICMP checksum into the IP packet
+
+         gcall   ip_xmit_send ;send the packet
+
+reply_abort unbank           ;abort sending reply with reply packet open, ID in REG8
+         gcall   ip_xmit_close ;release transmit packet and deallocate its resources
+         return

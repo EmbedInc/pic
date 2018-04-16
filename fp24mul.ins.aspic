@@ -1,0 +1,564 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Subroutine FP24MUL
+;
+;   Multiply the 24 bit floating point value in the low 3 bytes of REGA by
+;   the 24 bit floating point value in the low 3 bytes of REGB and put
+;   the result in the low 3 bytes of REGA.
+;
+;   See the comments in FP24FLT for a description of the floating point
+;   format.
+;
+didit    set     0           ;init to no code written
+
+.fp24mul code
+;
+;*******************************************************************************
+;
+;   This section is for PIC 16 family (14 bit core).
+;
+  if fam_16
+didit    set     1           ;this processor is supported
+
+         glbsub  fp24mul, regf3 | regfb | regfc | regf12
+;
+;   Make the combined sign of the result value in the high bit of REG10
+;
+         movf    rega+2, w   ;get REGA sign in high bit
+         xorwf   regb+2, w   ;make combined sign in high bit
+         movwf   reg10       ;save combined sign in high bit of REG10
+;
+;   Now add the exponents to make the combined EXP value in REG11.  Note
+;   that the final EXP value may be 1 more, depending on mantissa values.
+;
+;   Zero will be returned if either input value is found to be zero.
+;
+         movf    rega+2, w   ;get byte with EXP field in low bits
+         andlw   h'7F'       ;mask in EXP field
+         skip_nz             ;this value is not zero ?
+         goto    mag_zero    ;go return zero
+         movwf   reg11       ;save REGA EXP value in REG11
+
+         movf    regb+2, w   ;get byte with second EXP field in low bits
+         andlw   h'7F'       ;mask in EXP field
+         skip_nz             ;this value is not zero ?
+         goto    mag_zero    ;go return zero
+         addwf   reg11       ;add the two EXP values
+         ;
+         ;   The sum of the two EXP field values is in REG11.  Each EXP
+         ;   field is the exponent with an offset of 64, so REG11 has
+         ;   an offset of 128.  Normal EXP values must be in the 1 to
+         ;   127 range, so REG11 must be in the 65 to 191 range.  Return
+         ;   the minimum or maximum magnitude value if REG11 is outside
+         ;   this range.
+         ;
+         movf    reg11, w    ;get the EXP value with offset 128
+         sublw   64          ;compare to first value below range
+         skip_wgt            ;within range ?
+         goto    mag_min     ;go return minimum magnitude number
+
+         movf    reg11, w    ;get the EXP value with offset 128
+         sublw   191         ;compare to last value still within range
+         skip_wle            ;within range ?
+         goto    mag_max     ;go return maximum magnitude number
+         ;
+         ;   REG11 contains the combined EXP value with an offset of 128,
+         ;   and is within range.  Now convert it to the standard offset
+         ;   of 64.
+         ;
+         movlw   64          ;remove additional offset from REG11
+         subwf   reg11
+;
+;   REG11 contains the combined EXP value.
+;
+;   Save the REGA 16 mantissa fraction bits in the low bits of REGC.  These
+;   bits will be used later to decide whether to add the shifted REGB values
+;   for each of the bit positions into REGA.
+;
+         movf    rega+0, w   ;copy byte 0
+         movwf   regc+0
+         movf    rega+1, w   ;copy byte 1
+         movwf   regc+1
+;
+;   Now convert REGB to the fixed point unsigned number where the
+;   mantissa integer 1 bit is in bit 30.  This means the value will be
+;   shifted 14 bits left of where it is now.
+;
+         movf    regb+1, w   ;move the mantissa fraction bits left 16 bits
+         movwf   regb+3
+         movf    regb+0, w
+         movwf   regb+2
+         clrf    regb+0      ;set the new additional fraction bits to 0
+         clrf    regb+1
+
+         bsf     status, c   ;set bit to shift in from left
+         rrf     regb+3      ;shift right one bit, integer 1 bit shifted in
+         rrf     regb+2
+         rrf     regb+1
+
+         bcf     status, c   ;shift right one more bit
+         rrf     regb+3
+         rrf     regb+2
+         rrf     regb+1
+;
+;   Copy the REGB value into REGA.  REGA will be the accumulator where the
+;   shifted versions of REGB will be added into.  This initial copy represents
+;   the add due to the mantissa integer bit of REGA.  This bit is implied
+;   by the floating point format, and is always 1 (unless the whole number
+;   is 0, which was already checked).
+;
+         copy32  rega, regb
+;
+;   Now perform the shift and add loop at the heart of the multiply operation.
+;   The original mantissa fraction bits of REGA have been saved in the low
+;   bits of REGC.  REGB contains its whole mantissa value with an additional
+;   14 fraction bits.  A shifted version of REGB will be added into REGA
+;   for each 1 bit in the original REGA mantissa.  Note that REGA has already
+;   been initialized with the REGB value to account for the implied REGA
+;   mantissa integer 1 bit.
+;
+loop_add                     ;back here each new bit position
+         movf    regc+0, w   ;set Z if no more 1 bits left to cause another add
+         iorwf   regc+1, w
+         skip_nz             ;not yet done with all the adds ?
+         goto    done_add    ;done with all the shift and add operations
+         ;
+         ;   Shift REGB right by one bit to make the value to add into
+         ;   REGA for this bit position.
+         ;
+         shift32rl1 regb     ;shift REGB right by one bit
+         ;
+         ;   Add REGB into REGA if bit 15 of REGC is 1.
+         ;
+         btfss   regc+1, 7   ;add this REGB value into REGA ?
+         goto    skip_add    ;bit is 0, skip the add
+         add32   rega, regb, reg12 ;add REGA + REGB --> REGA, REG12 used as scratch
+skip_add                     ;skip to here to avoid doing the add
+         ;
+         ;   Shift the low 16 bits of REGC left by one bit to position the
+         ;   next add decision bit in bit 15.
+         ;
+         bcf     status, c   ;set bit to shift in at right
+         rlf     regc+0      ;shift the 16 bit value left one bit
+         rlf     regc+1
+         goto    loop_add    ;back to do this new bit position
+done_add                     ;done with the shift and add loop
+;
+;   The fixed point product is in REGA with an additional 14 fraction bits
+;   from the normal mantissa format.
+;
+;   Now shift this value right 14 bits and do the proper roundoff.  Also
+;   note that the multiply operation could have created a value that
+;   needs one more shift right such that the final mantissa integer part
+;   is 1.
+;
+         ;
+         ;   Do raw shift right 6 bits of the high 3 bytes.  The last bit
+         ;   shifted out is saved because it may be needed for rounding.
+         ;
+         bcf     status, c   ;bit shift 1
+         rrf     rega+3
+         rrf     rega+2
+         rrf     rega+1
+         bcf     status, c   ;bit shift 2
+         rrf     rega+3
+         rrf     rega+2
+         rrf     rega+1
+         bcf     status, c   ;bit shift 3
+         rrf     rega+3
+         rrf     rega+2
+         rrf     rega+1
+         bcf     status, c   ;bit shift 4
+         rrf     rega+3
+         rrf     rega+2
+         rrf     rega+1
+         bcf     status, c   ;bit shift 5
+         rrf     rega+3
+         rrf     rega+2
+         rrf     rega+1
+         bcf     status, c   ;bit shift 6
+         rrf     rega+3
+         rrf     rega+2
+         rrf     rega+1
+
+         rrf     rega+0      ;save last bit shifted out in REGA bit 7
+         ;
+         ;   Shift an additional bit right if the resulting mantissa integer
+         ;   value is not 1.  The mantissa integer part is now in REGA+3,
+         ;   and could be either 1, 2, or 3.  The combined EXP value is
+         ;   updated accordingly if the extra shift is performed.  The
+         ;   maximum magnitude number is returned if EXP overflows.
+         ;
+         decf    rega+3, w   ;set Z if mantissa integer part is 1
+         skip_nz             ;need to shift right one more bit ?
+         goto    skip_shift1 ;integer part already 1, skip the additional shift
+
+         incf    reg11       ;update EXP value to account for additional shift
+         movf    reg11, w    ;get the new EXP value
+         sublw   127         ;compare it to the max valid EXP value
+         skip_wle            ;new EXP value is still within range ?
+         goto    mag_max     ;go return the maximum magnitude number
+
+         rrf     rega+3      ;shift the value right by one bit
+         rrf     rega+2
+         rrf     rega+1
+         rrf     rega+0      ;save last bit shifted out in REGA bit 7
+skip_shift1
+;
+;   REGA contains the new mantissa value with an additional 8 fraction bits.
+;   The low 7 bits of REGA are trash.  Now round the mantissa value in
+;   the high 24 bits of REGA.  This means the high 24 bits of REGA will be
+;   incremented by 1 if REGA bit 7 is one.  Since this could cause a carry
+;   into the integer part of the mantissa, the mantissa may again need to
+;   be shifted one bit right and the EXP value in REG11 updated accordingly.
+;
+         btfss   rega+0, 7   ;need to round mantissa up by 1 ?
+         goto    done_round  ;next lower bit is 0, value already rounded
+
+         incfsz  rega+1      ;increment the low mantissa byte
+         goto    done_round  ;no carry into next byte
+         incfsz  rega+2      ;increment the high mantissa fraction byte
+         goto    done_round  ;no carry into integer part
+         ;
+         ;   The rounding operation has produced a carry into the mantissa
+         ;   integer part.  That means the integer part is now 2, even
+         ;   though REGA+3 has not been updated.  The mantissa fraction in
+         ;   REGA+2,REGA+1 is shifted right by one bit and EXP adjusted
+         ;   accordingly.
+         ;
+         incf    reg11       ;update EXP value to account for additional shift
+         movf    reg11, w    ;get the new EXP value
+         sublw   127         ;compare it to the max valid EXP value
+         skip_wle            ;new EXP value is still within range ?
+         goto    mag_max     ;go return the maximum magnitude number
+
+         bcf     status, c   ;set bit to shift in at left
+         rrf     rega+2      ;shift mantissa fraction right one bit
+         rrf     rega+1
+done_round                   ;done rounding mantissa value
+;
+;   The final mantissa fraction is in REGA+2,REGA+1, the EXP value is
+;   in REG11, and the final sign is in the high bit of REG10.
+;
+;   Now combine these pieces into the right bits of REGA to make the
+;   final floating point number to return.
+;
+         movf    rega+1, w   ;move the mantissa fraction bits into final place
+         movwf   rega+0
+         movf    rega+2, w
+         movwf   rega+1
+
+         movf    reg11, w    ;get the EXP value
+         movwf   rega+2      ;set the EXP field in REGA
+
+set_sign                     ;all is set except sign bit
+         bcf     rega+2, 7   ;set the sign assuming positive
+         btfsc   reg10, 7    ;sign is indeed positive ?
+         bsf     rega+2, 7   ;set the sign bit for negative value
+
+mul_leave                    ;common exit point
+         leaverest
+;
+;   Return the maximum magnitude value.  The original FP sign bit is still
+;   in the high bit of REGA+2.
+;
+mag_max
+         movlw   h'FF'
+         movwf   rega+0
+         movwf   rega+1
+         movwf   rega+3
+         goto    set_sign    ;go set the sign bit and return
+;
+;   Return the minimum magnitude value.
+;
+mag_min
+;
+;   Return zero.
+;
+mag_zero
+         clrf    rega+0
+         clrf    rega+1
+         clrf    rega+2
+         goto    mul_leave
+    endif                    ;end of PIC 16 case
+;
+;*******************************************************************************
+;
+;   This section is for PIC 18 family (16 bit core).
+;
+  if fam_18
+didit    set     1           ;this processor is supported
+
+         glbsub  fp24mul, regf3 | regfb | regfc | regf12
+;
+;   Make the combined sign of the result value in the high bit of REG10
+;
+         movf    rega+2, w   ;get REGA sign in high bit
+         xorwf   regb+2, w   ;make combined sign in high bit
+         movwf   reg10       ;save combined sign in high bit of REG10
+;
+;   Now add the exponents to make the combined EXP value in REG11.  Note
+;   that the final EXP value may be 1 more, depending on mantissa values.
+;
+;   Zero will be returned if either input value is found to be zero.
+;
+         movf    rega+2, w   ;get byte with EXP field in low bits
+         andlw   h'7F'       ;mask in EXP field
+         skip_nz             ;this value is not zero ?
+         jump    mag_zero    ;is zero
+         movwf   reg11       ;save REGA EXP value in REG11
+
+         movf    regb+2, w   ;get byte with second EXP field in low bits
+         andlw   h'7F'       ;mask in EXP field
+         skip_nz             ;this value is not zero ?
+         jump    mag_zero    ;is zero
+         addwf   reg11       ;add the two EXP values
+         ;
+         ;   The sum of the two EXP field values is in REG11.  Each EXP
+         ;   field is the exponent with an offset of 64, so REG11 has
+         ;   an offset of 128.  Normal EXP values must be in the 1 to
+         ;   127 range, so REG11 must be in the 65 to 191 range.  Return
+         ;   the minimum or maximum magnitude value if REG11 is outside
+         ;   this range.
+         ;
+         movf    reg11, w    ;get the EXP value with offset 128
+         sublw   64          ;compare to first value below range
+         skip_wgt
+         jump    mag_min     ;below range, return minimum magnitude number
+
+         movf    reg11, w    ;get the EXP value with offset 128
+         sublw   191         ;compare to last value still within range
+         jmp_wgt mag_max     ;above range, return maximum magnitude number
+         ;
+         ;   REG11 contains the combined EXP value with an offset of 128,
+         ;   and is within range.  Now convert it to the standard offset
+         ;   of 64.
+         ;
+         movlw   64          ;remove additional offset from REG11
+         subwf   reg11
+;
+;   REG11 contains the combined EXP value.
+;
+;   Save the REGA 16 mantissa fraction bits in the low bits of REGC.  These
+;   bits will be used later to decide whether to add the shifted REGB values
+;   for each of the bit positions into REGA.
+;
+         movf    rega+0, w   ;copy byte 0
+         movwf   regc+0
+         movf    rega+1, w   ;copy byte 1
+         movwf   regc+1
+;
+;   Now convert REGB to the fixed point unsigned number where the
+;   mantissa integer 1 bit is in bit 30.  This means the value will be
+;   shifted 14 bits left of where it is now.
+;
+         movf    regb+1, w   ;move the mantissa fraction bits left 16 bits
+         movwf   regb+3
+         movf    regb+0, w
+         movwf   regb+2
+         clrf    regb+0      ;set the new additional fraction bits to 0
+         clrf    regb+1
+
+         bsf     status, c   ;set bit to shift in from left
+         rrcf    regb+3      ;shift right one bit, integer 1 bit shifted in
+         rrcf    regb+2
+         rrcf    regb+1
+
+         bcf     status, c   ;shift right one more bit
+         rrcf    regb+3
+         rrcf    regb+2
+         rrcf    regb+1
+;
+;   Copy the REGB value into REGA.  REGA will be the accumulator where the
+;   shifted versions of REGB will be added into.  This initial copy represents
+;   the add due to the mantissa integer bit of REGA.  This bit is implied
+;   by the floating point format, and is always 1 (unless the whole number
+;   is 0, which was already checked).
+;
+         copy32  rega, regb
+;
+;   Now perform the shift and add loop at the heart of the multiply operation.
+;   The original mantissa fraction bits of REGA have been saved in the low
+;   bits of REGC.  REGB contains its whole mantissa value with an additional
+;   14 fraction bits.  A shifted version of REGB will be added into REGA
+;   for each 1 bit in the original REGA mantissa.  Note that REGA has already
+;   been initialized with the REGB value to account for the implied REGA
+;   mantissa integer 1 bit.
+;
+loop_add                     ;back here each new bit position
+         movf    regc+0, w   ;set Z if no more 1 bits left to cause another add
+         iorwf   regc+1, w
+         bz      done_add    ;done with all the shift and add operations ?
+         ;
+         ;   Shift REGB right by one bit to make the value to add into
+         ;   REGA for this bit position.
+         ;
+         shift32rl1 regb     ;shift REGB right by one bit
+         ;
+         ;   Add REGB into REGA if bit 15 of REGC is 1.
+         ;
+         btfss   regc+1, 7   ;add this REGB value into REGA ?
+         jump    skip_add    ;bit is 0, skip the add
+         add32   rega, regb, reg12 ;add REGA + REGB --> REGA, REG12 used as scratch
+skip_add                     ;skip to here to avoid doing the add
+         ;
+         ;   Shift the low 16 bits of REGC left by one bit to position the
+         ;   next add decision bit in bit 15.
+         ;
+         bcf     status, c   ;set bit to shift in at right
+         rlcf    regc+0      ;shift the 16 bit value left one bit
+         rlcf    regc+1
+         jump    loop_add    ;back to do this new bit position
+
+done_add                     ;done with the shift and add loop
+;
+;   The fixed point product is in REGA with an additional 14 fraction bits
+;   from the normal mantissa format.
+;
+;   Now shift this value right 14 bits and do the proper roundoff.  Also
+;   note that the multiply operation could have created a value that
+;   needs one more shift right such that the final mantissa integer part
+;   is 1.
+;
+         ;
+         ;   Do raw shift right 6 bits of the high 3 bytes.  The last bit
+         ;   shifted out is saved because it may be needed for rounding.
+         ;
+         bcf     status, c   ;bit shift 1
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         bcf     status, c   ;bit shift 2
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         bcf     status, c   ;bit shift 3
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         bcf     status, c   ;bit shift 4
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         bcf     status, c   ;bit shift 5
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         bcf     status, c   ;bit shift 6
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+
+         rrcf    rega+0      ;save last bit shifted out in REGA bit 7
+         ;
+         ;   Shift an additional bit right if the resulting mantissa integer
+         ;   value is not 1.  The mantissa integer part is now in REGA+3,
+         ;   and could be either 1, 2, or 3.  The combined EXP value is
+         ;   updated accordingly if the extra shift is performed.  The
+         ;   maximum magnitude number is returned if EXP overflows.
+         ;
+         decf    rega+3, w   ;set Z if mantissa integer part is 1
+         bz      skip_shift1 ;integer part already 1, skip the additional shift ?
+
+         incf    reg11       ;update EXP value to account for additional shift
+         movf    reg11, w    ;get the new EXP value
+         sublw   127         ;compare it to the max valid EXP value
+         jmp_wgt mag_max     ;new EXP is above range, return max magnitude number ?
+
+         rrcf    rega+3      ;shift the value right by one bit
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0      ;save last bit shifted out in REGA bit 7
+skip_shift1
+;
+;   REGA contains the new mantissa value with an additional 8 fraction bits.
+;   The low 7 bits of REGA are trash.  Now round the mantissa value in
+;   the high 24 bits of REGA.  This means the high 24 bits of REGA will be
+;   incremented by 1 if REGA bit 7 is one.  Since this could cause a carry
+;   into the integer part of the mantissa, the mantissa may again need to
+;   be shifted one bit right and the EXP value in REG11 updated accordingly.
+;
+         btfss   rega+0, 7   ;need to round mantissa up by 1 ?
+         jump    done_round  ;next lower bit is 0, value already rounded
+
+         incfsz  rega+1      ;increment the low mantissa byte
+         jump    done_round  ;no carry into next byte
+         incfsz  rega+2      ;increment the high mantissa fraction byte
+         jump    done_round  ;no carry into integer part
+         ;
+         ;   The rounding operation has produced a carry into the mantissa
+         ;   integer part.  That means the integer part is now 2, even
+         ;   though REGA+3 has not been updated.  The mantissa fraction in
+         ;   REGA+2,REGA+1 is shifted right by one bit and EXP adjusted
+         ;   accordingly.
+         ;
+         incf    reg11       ;update EXP value to account for additional shift
+         movf    reg11, w    ;get the new EXP value
+         sublw   127         ;compare it to the max valid EXP value
+         jmp_wgt mag_max     ;EXP above range, return maximum magnitude number ?
+
+         bcf     status, c   ;set bit to shift in at left
+         rrcf    rega+2      ;shift mantissa fraction right one bit
+         rrcf    rega+1
+done_round                   ;done rounding mantissa value
+;
+;   The final mantissa fraction is in REGA+2,REGA+1, the EXP value is
+;   in REG11, and the final sign is in the high bit of REG10.
+;
+;   Now combine these pieces into the right bits of REGA to make the
+;   final floating point number to return.
+;
+         movf    rega+1, w   ;move the mantissa fraction bits into final place
+         movwf   rega+0
+         movf    rega+2, w
+         movwf   rega+1
+
+         movf    reg11, w    ;get the EXP value
+         movwf   rega+2      ;set the EXP field in REGA
+
+set_sign                     ;all is set except sign bit, sign bit currently 0
+         btfsc   reg10, 7    ;sign is positive ?
+         bsf     rega+2, 7   ;set the sign bit for negative value
+
+mul_leave                    ;common exit point
+         leaverest
+;
+;   Return the maximum magnitude value.  The original FP sign bit is still
+;   in the high bit of REGA+2.
+;
+mag_max
+         loadk24 rega, h'7FFFFF'
+         jump    set_sign    ;go set the sign bit and return
+;
+;   Return the minimum magnitude value.
+;
+mag_min
+;
+;   Return zero.
+;
+mag_zero
+         loadk24 rega, 0
+         jump    mul_leave
+    endif                    ;end of PIC 18 case
+;
+;*******************************************************************************
+;
+;   Check that code was emitted for this processor.
+;
+  if !didit
+         error   FP24MUL not implemented for this processor.
+    endif

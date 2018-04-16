@@ -1,0 +1,592 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Task that performs the background operations of the network stack.
+;
+         extern  tick100ms   ;automatically incremented every 100mS
+         extern  currtask    ;0-N number of the current task
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+stacksz  equ     128         ;size of network task data stack
+lbank    equ     [v lbank_net_task] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+our_mac  res     6           ;our network MAC address, high to low byte order
+our_ip   res     4           ;our IP address, high to low byte order
+netmask  res     4           ;mask for our network segment, high to low order
+gateway  res     4           ;gateway IP address, high to low byte order
+
+         global  our_mac, our_ip, netmask, gateway
+
+/if [<> pack_recv_call ""] then
+netrmsk  res     1           ;mask of what type of received packets to report
+         global  netrmsk
+  /endif
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+ntask_id res     1           ;ID of the network task
+ndat     res     2           ;received packet data payload size in bytes
+tylen    res     2           ;received packet type/length word
+buf      res     6           ;scratch buffer, must hold at least MAC address
+lastick  res     1           ;last 100mS tick value udpated to
+
+.ntask_stack udata
+ntask_stack res  stacksz     ;data stack for the network task
+
+  if debug
+         global  ntask_id, ndat, tylen, lastick
+    endif
+
+
+.ntask   code
+
+;*******************************************************************************
+;
+;   Subroutine NETWORK_INIT
+;
+;   Initialize the individual modules of the networking system.  This routine
+;   is intended to be called from the STRT module before system-level
+;   initialization.
+;
+         glbsub  network_init, noregs
+
+         dbankif gbankadr
+         bcf     flag_netready
+         bcf     flag_dhcp
+
+         gcallnr net_packet_init ;init network packet I/O layer
+         rcall   net_task_init ;init background network task state
+
+/if using_net_arp then
+         gcallnr net_arp_init ;init ARP (Address Resolution Protocol) module
+  /endif
+
+/if using_net_ip then
+         gcallnr net_ip_init ;init IP (Internet Protocol) module
+  /endif
+
+/if using_net_icmp then
+         gcallnr net_icmp_init ;init ICMP (Internet Control Message Protocol) module
+  /endif
+
+/if using_net_tcp then
+         gcallnr net_tcp_init ;init TCP module
+  /endif
+
+/if using_net_udp then
+         gcallnr net_udp_init ;init UDP moduled
+  /endif
+
+/if using_net_dhcp then
+         gcallnr net_dhcp_init ;init DHCP module
+  /endif
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Suboutine NET_IPCONFIG_CLEAR
+;
+;   Clear the IP configuration to unknown.
+;
+         glbsub  net_ipconfig_clear, noregs
+
+         dbankif gbankadr
+         clrf    our_ip+0    ;set our IP address to invalid
+         clrf    our_ip+1
+         clrf    our_ip+2
+         clrf    our_ip+3
+
+         clrf    netmask+0   ;set the mask for our network to invalid
+         clrf    netmask+1
+         clrf    netmask+2
+         clrf    netmask+3
+
+         clrf    gateway+0   ;set the gateway IP address to invalid
+         clrf    gateway+1
+         clrf    gateway+2
+         clrf    gateway+3
+
+         bcf     flag_ipconfig ;indicate IP configuration not set
+         bcf     flag_netready ;netword system definitely not ready for app
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NET_CKSUM_INIT
+;
+;   Initialize the network checksum accumulator in REG3:REG2.  After this call,
+;   NET_CKSUM_WORD may be called for each word to include in the checksum.
+;
+;   Most protocols then store the complement of the result in the packet.  When
+;   a packet is received, the same checksum procedure is performed on all the
+;   words covered by the checksum, including the checksum itself.  The data is
+;   considered valid if the result is FFFFh.  This is the process used by most
+;   protocols, including IP and TCP.
+;
+         glbsub  net_cksum_init, noregs
+
+         clrf    reg2
+         clrf    reg3
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NET_CKSUM_WORD
+;
+;   Add the word in REG1:REG0 to the internet checksum being accumulated in
+;   REG3:REG2.  The checksum algorithm is that use by IP, TCP, etc.
+;
+         glbsub  net_cksum_word, noregs
+
+         movf    reg0, w     ;add the new word into the checksum
+         addwf   reg2
+         movf    reg1, w
+         addwfc  reg3
+         movlw   0           ;wrap the carry back into the low end
+         addwfc  reg2
+         addwfc  reg3
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NET_TASK_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  net_task_init, noregs
+
+         dbankif gbankadr
+/if [<> pack_recv_call ""] then
+         clrf    netrmsk     ;init all network packet reporting to disabled
+  /endif
+
+         clrf    our_mac+0   ;init our MAC address to invalid
+         clrf    our_mac+1
+         clrf    our_mac+2
+         clrf    our_mac+3
+         clrf    our_mac+4
+         clrf    our_mac+5
+
+         mcall   net_ipconfig_clear ;init IP configuration to unknown
+
+         dbankif lbankadr
+         setf    ntask_id    ;indicate network task ID is not known
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETWORK_START
+;
+;   Start the network system.  Nothing is done if it is already running.
+;
+         glbsub  network_start, regf0 | regf1 | regf2 | regf3 | regf4
+
+         dbankif gbankadr
+         btfsc   flag_netrun ;network system not already running ?
+         jump    netstart_leave ;already running, nothing to do
+         bsf     flag_netrun ;will now be running
+         bcf     flag_netstop ;init to not try to stop
+
+         task_create ntask, ntask_stack ;create the network background task
+
+netstart_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETWORK_STOP
+;
+;   Stop the network system.  It may take a bit of time to fully stop the
+;   network system.  This routine does not return until the network system has
+;   been stopped.  Nothing is done if the network system is already stopped.
+;
+         glbsub  network_stop, noregs
+
+         dbankif gbankadr
+         btfss   flag_netrun ;network system is currently running ?
+         jump    netstop_leave ;no, nothing more to do
+         bsf     flag_netstop ;tell system to stop
+
+netstop_wait unbank          ;back here until network system actually stopped
+         gcall   task_yield_save ;give other tasks a chance to run
+         dbankif gbankadr
+         btfsc   flag_netrun ;system has stopped ?
+         jump    netstop_wait ;not yet
+
+netstop_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETWORK_WAIT_READY
+;
+;   Wait for the network system to be ready for application use.  This routine
+;   will wait forever until the network system is started and ready, and will
+;   return quickly if the network system is already ready.
+;
+         glbsub  network_wait_ready, noregs
+
+nwait_loop unbank
+         dbankif gbankadr
+         btfsc   flag_netready ;not ready yet ?
+         jump    nwait_leave ;is ready now
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    nwait_loop  ;back and check again
+
+nwait_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine NTASK
+;
+;   This routine runs the network background task.  It performs all the network
+;   stack operations that are not the direct result of deliberate application
+;   networking calls.
+;
+ntask    unbank
+         movff   currtask, ntask_id ;save ID of this task
+
+ntask_restart unbank         ;back here to restart task from arbitrary state
+         clrf    stkptr      ;reset the call stack to empty
+         intr_off            ;interrupts off while stack pointer inconsistant
+         stack_set ntask_stack ;reset the data stack to empty
+         intr_on             ;re-enable interrupts
+
+         dbankif gbankadr
+         bcf     flag_netready ;init to network system not ready for app use
+;
+;   Call application routines to get our MAC address unless it is known the
+;   packet layer will supply the MAC address or the MAC address is already set.
+;
+/if [not [= get_macadr_call ""]] then
+         dbankif gbankadr
+         btfsc   flag_macadr ;don't already have MAC address ?
+         jump    d_getmac
+         btfsc   flag_macpack ;MAC address won't come from packet layer ?
+         jump    d_getmac
+         gcall   [chars get_macadr_call] ;call app routine to set MAC address
+         iorlw   0
+         skip_z              ;app routine failed to set MAC address
+         bsf     flag_macadr ;did set MAC address
+d_getmac unbank              ;done explicitly getting MAC address
+  /endif
+;
+;   Call the application routine to set the IP configuration, as appropriate.
+;   See the comments for GET_IPCONFIG_CALL in xxx_NETWORK.INS.ASPIC for a
+;   discussion of this mechanism.
+;
+/if [not [= get_ipconfig_call ""]] then ;configured to call application routine ?
+         dbankif gbankadr
+         btfsc   flag_ipconfig ;IP configuration not already set ?
+         jump    d_ipconfig
+         btfsc   flag_dhcp   ;not using DHCP to get IP config ?
+         jump    d_ipconfig
+         gcall   [chars get_ipconfig_call] ;call app routine to set IP config
+         dbankif gbankadr
+         iorlw   0           ;set Z iff app didn't set IP config
+         skip_z              ;IP config didn't get set ?
+         jump    ipisset     ;it did get set
+         ;
+         ;   The IP configuration did not get set.
+         ;
+  /if using_net_dhcp then    ;configured for DHCP capability
+         bsf     flag_dhcp   ;enable DHCP to get IP config
+    /endif
+         mcall   net_ipconfig_clear ;reset IP config to the official unset state
+         jump    d_ipconfig
+         ;
+         ;   The IP configuration did get set.
+         ;
+ipisset  dbankis gbankadr
+         bsf     flag_ipconfig ;indicate IP config is all set
+         bcf     flag_dhcp   ;indicate not using DHCP
+d_ipconfig unbank            ;done explicitly getting the IP configuration
+  /endif                     ;end of at least one IP config call enabled
+
+         gcall   netp_setup  ;reset packet layer and start packet reception
+         movff   tick100ms, lastick ;init last 100mS tick updated to
+;
+;***************************************
+;
+;   Main loop.  This task comes back here in a infinite loop to process each
+;   new received network packet.
+;
+ntask_loop unbank            ;top of main event loop for this task
+         gcall   task_yield  ;let all other tasks run for a bit
+;
+;   Check for trying to shut down network system.
+;
+         dbankif gbankadr
+         btfss   flag_netstop ;trying to stop ?
+         jump    ntask_nstop ;no, skip this section
+
+         bcf     flag_netstop ;will stop, clear pending stop flag
+         bcf     flag_netready ;network system is not ready for app use
+         bcf     flag_netrun ;indicate network system is stopped
+         gcall   task_exit   ;end this task
+
+ntask_nstop dbankis gbankadr
+;
+;   Check for new 100mS tick.
+;
+ntask_chktick unbank         ;check for a new 100mS tick
+         dbankif gbankadr
+         movf    tick100ms, w ;get current 100mS clock tick counter
+         dbankif lbankadr
+         xorwf   lastick, w  ;compare to last value updated to
+         bz      no_tick     ;no new 100mS clock tick
+         incf    lastick     ;update tick value updated to
+         ;
+         ;   A new 100mS tick has occurred.
+         ;
+         ;   Check network link status and reset if no link.
+         ;
+         gcall   netp_checklink ;check link status
+         dbankif gbankadr
+         btfsc   flag_link   ;lost network link ?
+         jump    ntask_hlink ;no, skip this section
+
+/if using_net_dhcp then      ;configured for DHCP capability
+         gcall   dhcp_reset  ;reset DHCP state if using DHCP
+  /endif
+         jump    ntask_restart ;no link, restart this task
+
+ntask_hlink dbankis gbankadr ;we are linked to the network
+         ;
+         ;   Set FLAG_NETREADY according to the current network status.  When
+         ;   set, this flag indicates that the network routines are ready for
+         ;   use by the application.
+         ;
+         dbankif gbankadr
+         bcf     flag_netready ;init to the network is not ready for app use
+
+         btfss   flag_macready ;the MAC is ready for use ?
+         jump    ntask_dready ;no
+         btfss   flag_macadr ;the MAC address is known and set ?
+         jump    ntask_dready ;no
+         btfss   flag_ipconfig ;our IP configuration is known and set ?
+         jump    ntask_dready ;no
+
+         bsf     flag_netready ;all ready for application use
+ntask_dready                 ;done determining readiness
+         ;
+         ;   Call the 100mS tick routines of each protocol module.
+         ;
+/if using_net_arp then
+         gcall   arp_100ms   ;do ARP 100mS tick processing
+         gcall   task_yield
+  /endif
+
+/if using_net_tcp then
+         gcall   tcp_100ms   ;do TCP 100mS tick processing
+         gcall   task_yield
+  /endif
+
+/if using_net_dhcp then
+         gcall   dhcp_100ms  ;do DHCP 100mS tick processing
+         gcall   task_yield
+  /endif
+
+         jump    ntask_chktick ;back to check for next tick
+
+no_tick  dbankis lbankadr    ;no new tick this time
+;
+;   Check for new received network packet available.
+;
+         gcall   netp_recv_check
+         btfss   status, c   ;a new packet has been received ?
+         jump    ntask_loop  ;nothing new has been received
+;
+;   A new network packet has been received.
+;
+recv_packet unbank
+         gcall   netp_recv_open ;init for reading packet, payload size into REG1:REG0
+         movff   reg0, ndat+0 ;save number of data bytes in NDAT
+         movff   reg1, ndat+1
+
+         gcall   netp_recv_type ;get packet type/length word into REG1:REG0
+         movff   reg0, tylen+0 ;save it in TYLEN
+         movff   reg1, tylen+1
+;
+;   Report the packet to the application if this is enabled and the appropriate
+;   bit in NETRMSK is set.
+;
+/if [<> pack_recv_call ""] then ;a callback routine is defined ?
+  /show "  Received packet callback routine: " pack_recv_call
+
+         dbankif gbankadr
+         movf    netrmsk, w  ;get mask of types of packets enabled for reporting
+         bz      done_pkreport ;all types disabled for reporting ?
+         movwf   reg0        ;save mask in REG0
+
+         lfsr    0, buf      ;get the packet destination address into BUF
+         gcall   netp_recv_dest
+
+         dbankif lbankadr
+         btfsc   buf+0, 0    ;this is a unicast packet ?
+         jump    rep_nuni    ;no
+         btfsc   reg0, 0     ;is unicast, unicast reporting disabled ?
+         jump    reportpk    ;enabled, go report the packet
+         jump    done_pkreport ;disabled
+rep_nuni                     ;packet is not unicast
+         movf    buf+0, w    ;make AND of all destination address bytes
+         andwf   buf+1, w
+         andwf   buf+2, w
+         andwf   buf+3, w
+         andwf   buf+4, w
+         andwf   buf+5, w
+         xorlw   h'FF'
+         bnz     rep_multi   ;multicast, not broadcast
+         btfss   reg0, 1     ;is broadcast, broadcast reporting enabled ?
+         jump    done_pkreport ;no, don't report this packet
+         jump    reportpk    ;yes, go report this packet
+rep_multi                    ;packet is multicast but not broadcast
+         btfss   reg0, 2     ;multicast reporting enabled ?
+         jump    done_pkreport ;no, don't report the packet
+         ;
+         ;   Report this packet to the application.
+         ;
+reportpk unbank
+         movff   ndat+0, reg0 ;pass data length of the packet
+         movff   ndat+1, reg1
+         gcall   [chars pack_recv_call] ;call app routine to report this packet
+         loadk16 reg0, 0
+         gcall   netp_recv_ofs ;restore packet read offset to start of data
+         gcall   task_yield  ;give other tasks a chance to run
+
+done_pkreport unbank         ;done reporting packet to callback routine
+  /endif                     ;end of callback routine is defined
+;
+;   Run the specific routine to process this packet, if any.  The packet
+;   TYPE/LENGTH word is in TYLEN, and the number of payload bytes in NDAT.
+;
+;   This module deals with the common mechanics of receiving packets.  It does
+;   not perform the actual interpretation or processing of these packets.  It
+;   only determines which subsystem, if any, a packet should be processed by
+;   and runs the received packet processing routine for that subsystem.
+;
+;   All packet processing routines have the same interface.  They are always run
+;   from top level code, all registers may be trashed, they must leave the
+;   packet open, and they must return to DONE_PACKET one way or another.  This
+;   can be done by jumping to the global DONE_PACKET, by calling it, or by
+;   executing a RETURN at the same nesting level as on entry to the routine.
+;
+;   On entry, the call stack will contain the single entry to DONE_PACKET, the
+;   data stack will be empty, the packet read offset will be at the first
+;   payload byte, and some of the registers will contain specific data:
+;
+;     REG3:REG2  -  Type/length word.
+;
+;     REG5:REG4  -  Number of payload data bytes.
+;
+         clrf    stkptr      ;make sure the call stack is empty (should already be)
+         push                ;create one stack entry
+         movlw   low done_packet ;set the stack entry to DONE_PACKET
+         movwf   tosl
+         movlw   high done_packet
+         movwf   tosh
+         movlw   upper done_packet
+         movwf   tosu
+
+         movff   tylen+0, reg2 ;pass type/length word in REG3:REG2
+         movff   tylen+1, reg3
+         movff   ndat+0, reg4 ;pass number of data bytes in REG5:REG4
+         movff   ndat+1, reg5
+;
+;   Current register contents:
+;
+;     REG3:REG2  -  Type/length word from packet.
+;
+;     REG5:REG4  -  Number of payload data bytes.
+;
+;   Check for ARP packet.  This is identified by the type/length word being
+;   0806h.
+;
+/if using_net_arp then
+         movlw   h'06'
+         xorwf   reg2, w
+         bnz     not_arp
+         movlw   h'08'
+         xorwf   reg3, w
+         bnz     not_arp
+
+         extern  arp_recv_packet
+         gjump   arp_recv_packet ;go process the ARP packet
+
+not_arp  unbank
+  /endif
+;
+;   Check for IP packet.  This is identified by the type/length word being
+;   0800h.
+;
+/if using_net_ip then
+         movf    reg2
+         bnz     not_ip
+         movlw   h'08'
+         xorwf   reg3, w
+         bnz     not_ip
+
+         extern  ip_recv_packet
+         gjump   ip_recv_packet ;go process the IP packet
+
+not_ip   unbank
+  /endif
+;
+;   DONE_PACKET
+;
+;   Global return point for done processing the current received packet.  The
+;   call and data stacks may be in any state, and will both be reset to empty.
+;   The current received packet must still be open, and will be closed.  This
+;   allows the hardware to overwrite the packet data, so it can not be accessed
+;   further.
+;
+;   Since the stacks will be reset to empty, this entry point can be called
+;   instead of jumped to directly.  That allows for implementing packet
+;   processing routines in C, which has no direct jump facility.
+;
+         glbent  done_packet ;return point for packet processing routines
+
+         clrf    stkptr      ;reset the call stack to empty
+         intr_off            ;interrupts off while stack pointer inconsistant
+         stack_set ntask_stack ;reset the data stack to empty
+         intr_on             ;re-enable interrupts
+
+         gcall   netp_recv_close ;done with this network packet
+         jump    ntask_loop  ;back to event loop

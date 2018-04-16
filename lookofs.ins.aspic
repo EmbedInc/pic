@@ -1,0 +1,76 @@
+;   Subroutine LOOKOFS
+;
+;   Perform a lookup into a table of constants.  The 8 bit value from the
+;   table is returned in W.  The table parameters are passed in the registers
+;   as follows:
+;
+;     REG1  -  Table start address low byte.
+;     REG2  -  Table start address high byte.
+;     REG3  -  Offset of the entry to look up.  The offset of the first entry
+;              is 0.
+;
+;   REG3 is incremented by 1.  Successive calls to LOOKOFS therefore return
+;   successive table entry values.  This routine does not trash the current
+;   register page settings.
+;
+.lookofs code
+         glbsub  lookofs, noregs
+
+;********************
+;
+;   For 16C and 12C processors.
+;
+;   On this processor, tables of constants are implemented as successive
+;   RETLW instructions, each encoded with the specific 8 bit value for that
+;   table entry.
+;
+  if fam_12 || fam_16c5 || fam_16
+
+         movf    reg2, w     ;get table address high byte
+         movwf   pclath      ;init high bits of table entry address
+         movf    reg1, w     ;get table address low byte
+         addwf   reg3, w     ;make entry low byte and and set carry to high byte
+         btfsc   status, c   ;no carry to address high byte ?
+         incf    pclath      ;propate carry to address high byte
+         incf    reg3        ;increment offset to indicate next table entry
+         movwf   pcl         ;jump to table entry, loads W and returns to caller
+
+    endif                    ;end of 12C and 16C families
+
+;********************
+;
+;   For 17C processors.
+;
+;   This processor has 16 bit program memory words, so two bytes of data can
+;   be stored in each instruction location.  The program memory can also be
+;   read directly via the table read mechanism.  The assembler directives
+;   store successive bytes in most to least significant byte order within
+;   a 16 bit word.
+;
+  if fam_17
+;
+;   Load the address of the index program memory location into
+;   TBLPTRH,TBLPTRL.
+;
+         movfp   reg1, tblptrl ;init pointer to table start address
+         movfp   reg2, tblptrh
+         rrncf   reg3, w     ;make 16 bit word address offset
+         andlw   h'7f'       ;mask in valid bits
+         addwf   tblptrl     ;add offset to table address
+         skip_ncarr          ;no carry into high address byte ?
+         incf    tblptrh     ;propagate the carry
+;
+;   Read the data from the table entry.
+;
+         tablrd  0, 0, wreg  ;read prog memory word into TBLAT
+
+         tlrd    1, wreg     ;read the high (first) byte into W
+         btfsc   reg3, 0     ;supposed to read first byte ?
+         tlrd    0, wreg     ;no, read the low (second) byte into W
+
+         incf    reg3        ;increment table offset for next time
+
+         return
+    endif                    ;end of 17C processor family
+
+         end

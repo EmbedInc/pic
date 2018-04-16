@@ -1,0 +1,240 @@
+;   Subroutine DIVU
+;
+;   Perform an unsigned divide.  REGA is divided by REGB and the result can be
+;   written to either REGA or REGC.  Some of the bits in FLAGS control the
+;   operation:
+;
+;     FLAGB_QUOA  -  Store the quotient in REGA
+;     FLAGB_QUOC  -  Store the quotient in REGC
+;     FLAGB_REMA  -  Store the remainder in REGA
+;     FLAGB_REMC  -  Store the remainder in REGC
+;
+;   Results are undefined if the flag bits specify storing more than one
+;   value into any one register.  The REGC and REGA registers are preserved
+;   if nothing is being returned in them.
+;
+;   Algorithm:
+;
+;     The REGB value is first left shifted as far as it can go without
+;     losing any bits, and REGC is cleared.  For each bit position REGB was
+;     shifted left, the REGB is compared to REGA and subtracted from REGA
+;     if smaller.  If so, the low bit of REGC is set.  REGB is then shifted
+;     right one, and REGC is shifted left one and the process is repeated for
+;     the new bit position.  This results in the quotient in REGC.
+;
+         extern  suba
+.divu    code
+         glbsub  divu, noregs
+         dbankif reg12       ;set bank for general regs access, if required
+;
+;   Check for divide by zero attempt because this will otherwise cause an
+;   infinite loop.  We do nothing on divide by zero.
+;
+         getf    regb+0      ;OR all the operand bits together
+         iorwf   regb+1, w
+         iorwf   regb+2, w
+         iorwf   regb+3, w
+         skip_nz             ;at least one bit set somewhere ?
+         return
+
+         pushregs regfb | regf12 ;save registers
+         dbankif reg12       ;set bank for general regs access, if required
+;
+;   Save the A and C registers if nothing is being returned in them.
+;
+         btfsc   flags, flagb_quoa ;not returning quotient in A ?
+         goto    divu_nsava  ;will return data in A
+         btfsc   flags, flagb_rema ;not returning remainder in A ?
+         goto    divu_nsava  ;will return remainder in A
+         pushregs regfa      ;save A register
+         dbankif reg12       ;set bank for general regs access, if required
+divu_nsava
+
+         btfsc   flags, flagb_quoc ;not returning quotient in C ?
+         goto    divu_nsavc  ;will return data in C
+         btfsc   flags, flagb_remc ;not returning remainder in C ?
+         goto    divu_nsavc  ;will return remainder in C
+         pushregs regfc      ;save C register
+         dbankif reg12       ;set bank for general regs access, if required
+divu_nsavc
+;
+;   Shift the operand left in whole chunks of 8 bits until the upper byte
+;   is not zero.  The shift amount is kept track of in REG12.
+;
+         clrf    reg12       ;init to operand not shifted
+divu_loop_shift8             ;back here to try shift another 8 bits left
+         testfz  regb+3      ;test operand high byte
+         skip_z              ;is zero, can shift another byte left ?
+         goto    divu_done_shift8
+         getf    regb+2      ;shift the three low bytes left one byte
+         movwf   regb+3
+         getf    regb+1
+         movwf   regb+2
+         getf    regb+0
+         movwf   regb+1
+         clrf    regb+0      ;shift zeros into the low byte
+         movlw   8           ;update number of bits operand has been shifted left
+         addwf   reg12
+         goto    divu_loop_shift8
+divu_done_shift8
+;
+;   The operand has been shifted as many whole bytes left as possible.  Now
+;   shift it individual bits left until the highest bit is set.  The total
+;   number of bits shifted left is kept in REG12.
+;
+divu_loop_shift1             ;back here to try shift another single bit left
+         btfsc   regb+3, 7   ;high bit not 1, shift another bit left ?
+         goto    divu_done_shift1
+         shift32l1 regb      ;shift operand left one bit
+         incf    reg12       ;log one more bit operand was shifted left
+         goto    divu_loop_shift1 ;back to try shifting operand left one more bit
+divu_done_shift1
+;
+;   The operand has been shifted left as far as possible without loosing any
+;   bits.  The number of bits the operand has been shifted left is in
+;   REG12.
+;
+;   Now init before entering the main compare/subtract loop.
+;
+         clrf    regc+0      ;init quotient to zero
+         clrf    regc+1
+         clrf    regc+2
+         clrf    regc+3
+
+         incf    reg12       ;make number of times to do compare/subtract
+;
+;   Main divide loop.  Compare the operand to the accumulator.  If OP <= ACC
+;   then subtract the operand out of the accumulator and set the low quotient
+;   bit.  For each additional bit position, shift the operand right one,
+;   the quotient left one and repeat.  The total number of these compare
+;   and subtract operations to perform is in REG12.  This is the number of
+;   bits the operand was shifted left, plus one for the original position.
+;
+divu_loop
+         getf    regb+3
+         subwf   rega+3, w   ;compare byte 3 (high byte)
+         skip_wle
+         goto    divu_next   ;operand larger, on to next bit position
+         skip_z
+         goto    divu_dosub  ;operand smaller, do the subtract
+
+         getf    regb+2
+         subwf   rega+2, w   ;compare byte 3 (high byte)
+         skip_wle
+         goto    divu_next   ;operand larger, on to next bit position
+         skip_z
+         goto    divu_dosub  ;operand smaller, do the subtract
+
+         getf    regb+1
+         subwf   rega+1, w   ;compare byte 3 (high byte)
+         skip_wle
+         goto    divu_next   ;operand larger, on to next bit position
+         skip_z
+         goto    divu_dosub  ;operand smaller, do the subtract
+
+         getf    regb+0
+         subwf   rega+0, w   ;compare byte 3 (high byte)
+         skip_wle
+         goto    divu_next   ;operand larger, on to next bit position
+
+divu_dosub                   ;OP is <= ACC, do the subtract and set quotient bit
+         gcall   suba        ;subtract OP from ACC
+         dbankif reg12       ;set bank for general regs access, if required
+         bsf     regc+0, 0   ;set quotient low bit
+
+divu_next                    ;advance to next bit position
+         decf    reg12       ;count one less bit position left to do
+         skip_nz             ;at least one more iteration to do ?
+         goto    divu_done
+
+         shift32rl1 regb+0   ;shift operand right one bit
+         shift32l1 regc+0    ;shift quotient left one bit
+         goto    divu_loop   ;back to do compare/subtract for this new bit position
+
+divu_done                    ;done with main compare/subtract loop
+;
+;   All done with the compare/subtract loop.  The final quotient is in the
+;   C register (REG8-11), and the remainder is in the A register (REG0-3).
+;
+divu_flip_ac equ (1 << flagb_quoa) | (1 << flagb_remc) ;FLAGS mask for flip A and C
+         movlw   divu_flip_ac
+         andwf   flags, w    ;mask in flags for flip A and C
+         xorlw   divu_flip_ac ;compare to flip A/C setting
+         skip_z              ;need to flip A and C registers ?
+         goto    divu_nflipac
+;
+;   The caller wants the quotient in A and the remainder in C.  This is
+;   exactly opposite of what these registers contain now.
+;
+         getf    rega+0      ;flip byte 0
+         xorwf   regc+0, w
+         xorwf   rega+0
+         xorwf   regc+0
+
+         getf    rega+1      ;flip byte 1
+         xorwf   regc+1, w
+         xorwf   rega+1
+         xorwf   regc+1
+
+         getf    rega+2      ;flip byte 2
+         xorwf   regc+2, w
+         xorwf   rega+2
+         xorwf   regc+2
+
+         getf    rega+3      ;flip byte 3
+         xorwf   regc+3, w
+         xorwf   rega+3
+         xorwf   regc+3
+
+         goto    divu_leave
+divu_nflipac                 ;skip to here if not flipping A and C
+;
+;   Copy quotient into A if enabled.
+;
+         btfss   flags, flagb_quoa ;return quotient in A ?
+         goto    divu_nquoa
+         getf    regc+0      ;copy byte 0
+         movwf   rega+0
+         getf    regc+1      ;copy byte 1
+         movwf   rega+1
+         getf    regc+2      ;copy byte 2
+         movwf   rega+2
+         getf    regc+3      ;copy byte 3
+         movwf   rega+3
+divu_nquoa                   ;skip to here if not returning quotient in A
+;
+;   Copy remainder into C if enabled.
+;
+         btfss   flags, flagb_remc
+         goto    divu_nremc
+         getf    rega+0      ;copy byte 0
+         movwf   regc+0
+         getf    rega+1      ;copy byte 1
+         movwf   regc+1
+         getf    rega+2      ;copy byte 2
+         movwf   regc+2
+         getf    rega+3      ;copy byte 3
+         movwf   regc+3
+divu_nremc                   ;skip to here if not returning remainder in C
+;
+;   Restore the A and C registers if nothing is being returned in them.
+;   A was pushed onto the stack before C if both were pushed.
+;
+         btfsc   flags, flagb_quoc ;not returning quotient in C ?
+         goto    divu_nresc  ;returning data in C
+         btfsc   flags, flagb_remc ;not returning remainder in C ?
+         goto    divu_nresc  ;returning remainder in C
+         popregs regfc       ;restore C register
+         dbankif reg12       ;set bank for general regs access, if required
+divu_nresc
+
+         btfsc   flags, flagb_quoa ;not returning quotient in A ?
+         goto    divu_nresa  ;returning data in A
+         btfsc   flags, flagb_rema ;not returning remainder in A ?
+         goto    divu_nresa  ;returning remainder in A
+         popregs regfa       ;restore A register
+         dbankif reg12       ;set bank for general regs access, if required
+divu_nresa
+
+divu_leave
+         leave   regfb | regf12

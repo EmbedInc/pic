@@ -1,0 +1,19 @@
+//   Linker control file for the PIC 16F616 processor.
+//
+CODEPAGE NAME=config START=0x2007 END=0x2007 PROTECTED //configuration word
+CODEPAGE NAME=idlocs START=0x2000 END=0x2003 PROTECTED //ID words
+
+CODEPAGE NAME=code0      START=0  END=0x7FF //code page 0
+
+SECTION NAME=.config ROM=config
+SECTION NAME=.IDLOCS ROM=idlocs
+
+SHAREBANK NAME=globalram  START=0x70  END=0x7F PROTECTED //UDATA_SHR area of bank 0
+SHAREBANK NAME=globalram  START=0xF0  END=0xFF PROTECTED //aliased from bank 1
+
+DATABANK NAME=bank0  START=0x20  END=0x6F //register bank 0
+DATABANK NAME=bank1  START=0xA0  END=0xBF //register bank 0
+
+SECTION NAME=.udata_shr RAM=globalram  //global memory mapped to all pages
+SECTION NAME=.BANK0 RAM=bank0          //for registers explicitly in bank 0
+SECTION NAME=.BANK1 RAM=bank1          //for registers explicitly in bank 1

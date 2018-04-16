@@ -1,0 +1,24 @@
+//   Linker control file for the PIC 16F627 processor.
+//
+CODEPAGE NAME=config START=0x2007 END=0x2007 PROTECTED //configuration word
+CODEPAGE NAME=idlocs START=0x2000 END=0X2003 PROTECTED //ID words
+CODEPAGE NAME=eedata START=0x2100 END=0x217F PROTECTED //Initial EEPROM data
+
+CODEPAGE NAME=code0      START=0  END=0x3FF //code page 0
+
+SECTION NAME=.config ROM=config
+SECTION NAME=.IDLOCS ROM=idlocs
+SECTION NAME=.EEDATA ROM=eedata
+
+DATABANK NAME=bank0  START=0x20  END=0x6F //register bank 0
+DATABANK NAME=bank1  START=0xA0  END=0xEF //register bank 1
+DATABANK NAME=bank2 START=0x120 END=0x14F //register bank 2
+
+SHAREBANK NAME=globalram  START=0x70  END=0x7F PROTECTED //global regs, bank 0
+SHAREBANK NAME=globalram  START=0xF0  END=0xFF PROTECTED //global regs, bank 1
+SHAREBANK NAME=globalram START=0x170 END=0x17F PROTECTED //global regs, bank 2
+
+SECTION NAME=.udata_shr RAM=globalram  //global memory mapped to all pages
+SECTION NAME=.BANK0 RAM=bank0          //for registers explicitly in bank 0
+SECTION NAME=.BANK1 RAM=bank1          //for registers explicitly in bank 1
+SECTION NAME=.BANK2 RAM=bank2          //for registers explicitly in bank 2

@@ -1,0 +1,174 @@
+;   Software data stack.  See STD.INS.ASPIC for a description of the
+;   software data stack.
+;
+
+;*******************************************************************************
+;
+;   Define the stack in memory.
+;
+didit    set     0           ;init to this processor not handled
+
+;**********
+;
+;   PIC 12 family.  STACKLAST indicates the highest memory address of the stack.
+;   The stack grows towards low addresses and the stack pointer points to the
+;   last-pushed byte.
+;
+  if fam_12
+.stack   udata   stacklast - stacksize + 1 ;go to lowest stack address
+stack_low res    stacksize - 1 ;reserve stack space, give names for load map
+stack_high res   1
+
+.stackp  udata
+stackp   res     1           ;saved copy of stack pointer when not in use
+
+         global  stack_low, stack_high, stackp
+
+stack_reset equ  stacklast + 1 ;stack pointer value for empty stack
+
+didit    set     1
+    endif                    ;end of PIC 12 family case
+
+;**********
+;
+;   PIC 16 family.  STACKLAST indicates the highest memory address of the stack.
+;   The stack grows towards low addresses and the stack pointer points to the
+;   last-pushed byte.
+;
+  if fam_16
+.stack   udata   stacklast - stacksize + 1 ;go to lowest stack address
+stack_low res    stacksize - 1 ;reserve stack space, give names for load map
+stack_high res   1
+
+         udata_shr
+stackp   res     1           ;saved copy of stack pointer when not in use
+
+         global  stack_low, stack_high, stackp
+
+stack_reset equ  stacklast + 1 ;stack pointer value for empty stack
+
+didit    set     1
+    endif                    ;end of PIC 16 family case
+
+;**********
+;
+;   Enhanced PIC 16 family.  STACKLAST indicates the highest memory address of
+;   the stack.  The stack grows towards high addresses and the stack pointer
+;   points to the first empty byte.
+;
+  if fam_16b
+.stack   udata   stacklast - stacksize + 1 ;go to lowest stack address
+stack_low res    stacksize - 1 ;reserve stack space, give names for load map
+stack_high res   1
+
+         global  stack_low, stack_high
+
+stack_reset equ  stacklast - stacksize + 1 ;initial stack pointer value
+didit    set     1
+    endif                    ;end of enhanced PIC 16 family case
+
+;**********
+;
+;   PIC 18 family.  STACKLAST indicates the lowest address of the stack.
+;
+  if fam_18
+    if stacklast <= acclast  ;stack is in access bank ?
+.stack   udata_acs stacklast ;go to lowest stack address
+      else
+.stack   udata   stacklast   ;go to lowest stack address
+      endif
+
+_stack                       ;used by C18 startup code to init stack pointers
+stack_low res    stacksize - 1 ;reserve stack space, give names for load map
+stack_high res   1
+
+         global  _stack, stack_low, stack_high
+
+    if c18comp
+stack_reset equ  stacklast   ;stack pointer reset value when using C18
+      else
+stack_reset equ  stacklast - 1 ;stack pointer reset value, Embed convention
+      endif
+didit    set     1
+    endif                    ;end of PIC 18 family case
+
+;**********
+;
+;   Check to make sure implemented for this processor.
+;
+  if didit == 0
+         error   STACK module does not support this processor
+    endif
+
+
+.stack_init code
+;*******************************************************************************
+;
+;   Subroutine STACK_INIT
+;
+;   Initialize the software stack.  This routine must be called before the stack
+;   is used.
+;
+stack_init
+         global  stack_init
+
+didit    set     0           ;init to this processor not handled
+
+;**********
+;
+;   PIC 12 family.
+;
+  if fam_12
+         dbankif stackp
+         movlw   low stack_reset
+         movwf   stackp
+
+didit    set     1
+    endif
+
+;**********
+;
+;   PIC 16 family.
+;
+  if fam_16
+         movlw   low stack_reset
+         movwf   stackp
+
+didit    set     1
+    endif
+
+;**********
+;
+;   PIC 16b family.
+;
+  if fam_16b
+         movlw   low stack_reset
+         movwf   fsr#v(fsrstack)l
+         movlw   high stack_reset
+         movwf   fsr#v(fsrstack)h
+
+didit    set     1
+    endif
+
+;**********
+;
+;   PIC 18 family.
+;
+  if fam_18
+         lfsr    fsrstack, stack_reset ;init stack pointer, stack is now empty
+    if c18comp
+         lfsr    2, stack_reset ;C18 compiler uses FSR2 as frame pointer
+      endif
+
+didit    set     1
+    endif
+
+;**********
+;
+;   Check to make sure implemented for this processor.
+;
+  if didit == 0
+         error   STACK_INIT not implemented for this processor
+    endif
+
+         return

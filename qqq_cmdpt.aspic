@@ -1,0 +1,423 @@
+;   ***************************************************************
+;   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Host command processor.  The routines in this module interpret and process
+;   commands received via a byte stream.  This command interpreter is run as a
+;   pseudo-task from the main event loop.  This architecture is required when
+;   the multi-tasking system can't be used, like on PIC 16 where there is no
+;   direct access to the call stack.
+;
+/include "qq2.ins.aspic"
+
+         extern  loop_main   ;jump back here after handling an event
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   nnop    integer = 8 ;number of NOPs to send at startup
+/const   send_ack_opc bool = false ;send ACK byte after valid opcode received
+/const   send_ack_cmd bool = false ;send ACK byte after each completed command
+rsp_ack  equ     254         ;ACK response byte, only used when SEND_ACK_xxx true
+first_opcode equ 0           ;first valid opcode in opcodes jump table
+lbank    equ     0           ;register bank for the local state of this module
+;
+;   Set MSKSAVE.  This is the bit mask of all the registers that are to be saved
+;   accross GETBYTE.  The remaining registers will be trashed.  REG0 will not be
+;   saved because the new input byte is returned in REG0 by GETBYTE.
+;
+msksave  equ     regf1 | regf2 | regf3
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+injump   res     2           ;where to jump on next input byte
+;
+;   Save area for registers listed in MSKSAVE.
+;
+ii       set     1           ;init register number
+  while ii < numregs
+    if (1 << ii) & msksave   ;save/restore this register accross GETBYTE call ?
+savereg#v(ii) res 1          ;make save area for this register
+      endif
+ii       set     ii + 1      ;advance to next register number
+    endw
+
+
+.cmd     code
+;*******************************************************************************
+;
+;   Macro PUTBYTE
+;
+;   Send the byte in REG0 to the host.  This is a wrapper that hides the
+;   underlying transport mechanism.
+;
+putbyte  macro
+         gcall   uart_put
+         endm
+
+;*******************************************************************************
+;
+;   Macro SENDK val
+;
+;   Send the constant byte value VAL to the host.  REG0 is trashed.
+;
+sendk    macro   val
+         loadk8  reg0, val
+         putbyte
+         endm
+
+;*******************************************************************************
+;
+;   Macro GETBYTE
+;
+;   The code in this module gets run whenever a new input byte is available.
+;   This macro makes it appear as if the code in this module is a separate
+;   thread that goes and gets the next input byte.  It saves a restart address,
+;   then returns to the main event loop.  When CMD_BYTE gets envoked the next
+;   time, it resumes execution at the restart address.
+;
+;   This macro therefore appears like a subroutine call that returns with the
+;   next input byte in REG0.  The register bank assumptions must be correct when
+;   this macro is used.
+;
+;   From the caller's point of view, REG0 is returned with the new input byte,
+;   and the registers listed in MSKSAVE are preserved with the remaining
+;   registers trashed.
+;
+getbyte  macro
+         local   restart
+;
+;   Set the address at which to restart next time.  This is the address
+;   immediately after this macro.
+;
+         dbankif lbankadr
+         movlw   low restart ;save where to restart next time
+         movwf   injump+0
+         movlw   high restart
+         jump    getbyte2    ;to non-replicated code to do the rest
+;
+;   Set the assembler state to indicate the register bank settings.  The
+;   settings are a function of the code in CMD_BYTE that jumps to the restart
+;   address.
+;
+restart                      ;end up here next time CMD_BYTE is envoked
+         dbankis lbankadr    ;direct register set for access to local state
+         ibank?              ;indirect bank setting is unknown
+         endm
+
+;**********
+;
+;   This section of code is only run implicitly from the GETBYTE macro.  There
+;   is only one copy of this code at a fixed location, whereas the GETBYTE code
+;   is replicated for every use of the macro.  This code is jumped to from
+;   GETBYTE to perform as much of the GETBYTE operation as possible that is not
+;   unique to each individual invocation of GETBYTE.  This reduces redundant
+;   code which would otherwise be produced for each GETBYTE invocation.
+;
+getbyte2
+;
+;   The low byte of the restart address has already been saved in INJUMP+0, and
+;   the high byte is in W.  Now save the high byte into INJUMP+1.  The direct
+;   register bank is set for access to the local state.
+;
+         dbankis lbankadr
+         movwf   injump+1
+;
+;   Save some of the registers locally.  These will be restored when CMD_BYTE is
+;   run next before it jumps to the restart address.
+;
+         dbankif lbankadr
+ii       set     1           ;init register number
+  while ii < numregs
+    if (1 << ii) & msksave   ;save/restore this register accross GETBYTE call ?
+         movf    reg#v(ii), w ;get the value of this register
+         movwf   savereg#v(ii) ;save it
+      endif
+ii       set     ii + 1      ;advance to next register number
+    endw
+
+         gjump   loop_main   ;back to the main event loop
+
+;*******************************************************************************
+;
+;   Subroutine CMD_INIT
+;
+;   Initialize the state managed by this module.
+;
+         glbsub  cmd_init, noregs
+
+         dbankif lbankadr
+         movlw   low task_start ;init to where to start processing next in byte
+         movwf   injump+0
+         movlw   high task_start
+         movwf   injump+1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro SEND_FWINFO
+;
+;   Sends the FWINFO response.
+;
+;   REG0 is trashed.
+;
+send_fwinfo macro
+         sendk   rsp_fwinfo  ;send FWINFO response opcode
+         sendk   fwtype      ;send firmare type ID
+         sendk   fwver       ;send firmware version number
+         sendk   fwseq       ;send build sequence number within version
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine CMD_START
+;
+;   Send the response stream startup data, if any.  This routine must be called
+;   before the first time CMD_BYTE is run.
+;
+cmd_start glbsub regf0
+
+/if [<> nnop 0] then         ;send NOPs at startup ?
+         pushreg reg1        ;temp save REG1 on the data stack
+         loadk8  reg1, [v nnop] ;init number of NOPs left to send
+         loadk8  reg0, rsp_nop ;get opcode to send
+
+cmd_nop  unbank              ;back here to send each new NOP
+         putbyte             ;send this NOP
+         decfsz  reg1        ;count one less NOP left to send
+         jump    cmd_nop     ;back to send next NOP
+
+         popreg  reg1        ;restore REG1, which was trashed in this section
+  /endif
+
+         send_fwinfo         ;send the initial FWINFO response
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine CMD_BYTE
+;
+;   This routine must be run from top level code when a byte is available from
+;   the UART.  It is intended to be run from the main event loop.  It jumps to
+;   LOOP_MAIN when done.
+;
+         glbent  cmd_byte
+;
+;   Restore the registers that are preserved accross invocations of the
+;   GETBYTE macro.
+;
+         dbankif lbankadr
+ii       set     1           ;init register number
+  while ii < numregs
+    if (1 << ii) & msksave   ;save/restore this register accross GETBYTE call ?
+         movf    savereg#v(ii), w ;get the saved copy of the register
+         movwf   reg#v(ii)   ;restore the register
+      endif
+ii       set     ii + 1      ;advance to next register number
+    endw
+;
+;   Get the input byte.
+;
+         gcall   uart_get    ;get the input byte into REG0
+;
+;   Jump to the pseudo-thread restart address.  The restart address was saved in
+;   INJUMP by GETBYTE before it jumped back to the main event loop.
+;
+         dbankif lbankadr
+         movf    injump+1, w ;get restart address high byte
+         movwf   pclath      ;set jump address high byte
+         movf    injump+0, w ;get restart address low byte
+         movwf   pcl         ;jump to the restart address
+;
+;   The restart address is jumped to with the direct register bank set for
+;   access to the local state.  The indirect register bank setting is unknown.
+
+;*******************************************************************************
+;
+;   CMD pseudo-task.  This routine appears to run as an infinite loop to the
+;   code here.  It is actually run piecemeal from the main event loop when a
+;   command stream byte is available.  The jump back to the start of the main
+;   event loop is hidden inside the GETBYTE macro.
+;
+cmd_done unbank              ;done processing the current command
+
+/if send_ack_cmd then        ;send ACK byte after completed command ?
+         sendk   rsp_ack
+  /endif
+
+cmd_next unbank              ;get and process the next command
+         getbyte
+task_start                   ;task start adr set by CMD_INIT, REG0 has opcode
+;
+;   The new command byte is in REG0.
+;
+;   Check for within range of jump table entries.
+;
+  if first_opcode != 0       ;commands don't start at zero ?
+         movlw   first_opcode ;get first valid opcode value
+         subwf   reg0, w     ;make table offset for this opcode
+         skip_wle            ;opcode not before table start ?
+         jump    cmd_next    ;invalid opcode, ignore it
+    else                     ;the command table starts at opcode 0
+         movf    reg0, w     ;get the opcode, which is also table offset
+    endif
+         ;
+         ;   The opcode is not before the start of the opcodes table,
+         ;   and the table offset is in W.
+         ;
+         movwf   reg12       ;save the table offset in REG12
+         sublw   tbl_cmd_n - 1 ;compare to last valid command ID
+         skip_wle            ;command ID is within range ?
+         jump    cmd_next    ;invalid command ID, ignore it
+;
+;   The opcode is within range of the opcodes jump table.  The original opcode
+;   is in REG0, and the 0-N table entry number in REG12.  Now jump to the
+;   selected table entry, which will in turn jump to the routine to perform the
+;   selected command.
+;
+         movf    reg0, w     ;pass opcode in REG4 to command routine
+         movwf   reg4
+         ;
+         ;   This section is for processors that have one address per program
+         ;   memory word, like the 12, 16, and 17 families.
+         ;
+  if adr_word == 1
+         movlw   high tbl_cmd ;get table start address high byte
+         movwf   pclath      ;init jump address high byte
+         movlw   low tbl_cmd ;get table start address low byte
+         addwf   reg12, w    ;make table entry address low byte
+         skip_ncarr          ;carry into entry address high byte
+         incf    pclath      ;propagate the carry
+         movwf   pcl         ;jump to the selected jump table entry
+    endif
+         ;
+         ;   This section is for processors that have 2 addresses per program
+         ;   memory word, like the 18 family.  The table entry number must be
+         ;   multiplied by the addresses per word to make the address offset
+         ;   from the start of the table.
+         ;
+  if adr_word == 2
+         movlw   high tbl_cmd ;get table start address high byte
+         movwf   pclath      ;init jump address high byte
+         btfsc   reg12, 7    ;add entry offset to address high byte
+         incf    pclath
+         rlncf   reg12, w    ;make low byte of table offset
+         andlw   b'1111110'
+         addlw   low tbl_cmd ;make low byte of entry address
+         skip_ncarr          ;no carry into entry address high byte ?
+         incf    pclath      ;propagate the carry
+         movwf   pcl         ;jump to the selected jump table entry
+    endif
+
+  if adr_word > 2            ;no code here to handle this case ?
+         error   "No code in the QQ2_CMD module to handle ADR_WORD > 2."
+    endif
+
+;*******************************************************************************
+;
+;   Macro COMMAND
+;
+;   Indicate the start of a command routine that is jumped to from the
+;   commands jump table.  This macro allows for setting particular
+;   register bank assumptions, etc, as the command dispatch code is
+;   modified.
+;
+;   At the start of a command, REG4 contains the command opcode.  The
+;   remaining registers are undefined.  The command processing routine
+;   should eventually jump to CMD_DONE when done processing this command.
+;
+command  macro
+         dbankis lbankadr    ;direct register bank is set for access to local state
+         ibank?              ;indirect bank setting is unknown
+/if send_ack_opc then        ;send ACK immediately after every valid opcode ?
+         sendk   rsp_ack
+  /endif
+         endm
+
+;*******************************************************************************
+;
+;   Command NOP
+;
+;   This command does nothing, but is always valid.  Receiving as many NOPs as
+;   there are bytes in the longest command guarantees this command processor
+;   will be in sync with the sender, and the next byte will be interpreted as a
+;   command opcode.
+;
+cm_nop   command
+         jump    cmd_done
+
+;*******************************************************************************
+;
+;   Command PING
+;
+;   Send the PONG response.  This can be useful for testing the communication
+;   channel and for synchronizing the command and response streams.
+;
+cm_ping  command
+         sendk   rsp_pong    ;send PONG response opcode
+         jump    cmd_done    ;done with this command
+
+;*******************************************************************************
+;
+;   Command FWINFO
+;
+;   Sends the FWINFO response, which indicates the firmware type, version, and
+;   sequence numbers.
+;
+cm_fwinfo command
+         sendk   rsp_fwinfo  ;send FWINFO response opcode
+         sendk   fwtype      ;send firmare type ID
+         sendk   fwver       ;send firmware version number
+         sendk   fwseq       ;send build sequence number within version
+         jump    cmd_done    ;done with this command
+
+;*******************************************************************************
+;
+;   Commands jump table.
+;
+;   Each entry is the address of the routine to envoke to service that
+;   particular command.  All the target addresses must be within this
+;   module.  The first table entry is for the opcode set by the
+;   constant FIRST_OPCODE at the top of this module.
+;
+tbl_cmd                      ;jump table for top level commands
+         jump    cm_nop      ;0 - no operation, but valid command
+         jump    cm_ping     ;1 - sends PONG response
+         jump    cm_fwinfo   ;2 - sends firmware version information
+
+tbl_cmd_n equ    ($ - tbl_cmd) / adr_word ;number of entries in TBL_CMD
+
+         end

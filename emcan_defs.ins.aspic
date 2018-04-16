@@ -1,0 +1,107 @@
+;   General definitions related to EmCan.  This file is intended to be included
+;   from the main include file of a project that is either a EmCan device or
+;   host.
+;
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Preprocessor subroutine INIT_EXTID
+//
+//   Initializes the preprocessor variables that describe the fields of a
+//   extended frame ID.  These are all set to default or benign values.  After
+//   this call, the variables for specific fields are set as needed, then
+//   MAKE_EXTID is called to actually make the 29 bit ID described by the
+//   preprocessor state.
+//
+/subroutine init_extid
+  /var exist extid_opcode integer ;10 bit opcode
+  /var exist extid_ack bool  ;this is ACK, not new data
+  /var exist extid_nack bool ;this is deliberate negative acknowledge
+  /var exist extid_async bool ;asynchronous, not part of deliberate request/reply
+  /var exist extid_ackreq bool ;requesting ACK
+  /var exist extid_first bool ;first or only frame of sequence
+  /var exist extid_last bool ;last or only frame of sequence
+  /var exist extid_seq integer ;0-15 sequence number
+  /var exist extid_bcast bool ;broadcast, not node-specific
+
+  /set extid_opcode 0
+  /set extid_ack false
+  /set extid_nack false
+  /set extid_async false
+  /set extid_ackreq false
+  /set extid_first true
+  /set extid_last true
+  /set extid_seq 0
+  /set extid_bcast false
+
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Preprocessor subroutine MAKE_EXTID [adrreg]
+//
+//   Uses the state initialized by INIT_EXTID (above) to actually build the 29
+//   bit extended frame ID.  The ID is written to REG3:REG2:REG1:REG0.  These
+//   registers are loaded ready for calling CAN_SEND_ID.
+//
+//   If EXTID_BCAST is TRUE to indicate this is a broadcast, then the node
+//   address field will be set to 0.  When not a broadcast, the node address
+//   will be taken from the register indicated by ADRREG, or from the variable
+//   NODEADR when the ADRREG parameter is not supplied.  ADRREG must not be
+//   REG0-REG3.  In either case, the node address must be in the low 7 bits of
+//   the byte with the upper bit zero.  If ADRREG is used, then then bank must
+//   be set up for direct access to it.
+//
+/subroutine make_extid
+  /var local id integer      ;assembled frame ID
+  //
+  //   Sanitize the numeric field values.
+  //
+  /set extid_opcode [and extid_opcode 16#3FF]
+  /set extid_seq [and extid_seq 16#F]
+  //
+  //   Check for invalid settings.
+  //
+  /block
+    /var local ii integer
+    /set ii 0
+    /if extid_ack then
+      /set ii [+ ii 1]
+      /endif
+    /if extid_nack then
+      /set ii [+ ii 1]
+      /endif
+    /if extid_ackreq then
+      /set ii [+ ii 1]
+      /endif
+    /if [> ii 1] then
+      /show "  Invalid combination of flags specified for EmCan extended frame ID."
+      /show "  Only one of ACK, NACK, and ACKREQ can be set."
+         error   ACK, NACK, ACKREQ
+         end
+      /stop
+      /endif
+    /endblock
+  //
+  //   Assemble the ID except for the node address field, which will 0.
+  //
+  /set id 0                  ;init all ID bits to 0
+  /set id [or id [shiftl extid_opcode 19]]
+  /set id [or id [if [or extid_ack extid_nack] 0 [shiftl 1 16]]]
+  /set id [or id [if extid_async [shiftl 1 15] 0]]
+  /set id [or id [if [or extid_ackreq extid_nack] [shiftl 1 14] 0]]
+  /set id [or id [if extid_first 0 [shiftl 1 13]]]
+  /set id [or id [if extid_last 0 [shiftl 1 12]]]
+  /set id [or id [shiftl extid_seq 8]]
+
+         loadk32 reg0, [chars "h'" [int id "fw 8 lz base 16 usin"] "'"] ;set frame ID
+
+  /if [not extid_bcast] then ;not broadcast, need to add node address ?
+    /if [exist 1 arg]
+      /then                  ;ADRREG parameter is available
+         movff   [arg 1], reg0
+      /else                  ;no ADRREG, use NODEADR
+         movff   nodeadr, reg0
+      /endif
+    /endif
+  /endsub

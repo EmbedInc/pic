@@ -1,0 +1,2086 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Network packet I/O interface.  This module presents a hardware and media
+;   independent interface for sending and receiving network packets.
+;
+;   This version is specific to the ethernet module built into the PIC 18FxxJ60
+;   series.  This module requires the low level 18FJ60 driver, which is in a
+;   separate module.
+;
+;   This is a large file, so the external subroutines are listed here.  This
+;   section is only meant to give a quick idea of what is available.  The
+;   details are described in the comments at the beginning of each subroutine.
+;
+;     NET_PACKET_INIT
+;
+;       One-time module initialization.
+;
+;     NETP_SETUP
+;
+;       Reset state and hardware and set it up for normal use.  Starts reception
+;       if MAC address is known.
+;
+;
+;
+;     NETP_RECV_CHECK
+;
+;       Check for new received packet available.
+;
+;     NETP_RECV_OPEN
+;
+;       Open the next received packet for access and get its payload size.
+;
+;     NETP_RECV_DEST
+;
+;       Get destination address of currently open received packet.
+;
+;     NETP_RECV_SRC
+;
+;       Get source address of currently open received packet.
+;
+;     NETP_RECV_TYPE
+;
+;       Get the packet type/length word.
+;
+;     NETP_RECV_OFS
+;
+;       Set the offset for subsequent reads from the currently open received
+;       packet.
+;
+;     NETP_RECV_READ
+;
+;       Read the next byte of the currently open received packet and advance
+;       the address to the next byte.
+;
+;     NETP_RECV_READBUF
+;
+;       Read sequential bytes into a buffer.
+;
+;     NETP_RECV_CLOSE
+;
+;       Close access to the currently open received packet and discard the
+;       packet.
+;
+;
+;
+;     NETP_XMIT_ALLOC
+;
+;       Allocate a transmit buffer.
+;
+;     NETP_XMIT_DEST
+;
+;       Write destination address into a transmit packet.
+;
+;     NETP_XMIT_BCAST
+;
+;       Make transmit packet a broadcast packet (sets dest adr to all 1s).
+;
+;     NETP_XMIT_SRC
+;
+;       Write source address into a transmit packet.
+;
+;     NETP_XMIT_TYPE
+;
+;       Write type/length word into a transmit packet.
+;
+;     NETP_XMIT_OFS
+;
+;       Set the offset into the packet payload for the next read or write.
+;
+;     NETP_XMIT_WRITE
+;
+;       Write packet payload byte, increment offset by one.
+;
+;     NETP_XMIT_READ
+;
+;       Read packet payload byte, increment offset by one.
+;
+;     NETP_XMIT_DEF
+;
+;       Set default packet contents that wasn't explicitly set.
+;
+;     NETP_XMIT_SEND
+;
+;       Send a network packet.
+;
+;     NETP_XMIT_RELEASE
+;
+;       Release a transmit buffer.
+;
+;
+;
+;     NETP_CHECKLINK
+;
+;       Check the network link status and update FLAG_LINK accordingly.
+;
+;     NETP_TASK_RESET
+;
+;       Release all resources allocated to the current task.
+;
+/show "  Configured for 18FxxJ60 internal ethernet module"
+
+         extern  our_mac     ;our MAC address, high to low byte order
+         extern  currtask    ;0-N ID of the currently running task
+         extern  mac_locktsk ;ID of task that has MAC/PHY locked
+         extern_flags        ;declare global flag bits EXTERN
+
+/var new ii integer          ;temp preprocessor integer variable
+;
+;   Static constants.  These reflect external realities or other fixed values
+;   that are not user-configurable.  You should think of them as part of the
+;   code of this module and leave them alone unless you are performing software
+;   maintainence and know exactly what you're doing.
+;
+/const   size_devmem integer = 8192 ;MAC/PHY total available data memory size
+/const   size_xmovh integer = 23 ;xmit buffer overhead needed beyond payload size
+/const   sz_dyent integer = 4 ;size of one allocated region table entry
+;
+;   Define symbolic constants for the PHY register addresses.  These are in
+;   their own 5 bit address space not directly accessible to the processor.
+;   Since they are not directly accessible, they are not defined in the
+;   processor include file.
+;
+phy_phcon1 equ   h'00'
+phy_phstat1 equ  h'01'
+phy_phcon2 equ   h'10'
+phy_phstat2 equ  h'11'
+phy_phie equ     h'12'
+phy_phir equ     h'13'
+phy_phlcon equ   h'14'
+;
+;   Derived constants.
+;
+/set ii [* [div [+ bytes_sendbuf 1] 2] 2] ;round xmit buffer size up to even value
+/set ii [if [<= ii size_devmem] ii size_devmem] ;clip to available buffer size
+/const   size_sendbuf integer = ii ;final transmit buffers region size
+/const   size_recvbuf integer = [- size_devmem size_sendbuf] ;receive buffer size
+/show "  Transmit buffer = " size_sendbuf " bytes, " n_xmitdesc " descriptors"
+/show "  Receive buffer = " size_recvbuf " bytes"
+
+/const   recvb_st integer = 0 ;receive buffer start address
+/const   recvb_en integer = [+ recvb_st size_recvbuf -1] ;receive buffer end address
+/if [= 0 [and recvb_en 1]]
+  /then                      ;receive buffer ends at even address
+    /const recvb_rd integer = [- recvb_en 1] ;start read pointer on preceeding odd address
+  /else                      ;receive buffer ends at odd address
+    /const recvb_rd integer = recvb_en ;start read pointer at end of buffer
+  /endif
+
+/const   sendb_st integer = [+ recvb_en 1] ;transmit buffer start address
+/const   sendb_en integer = [+ sendb_st size_sendbuf -1] ;transmit buffer end address
+/const   sz_dysend integer = [* sz_dyent n_xmitdesc] ;size of send buf alloc regions list
+/const   lbank   integer = lbank_packet ;bank number for local state
+
+n_xmitdesc equ   [v n_xmitdesc]
+sz_dyent equ     [v sz_dyent]
+sz_dysend equ    [v sz_dysend]
+lbank    equ     [v lbank]
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+recv_dest res    2           ;adr of dest address field of curr receive packet
+recv_payl res    2           ;payload address of current receive packet
+recv_rdofs res   2           ;user read offset from payload start of curr packet
+recv_next res    2           ;start address of next receive packet in HW buffer
+
+  if debug_icd
+         global  recv_dest, recv_payl, recv_rdofs, recv_next
+    endif
+;
+;   Transmit buffer dynamic memory state.  Transmit buffers are dynamically
+;   allocated and deallocated as needed.  The address range of each allocated
+;   region is stored in DYSEND.  Buffer addresses require 2 bytes to hold, so
+;   each DYSEND entry is 4 bytes in size, as indicated by the constant SZ_DYENT.
+;   There can't be more allocated regions than the number of transmit buffer
+;   descriptors.  The DYSEND list is allocated to this maximum possible length,
+;   which is N_XMITDESC entries.
+;
+;   The first two bytes of each DYSEND entry is the start address of the
+;   allocated region, and the last two bytes the first address after the region.
+;   A unused entry is marked with the high bit of the start address set to 1,
+;   which is the high bit of the second byte of the entry.  Entries are always
+;   in order of ascending address.  Unused entries are always at the end of the
+;   list.  In other words, if a unused entry is found, all entries after it are
+;   also guaranteed to be unused.
+;
+;   Only DYSEND is used by the code below, but a symbol is created for each
+;   field for display in a debugger watch window.
+;
+dysend   res     0           ;start of transmit buffer allocated memory list
+/set ii 0
+/block
+  /if [>= ii n_xmitdesc] then
+    /quit
+    /endif
+dyst[v ii] res   2           ;start address
+dyaf[v ii] res   2           ;after address
+  /set ii [+ ii 1]
+  /repeat
+  /endblock
+;
+;   Transmit buffer descriptors.  Each descriptor keeps the current state of
+;   one transmit buffer.  The number of descriptors is set by the user constant
+;   N_XMITDESC defined above.  This is the maximum number of transmit buffers
+;   that can be allocated at a time, regardless of whether more would fit in
+;   memory.
+;
+;   The CBLOCK below defines names and sizes of the individual fields, and
+;   thereby implicitly defines the size of a whole descriptor.  Parts of the
+;   code may make assumptions about the layout of a descriptor.  This can not be
+;   changed without inspecting and likely adjusting other code in this module.
+;
+;   The transmit buffer descriptors are always accessed via pointers, so we
+;   don't need to know the bank they end up in at assembly time.  They are put
+;   in their own section so the linker can place them anywhere it sees fit.
+;
+  cblock 0                   ;define transmit buffer descriptor fields
+         xb_flags: 1         ;flags byte, see XBFL_xxx constants below
+         xb_adr_start: 2     ;transmit buffer start address (control byte address)
+         xb_maxlen: 2        ;maximum length of user payload data allowed
+         xb_next: 2          ;offset into user payload of next user read/write
+         xb_len: 2           ;actual user payload data length
+
+         sz_xbdesc: 0        ;size of transmit buffer descriptor
+    endc
+         ;
+         ;   Flag bits in the XB_FLAGS field.  Each symbol here is the bit
+         ;   number for the particular flag within the XB_FLAGS byte.  The sense
+         ;   of all bits has been chosen so that 0 is the default or unused
+         ;   value.
+         ;
+         ;   The upper 4 bits hold the ID of the task that owns the buffer.
+         ;
+xbfl_inuse equ   0           ;descriptor is in use
+xbfl_tywr equ    1           ;packet type field written, don't fill in length
+xbfl_srcadr equ  2           ;source address explicitly set, don't fill in automatically
+
+.xbdesc  udata               ;separate section for the transmit buffer descriptors
+xbdesc   res     0           ;start address of the transmit buffer descriptors
+/set ii 0
+/block
+  /if [>= ii n_xmitdesc] then
+    /quit
+    /endif
+xb[v ii]_flags res 1         ;flags byte
+xb[v ii]_adr res 2           ;buffer start address
+xb[v ii]_max res 2           ;maximum payload bytes buffer can hold
+xb[v ii]_next res 2          ;payload offset for next read/write
+xb[v ii]_len res 2           ;actual user payload length used
+  if debug_icd
+         global  xb[v ii]_flags, xb[v ii]_adr, xb[v ii]_max
+         global  xb[v ii]_next, xb[v ii]_len
+    endif
+  /set ii [+ ii 1]
+  /repeat
+  /endblock
+
+
+.netp    code                ;start of executable code for this module
+
+;*******************************************************************************
+;
+;   Macro MAC_LOCK
+;
+;   Lock the MAC/PHY for exclusive access.  If it is already locked, then this
+;   will stall until it is available.
+;
+mac_lock macro
+         gcall   fj60_lock
+         endm
+
+;*******************************************************************************
+;
+;   Macro MAC_UNLOCK
+;
+;   Release the lock on the MAC/PHY.  This macro must only be used when the
+;   current thread holds the lock, although this is not checked.
+;
+mac_unlock macro
+         gcall   fj60_unlock
+         endm
+
+;*******************************************************************************
+;
+;   Macro PHYK val, reg
+;
+;   Set 16 bit PHY register in the MAC/PHY hardware to the constant value VAL.
+;   REG is the name of the PHY register.
+;
+;   REG0, REG1, and REG2 are trashed.
+;
+/macro phyk
+         loadk8  reg2, phy_[arg 2] ;pass address of the PHY register to write to
+         loadk16 reg0, [arg 1] ;pass the value to write
+         gcall   fj60_physet ;do the write
+  /endmac
+
+;*******************************************************************************
+;
+;   Subroutine NET_PACKET_INIT
+;
+;   Initialize the state managed by this module.  This routine is called once
+;   during system startup before multi-tasking is enabled and before any other
+;   routine in this module is called.
+;
+         glbsub  net_packet_init, noregs
+
+         gcall   fj60_init   ;init low level 18FxxJ60 driver module
+
+         dbankif gbankadr
+         bcf     flag_macready ;init to MAC/PHY not ready for use
+         mcall   tbuf_freeall ;init all transmit buffer memory to deallcoated
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_SETUP
+;
+;   Reset all the state managed by this module and set up the MAC/PHY for use
+;   by this module.  The current state is irrelevant, so this routine can be
+;   called in any state.  However, state kept in various tasks may not be valid
+;   after this call.
+;
+;   For reception to be enabled, our MAC address must be known.  This is
+;   indicated by FLAG_MACADR set, and the MAC address in OUR_MAC.
+;
+         glbsub  netp_setup, regf0 | regf1 | regf2 | regf3
+
+         dbankif gbankadr
+         bcf     flag_macready ;init to MAC/PHY not ready for general use
+         gcall   fj60_reset  ;reset the MAC/PHY hardware
+
+         dbankif gbankadr
+         mcall   tbuf_freeall ;mark all transmit buffer memory as available
+
+         dbankif lbankadr
+         loadk16 recv_next, [v recvb_st] ;next received packet will be at start of buffer
+;
+;   Set basic configuration registers.
+;
+         setreg  b'10100000', econ2
+                 ; 1-------  auto-increment buffer read and write pointers after R/W
+                 ; -0------  do not decrement the received packet count now
+                 ; --1-----  keep the MAC/PHY module enabled
+                 ; ---XXXXX  unused
+
+         setreg  low [v recvb_st], erxstl ;receive buffer start address
+         setreg  high [v recvb_st], erxsth
+         setreg  low [v recvb_en], erxndl ;receive buffer end address
+         setreg  high [v recvb_en], erxndh
+         setreg  low [v recvb_rd], erxrdptl ;receive buffer host read pointer
+         setreg  high [v recvb_rd], erxrdpth
+
+         setreg  b'10100001', erxfcon ;set receive filter rules
+                 ; 1-------  accept packets with our specific MAC address
+                 ; -0------  accept packet on match with any enabled filter
+                 ; --1-----  discard packets with invalid CRC
+                 ; ---0----  disable pattern matching filter
+                 ; ----0---  disable magic packet filter
+                 ; -----0--  disable hash table filter
+                 ; ------0-  disable multicast filter
+                 ; -------1  accept broadcast packets
+
+         setreg  b'00001101', macon1
+                 ; XXX-----  unused
+                 ; ---0----  reserved, must be 0
+                 ; ----1---  enable pause control transmits, normal for full duplex
+                 ; -----1--  obey incoming pause control frames, normal for full duplex
+                 ; ------0-  don't write control frames into the receive buffer
+                 ; -------1  allow the MAC to receive packets
+
+         setreg  b'10110001', macon3
+                 ; 101-----  pad to 60/64 bytes for normal/VLAN packet, then add CRC
+                 ; ---1----  enable automatic computing and appending of CRC
+                 ; ----0---  the CRC will cover all data (normal operation)
+                 ; -----0--  refuse to transmit or receive oversized frames
+                 ; ------0-  don't check frame lengths against the type/length field
+                 ; -------1  full duplex mode for the MAC
+
+         setreg  b'01000000', macon4
+                 ; X-------  unused
+                 ; -1------  wait indefinitely for medium ready, half duplex only
+                 ; --00----  reserved, must be 0
+                 ; ----XX--  unused
+                 ; ------00  reserved, must be 0
+
+         setreg  low 1518, mamxfll ;set maximum allowed frame length, bytes
+         setreg  high 1518, mamxflh
+
+         setreg  21, mabbipg ;set gap for back to back packets, 9.6uS for full duplex
+         setreg  18, maipgl  ;non back to back gap
+
+         setreg  b'00000000', eflocon
+                 ; XXXXX---  unused
+                 ; -----0--  reserved, must be 0
+                 ; ------00  flow control off
+;
+;   Set the MAC address if we know it.
+;
+         dbankif gbankadr
+         btfss   flag_macadr ;MAC address is known ?
+         jump    done_macset ;no, skip setting the MAC address in the hardware
+
+         movff   our_mac+0, maadr1 ;write MAC address to the ethernet hardware
+         movff   our_mac+1, maadr2
+         movff   our_mac+2, maadr3
+         movff   our_mac+3, maadr4
+         movff   our_mac+4, maadr5
+         movff   our_mac+5, maadr6
+
+done_macset unbank           ;done setting our MAC address in the hardware
+;
+;   Set the PHY registers.
+;
+         phyk    b'0000000100000000', phcon1
+                 ; 00--------------  reserved, must be 0
+                 ; --XX------------  unused
+                 ; ----00----------  reserved, must be 0
+                 ; ------X---------  unused
+                 ; -------1--------  select full duplex
+                 ; --------0-------  reserved, must be 0
+                 ; ---------XXXXXXX  unused
+
+         phyk    b'0000000100010000', phcon2
+                 ; X---------------  unused
+                 ; -0--------------  don't force link when no link detected
+                 ; --00000---------  reserved, must be 0
+                 ; -------1--------  disable half duplex loopback mode
+                 ; --------000-----  reserved, must be 0
+                 ; -----------1----  normal RX+/RX- operating mode
+                 ; ------------0000  reserved, must be 0
+
+         phyk    b'0011001000010010', phlcon
+                 ; 00--------------  reserved, must be 0
+                 ; --11------------  reserved, must be 1
+                 ; ----0010--------  display receive activity on LED A
+                 ; --------0001----  display transmit activity on LED B
+                 ; ------------00--  stretch displayed activity by 40mS
+                 ; --------------1-  enable LED event stretching
+                 ; ---------------0  reserved, must be 0
+;
+;   Turn on packet reception if we know our MAC address.
+;
+         dbankif gbankadr
+         btfss   flag_macadr ;MAC address has been set ?
+         jump    done_recvon ;no, skip this section
+
+         dbankif econ1
+         bsf     econ1, rxen ;enable packet reception
+
+done_recvon unbank
+         dbankif gbankadr
+         bsf     flag_macready ;MAC/PHY is ready for general use
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_CHECK
+;
+;   Check for received packet available.  The carry flag is set if a packet is
+;   available and cleared if not.
+;
+         glbsub  netp_recv_check, noregs
+
+         dbankif epktcnt
+         movf    epktcnt, w  ;get number of unread received packets
+         bcf     status, c   ;init to no packet available
+         skip_z              ;no packet available ?
+         bsf     status, c   ;indicate packet is available
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine RDADR_WRAP
+;
+;   Wrap the read buffer address in REG1:REG0 as needed.  REG1:REG0 contains a
+;   raw computed read buffer address which might be past the end of the receive
+;   buffer.  If so, it is wrapped back to the beginning of the receive buffer.
+;   On return, REG1:REG0 will contain a valid receive buffer address.
+;
+         locsub  rdadr_wrap, regf2
+
+         movlw   low [v [+ recvb_en 1]] ;compute wrapped offset in W:REG2
+         subwf   reg0, w
+         movwf   reg2
+         movlw   high [v [+ recvb_en 1]]
+         subwfb  reg1, w
+         bn      rdw_leave   ;not past end of buffer, nothing to do ?
+
+         movwf   reg1        ;set REG1:REG0 to wrapped offset
+         movf    reg2, w
+/if [= recvb_st 0]
+  /then                      ;buffer starts at 0
+         movwf   reg0
+  /else                      ;buffer doesn't start at 0, need to add buffer start
+         addlw   low [v recvb_st] ;add buffer start to make final address
+         movwf   reg0
+         movlw   high [v recvb_st]
+         addwfc  reg1
+  /endif
+
+rdw_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_OPEN
+;
+;   Initialize for reading the next received packet.  This routine must only be
+;   called when it is known a unread received packet is sitting in the receive
+;   buffer.  REG1:REG0 will be returned the number payload bytes in the packet.
+;
+         glbsub  netp_recv_open, noregs
+;
+;   Compute and save the wrapped buffer addresses of the destination address
+;   field and the start of the payload of this new packet.  The destination
+;   address field is 6 bytes after the start of the packet, and the payload
+;   14 bytes after that.
+;
+         dbankif lbankadr
+         movlw   low 6       ;make raw dest address field address in REG1:REG0
+         addwf   recv_next+0, w
+         movwf   reg0
+         movlw   high 6
+         addwfc  recv_next+1, w
+         movwf   reg1
+         mcall   rdadr_wrap  ;ensure wrapped buffer address
+         movff   reg0, recv_dest+0 ;save destination field start address
+         movff   reg1, recv_dest+1
+
+         movlw   low 14      ;add offset to get to start of payload
+         addwf   reg0
+         movlw   high 14
+         addwfc  reg1
+         mcall   rdadr_wrap  ;ensure wrapped buffer address
+         movff   reg0, recv_payl+0 ;save payload start address
+         movff   reg1, recv_payl+1
+
+         dbankif lbankadr
+         loadk16 recv_rdofs, 0 ;init user read offset from start of payload
+;
+;   Read the packet header information.
+;
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   recv_next+0, erdptl ;set read pointer to start of packet
+         movff   recv_next+1, erdpth
+
+         movff   edata, recv_next+0 ;start adr of next packet into RECV_NEXT
+         movff   edata, recv_next+1
+
+         movff   edata, reg0 ;get whole packet byte count into REG1:REG0
+         movff   edata, reg1
+         mac_unlock          ;release exclusive lock on MAC/PHY hardware
+;
+;   The byte count value in REG1:REG0 is the total size of all the following
+;   fields:
+;
+;     destination address          6
+;     source address               6
+;     type/length word             2
+;     payload                     ??
+;     CRC checksum                 4
+;
+;   This means it is 18 larger than the payload size we need to return to the
+;   user in REG1:REG0.
+;
+         movlw   low 18      ;pass back payload size in REG1:REG0
+         subwf   reg0
+         movlw   high 18
+         subwfb  reg1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_DEST
+;
+;   Get the destination address of the currently open receive packet.  The 6
+;   byte destination address will be written to where FSR0 is pointing.  The
+;   address will be written in most to least significant byte order.  FSR0 is
+;   trahsed.
+;
+         glbsub  netp_recv_dest, noregs
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   recv_dest+0, erdptl ;set read pointer
+         movff   recv_dest+1, erdpth
+
+         movff   edata, postinc0 ;get the 6 byte destination MAC address
+         movff   edata, postinc0
+         movff   edata, postinc0
+         movff   edata, postinc0
+         movff   edata, postinc0
+         movff   edata, postinc0
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_SRC
+;
+;   Get the source address of the currently open receive packet.  The 6 byte
+;   source address will be written to where FSR0 is pointing.  The address will
+;   be written in most to least significant byte order.  FSR0 is trashed.
+;
+         glbsub  netp_recv_src, regf0 | regf1
+
+         dbankif lbankadr
+         movlw   low 6       ;source is 6 bytes past dest
+         addwf   recv_dest+0, w
+         movwf   reg0
+         movlw   high 6
+         addwfc  recv_dest+1, w
+         movwf   reg1
+         mcall   rdadr_wrap  ;ensure wrapped buffer address
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, erdptl ;set buffer read start address
+         movff   reg1, erdpth
+
+         movff   edata, postinc0 ;get the 6 byte source MAC address
+         movff   edata, postinc0
+         movff   edata, postinc0
+         movff   edata, postinc0
+         movff   edata, postinc0
+         movff   edata, postinc0
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_TYPE
+;
+;   Get the packet type/length word and return it in REG1:REG0.
+;
+         glbsub  netp_recv_type, noregs
+
+         dbankif lbankadr
+         movlw   low 12      ;type/length is 12 bytes past dest adr
+         addwf   recv_dest+0, w
+         movwf   reg0
+         movlw   high 12
+         addwfc  recv_dest+1, w
+         movwf   reg1
+         mcall   rdadr_wrap  ;ensure wrapped buffer address
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, erdptl ;set buffer read start address
+         movff   reg1, erdpth
+
+         movff   edata, reg1 ;get the type/length word into REG1:REG0
+         movff   edata, reg0
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_OFS
+;
+;   Sets which packet payload byte will be read next.  The offset from the first
+;   payload byte is passed in REG1:REG0.  The next read will return the byte
+;   at this offset.  The first payload byte is at offset 0.  The read offset is
+;   initialized to 0 by NETP_RECV_OPEN.
+;
+         glbsub  netp_recv_ofs, noregs
+
+         movff   reg0, recv_rdofs+0 ;set payload offset for next read
+         movff   reg1, recv_rdofs+1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_READ
+;
+;   Read the next payload byte from the currently open receive packet, then
+;   advance to the next byte.  Successive calls to this routine will return
+;   successive packet bytes.  The data byte is returned in REG0.
+;
+         glbsub  netp_recv_read, regf1
+
+         dbankif lbankadr
+         movf    recv_payl+0, w ;compute raw read address in REG1:REG0
+         addwf   recv_rdofs+0, w
+         movwf   reg0
+         movf    recv_payl+1, w
+         addwfc  recv_rdofs+1, w
+         movwf   reg1
+         mcall   rdadr_wrap  ;ensure wrapped buffer address in REG1:REG0
+
+         incf    recv_rdofs+0 ;increment the read offset for next time
+         skip_ncarr
+         incf    recv_rdofs+1
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, erdptl ;set buffer read start address
+         movff   reg1, erdpth
+
+         movff   edata, reg0 ;read this data byte from the buffer
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_READBUF
+;
+;   Read sequential bytes from the currently open receive packet into a buffer.
+;   REG0 contains the number of bytes to read, and FSR0 points to the start of
+;   the buffer.  REG0 may contain 0, in which case nothing is read.  FSR0 is
+;   preserved.  The read index will be left at the next byte after the last one
+;   read.
+;
+;   This routine may be used to read data into sequential REGn general registers
+;   except for REG0 or REG1.
+;
+         glbsub  netp_recv_readbuf, regf0 | regf1
+
+         movf    reg0, w     ;get number of bytes to read
+         bz      rdbuf_leave ;nothing to do ?
+         pushreg reg0        ;temp save number of bytes to read
+
+         dbankif lbankadr
+         movf    recv_payl+0, w ;compute raw read address in REG1:REG0
+         addwf   recv_rdofs+0, w
+         movwf   reg0
+         movf    recv_payl+1, w
+         addwfc  recv_rdofs+1, w
+         movwf   reg1
+         mcall   rdadr_wrap  ;ensure wrapped buffer address in REG1:REG0
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, erdptl ;set buffer read start address
+         movff   reg1, erdpth
+         popreg  reg0        ;restore number of bytes left to read
+
+         pushreg fsr0l       ;save original pointer value
+         pushreg fsr0h
+
+rdbuf_loop unbank            ;back here each new byte to read
+         movff   edata, postinc0 ;get this data byte into caller's buffer
+         incf    recv_rdofs+0 ;increment the read offset for next time
+         skip_ncarr
+         incf    recv_rdofs+1
+         decfsz  reg0        ;count one less byte left to read
+         jump    rdbuf_loop  ;back to read the next byte
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         popreg  fsr0h       ;restore original pointer value
+         popreg  fsr0l
+
+rdbuf_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_CLOSE
+;
+;   Close the currently open receive packet.  A receive packet must be currently
+;   open, although this is not checked.  The receive packet can no longer be
+;   accessed after this call.  The packet will be discarded and the hardware
+;   allowed to overwrite it with new received data.
+;
+         glbsub  netp_recv_close, regf0 | regf1 | regf2 | regf3
+
+         dbankif gbankadr
+         bcf     flag_recvip ;received IP packet definitely not open anymore
+
+         movff   recv_next+0, reg2 ;get raw address where next packet starts
+         movff   recv_next+1, reg3
+;
+;   Work around a bug in the ENC28J60 where only odd values must be written to
+;   the receive buffer read pointer ERXRDPT.  If the next packet start address
+;   is even, then we must subtract 1 from it.  This only wastes one receive
+;   buffer byte, which is no big deal.  However, wrap around must be taken into
+;   account when subtracting the byte.
+;
+;   This code assumes the special case of the receive buffer starting at address
+;   0, which simplifies the wraparound calculation.
+;
+/if [<> recvb_st 0] then
+  /show "  Receive buffer not start at 0 as assumed by NETP_RECV_CLOSE."
+         error   RECVB_ST not 0
+         end
+  /stop
+  /endif
+
+         btfsc   reg2, 0     ;next packet start address is even ?
+         jump    rcl_hadr    ;is odd, use the next packet address directly
+
+         decf    reg2        ;decrement the address by 1
+         skip_nborr
+         decf    reg3
+         skip_borr           ;decremented past 0 ?
+         jump    rcl_hadr    ;no, use the decremented value
+         loadk16 reg2, [v recvb_rd] ;set to last odd address in buffer
+rcl_hadr unbank              ;new value for the read pointer is in REG3:REG2
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg2, erxrdptl ;update the read pointer to after this packet
+         movff   reg3, erxrdpth
+         dbankif econ2
+         bsf     econ2, pktdec ;decrement the received packet count by one
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine TBUF_FREEALL
+;
+;   Free all dynamically allocated transmit buffer memory.  The entire buffer
+;   will be marked as free.
+;
+         locsub  tbuf_freeall, regf0
+;
+;   Reset all the transmit dynamic memory to free.
+;
+/if [> sz_dysend 0] then
+         lfsr    0, dysend   ;point to start of allocated memory list
+         movlw   sz_dysend
+         movwf   reg0        ;init number of bytes left to initialize
+         movlw   h'FF'       ;get value to set each byte to
+tbfa_loop unbank             ;back here to set each new byte
+         movwf   postinc0    ;set this byte
+         decfsz  reg0        ;count one less byte left to do
+         jump    tbfa_loop   ;back to do next byte
+  /endif
+;
+;   Init all the transmit buffer descriptors to unused.
+;
+/if [> n_xmitdesc 0] then
+         lfsr    0, xbdesc   ;init pointer to first descriptor
+         loadk8  reg0, sz_xbdesc * n_xmitdesc ;init loop counter
+tbfa_xb  unbank              ;back here to init each new byte
+         clrf    postinc0    ;init this descriptor byte
+         decfsz  reg0        ;count one less byte left to do
+         jump    tbfa_xb     ;back to init the next byte
+  /endif
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine TBUF_RESV
+;
+;   Reserve the amount of transmit buffer memory in REG1:REG0 and return
+;   REG1:REG0 the start address of the new reserved region.  The high bit of
+;   REG1 is returned 1 if the requested buffer could not be allocated and 0 if
+;   it was.  When the high bit of REG1 is set, the remaining bits of REG1 and
+;   REG0 are undefined.
+;
+/if [<= sz_dysend 0]
+  /then                      ;not using dynamic transmit buffer allocation
+         locsub  tbuf_resv, noregs
+         bsf     reg1, 7     ;indicate memory not reserved
+
+  /else                      ;dynamic transmit buffer allocation is in use
+         locsub  tbuf_resv, regf2 | regf3 | regf4 | regf5 | regf6 | regf7
+;
+;   Check for allocated regions table full.  A new region can't be allocated if
+;   there is no room in the table, regardless of whether there is buffer room
+;   for it.
+;
+         dbankif lbankadr
+         btfss   dysend + (sz_dysend - sz_dyent + 1), 7 ;last list entry is empty ?
+         jump    tbres_no    ;no, can't allocate the new memory
+;
+;   Check for special case of all the memory is available.  In this case the
+;   new region can be allocated as long as it fits into the entire available
+;   memory.
+;
+         dbankif lbankadr
+         btfss   dysend+1, 7 ;no regions allocated, entire memory available ?
+         jump    tbres_some  ;some region allocated, skip this special case
+
+         movf    reg1, w     ;get requested size high byte
+         sublw   high [v size_sendbuf] ;compare to max valid value
+         jmp_wgt tbres_no    ;too large ?
+         jmp_wne tbres_fitall ;fits
+         movf    reg0, w     ;get requested size low byte
+         sublw   low [v size_sendbuf] ;compare to max valid value
+         jmp_wgt tbres_no    ;too large ?
+tbres_fitall                 ;requested size fits in whole buffer
+         ;
+         ;   Create the single list entry for the new region starting at the
+         ;   start of the available memory.
+         ;
+         dbankif lbankadr
+         movlw   low [v sendb_st]
+         movwf   dysend+0    ;set start address low byte
+         addwf   reg0, w
+         movwf   dysend+2    ;set after address low byte
+         movlw   high [v sendb_st]
+         movwf   dysend+1    ;set start address high byte
+         addwfc  reg1, w
+         movwf   dysend+3    ;set after address high byte
+
+         loadk16 reg0, [v sendb_st] ;return start address of the new region
+         jump    tbres_leave
+
+tbres_no unbank              ;can not allocate the requested buffer
+         bsf     reg1, 7     ;indicate requested memory not allocated
+         jump    tbres_leave
+
+tbres_some unbank            ;at least one previously allocated region exists
+;
+;   The dynamically allocated regions list has at least one entry but is not
+;   full either.  The gaps between the regions will be examined to find the
+;   smallest gap that can fit the requested size.  For efficiency, the gap
+;   before the first allocated region and after the last are handled as special
+;   cases.
+;
+;   While looping thru the interior gaps, the register usage is:
+;
+;     REG1:REG0  -  Size of requested region.
+;
+;     REG3:REG2  -  Excess size of the smallest gap found so far that the
+;       requested region can fit in.  High bit set indicates no suitable gap
+;       found yet.
+;
+;     REG4  -  0-N list entry before which new region best fit.
+;
+;     REG5  -  Scratch.
+;
+;     REG6  -  Scratch.
+;
+;     REG7  -  0-N list entry that current gap is before.
+;
+;   Now check the gap between the start of memory and the first allocated
+;   region.  This section also initializes the registers for looping over the
+;   gaps between regions.
+;
+         dbankif lbankadr
+         movlw   low [v sendb_st]
+         subwf   dysend+0, w ;make size of gap low byte
+         movwf   reg2        ;save it
+         movlw   high [v sendb_st]
+         subwfb  dysend+1, w ;make size of gap high byte
+         movwf   reg3        ;save it
+
+         movf    reg0, w
+         subwf   reg2        ;make excess size low byte
+         movf    reg1, w
+         subwfb  reg3        ;make excess size high byte
+         clrf    reg7        ;init list entry number of current gap
+         clrf    reg4        ;init list entry number for best fit so far
+
+         lfsr    0, dysend+2 ;init pointer to start address of next gap
+;
+;   Loop over each gap between the allocated regions.
+;
+         dbankif lbankadr
+tbres_gap                    ;check new gap, FSR0 is pointing to gap start address
+         incf    reg7        ;update list entry number of this new gap
+         movf    postinc0, w ;get gap start address low byte
+         movwf   reg5        ;save gap start address low byte
+         movff   postinc0, reg6 ;save gap start address high byte
+         subwf   postinc0, w ;make gap size low byte
+         btfsc   indf0, 7    ;not hit end of allocated regions list yet ?
+         jump    tbres_digaps ;done checking interior gaps
+         movwf   reg5        ;save gap size low byte
+         movf    reg6, w     ;get gap start address high byte
+         subwfb  postinc0, w ;make gap size high byte
+         movwf   reg6        ;save it
+         ;
+         ;   REG6:REG5 contains the size of this gap.  FSR0 is pointing to the
+         ;   start address of the next gap.
+         ;
+         movf    reg0, w     ;make gap excess size in REG6:REG5
+         subwf   reg5
+         movf    reg1, w
+         subwfb  reg6
+         btfsc   reg6, 7     ;gap is big enough for the requested size ?
+         jump    tbres_gap   ;no, go check next gap
+
+         movf    reg3, w     ;get best excess size high byte
+         subwf   reg6, w     ;compare to new excess size high byte
+         jmp_wgt tbres_better ;this gap is better fit than previous best ?
+         skip_z              ;high bytes same, need to check low bytes ?
+         jump    tbres_gap   ;this gap larger then previous best, skip it ?
+         movf    reg2, w     ;get best excess size low byte
+         subwf   reg5, w     ;compare to new excess size low byte
+         skip_wgt            ;new gap is better than previous best ?
+         jump    tbres_gap   ;no, go check next gap
+         ;
+         ;   The current gap is a better fit for the requested size than the
+         ;   previous best gap found.  The excess size of the current gap is in
+         ;   REG6:REG5.
+         ;
+tbres_better
+         movff   reg5, reg2  ;save excess size of best fit
+         movff   reg6, reg3
+         movff   reg7, reg4  ;save list entry number of best fit
+         jump    tbres_gap   ;back to check next gap
+;
+;   Done checking all the interior gaps.  FSR0 is pointing to the second byte of
+;   the first unused list entry.  The start address of the last gap is in
+;   REG6:REG5.
+;
+;   Now check the gap between the last allocated region and the end of memory.
+;
+tbres_digaps
+         dbankif gbankadr
+         movf    reg5, w     ;get gap start address low byte
+         sublw   low [v [+ sendb_en 1]] ;make gap size low byte
+         movwf   reg5        ;save it
+         movf    reg6, w     ;get gap start address high byte
+         skip_nborr
+         addlw   1           ;propagate the borrow
+         sublw   high [v [+ sendb_en 1]] ;make gap size high byte
+         movwf   reg6        ;save it
+         ;
+         ;   REG6:REG5 contains the size of the last gap.
+         ;
+         movf    reg0, w     ;make excess size of the last gap in REG5:REG6
+         subwf   reg5
+         movf    reg1, w
+         subwfb  reg6
+         btfsc   reg6, 7     ;gap is large enough to fit the requested region ?
+         jump    tbres_dgaps ;no, done checking all gaps.
+
+         movf    reg6, w     ;get new gap excess size high byte
+         subwf   reg3, w     ;compare to best found so far
+         jmp_wgt tbres_dgaps ;new gap definitely not better fit ?
+         bnz     tbres_lgap  ;new gap is better fit, go use it
+         movf    reg2, w     ;get previous best low byte
+         subwf   reg5, w     ;compare to new gap
+         jmp_wle tbres_dgaps ;new gap is no better than previous best ?
+tbres_lgap                   ;new gap is better fit than previous best
+         movff   reg7, reg4  ;set regions table index to insert new region before
+         jump    tbres_havegap ;REG4 is the table index to insert the new region before
+;
+;   All gaps have been checked.  The high bit of REG3 is 0 if a gap was found
+;   that the new region can fit into.  If so, REG4 is the 0-N DYSEND table index
+;   that the new region should be inserted before.
+;
+tbres_dgaps
+         btfsc   reg3, 7     ;a suitable gap was found ?
+         jump    tbres_no    ;no, return indicating new memory not allocated
+tbres_havegap                ;a gap to fit the new memory was found
+;
+;   A gap of equal or greater size to the requested memory region was found.
+;   The registers currently contain:
+;
+;     REG1:REG0  -  Size of the requested region
+;
+;     REG2  -  Unused.
+;
+;     REG3  -  Unused.
+;
+;     REG4  -  Index of the DYSEND table entry for the allocated region the new
+;       memory is to be inserted before.  0 indicates the first entry, 1 the
+;       second, etc.
+;
+;     REG5  -  Unused.
+;
+;     REG6  -  Unused.
+;
+;     REG7  -  Unused.
+;
+;   The DYSEND list contains at least one used entry and has at least one unused
+;   entry at its end.
+;
+;   Now move the table entries starting with the one indicated by REG4 down one
+;   slot each.
+;
+         movf    reg4, w     ;get the 0-N index of the first entry to move
+         mullw   sz_dyent    ;make byte offset into table of this entry
+         movf    prodl, w    ;get the byte offset
+         movwf   reg2        ;save it
+         sublw   sz_dysend   ;make table bytes starting at the selected entry
+         addlw   -sz_dyent   ;make number of table bytes to move
+         bz      tbres_dmove ;0 bytes to move, so all done moving ?
+         ;
+         ;   The table address offset of the first byte to move is in REG2.  The
+         ;   number of bytes to move is in W, which is not 0.
+         ;
+         movwf   reg3        ;save number of bytes to copy
+  if fsrsc2_save             ;need to save/restore second pointer ?
+         movff   fsr#v(fsrsc2)l, reg5 ;save second pointer in REG6:REG5
+         movff   fsr#v(fsrsc2)h, reg6
+    endif
+         lfsr    0, dysend + (sz_dysend - 1) ;init put pointer
+         lfsr    fsrsc2, dysend + (sz_dysend - (sz_dyent + 1)) ;init get pointer
+tbres_mvloop                 ;back here to copy each new byte
+         movff   postdec#v(fsrsc2), postdec0 ;copy this byte
+         decfsz  reg3        ;count one less byte left to copy
+         jump    tbres_mvloop ;back to do next byte
+  if fsrsc2_save             ;need to save/restore second pointer ?
+         movff   reg5, fsr#v(fsrsc2)l ;restore second pointer from REG6:REG5
+         movff   reg6, fsr#v(fsrsc2)h
+    endif
+tbres_dmove                  ;done moving entries to make room for new entry
+;
+;   The existing entries, if any, have been moved so that the slot at the index
+;   in REG4 can now be overwritten.  The registers currently contain:
+;
+;     REG1:REG0  -  Size of the requested region
+;
+;     REG2  -  Offset into DYSEND of the entry to write to.
+;
+;     REG3  -  Unused.
+;
+;     REG4  -  Index of the DYSEND table entry for the allocated region the new
+;       memory is to be inserted before.  0 indicates the first entry, 1 the
+;       second, etc.
+;
+;     REG5  -  Unused.
+;
+;     REG6  -  Unused.
+;
+;     REG7  -  Unused.
+;
+;   Now set REG6:REG5 to the start address of the new region and point FSR0 to
+;   the start of the entry for this region.
+;
+         lfsr    0, dysend   ;init pointer to the start of the table
+         movf    reg4
+         bnz     tbres_nfirst ;not writing first table entry ?
+         ;
+         ;   The entry to write is the first in the table, which also means that
+         ;   the start address of the new memory region will be the start of the
+         ;   memory.
+         ;
+         loadk16 reg5, [v sendb_st] ;set new region start address
+         jump    tbres_wind  ;ready to write entry for new region
+         ;
+         ;   The entry to write is not the first in the table.  The start
+         ;   address of the new region must therefore be read from the previous
+         ;   entry.
+         ;
+tbres_nfirst
+         movf    reg2, w     ;get offset into table of the entry to write
+         addlw   -2          ;make offset of the after address of the previous entry
+         addwf   fsr0l       ;point to the after address
+         movff   postinc0, reg5 ;read the previous after address into REG6:REG5
+         movff   postinc0, reg6
+tbres_wind                   ;REG6:REG5 and FSR0 set
+;
+;   Write the table entry to allocate this new region.  FSR0 is pointing to the
+;   start of the table entry to write, and REG6:REG5 contains the start address
+;   of the newly allocated region.
+;
+         movff   reg0, reg2  ;save region size in REG3:REG2
+         movff   reg1, reg3
+
+         movf    reg5, w     ;get start address low byte
+         movwf   reg0        ;pass it back to caller
+         movwf   postinc0    ;write it to the table entry
+         addwf   reg2        ;make after address low byte
+
+         movf    reg6, w     ;get start address high byte
+         movwf   reg1        ;pass it back to caller
+         movwf   postinc0    ;write it to the table entry
+         addwfc  reg3        ;make after address low byte
+
+         movff   reg2, postinc0 ;write after address to the table entry
+         movff   reg3, postinc0
+  /endif                     ;end of using dynamic transmit buffer allocation case
+
+tbres_leave unbank           ;common exit point
+         leaverest           ;end of TBUF_RESV
+
+;*******************************************************************************
+;
+;   Local subroutine TBUF_FREE
+;
+;   Free the transmit buffer allocated memory region that contains the address
+;   in REG1:REG0.  Nothing is done if the address is not within a allocated
+;   region.
+;
+/if [<= sz_dysend 0]
+  /then                      ;not using dynamic transmit buffer allocation
+         locsub  tbuf_free, noregs
+
+  /else                      ;dynamic transmit buffer allocation is in use
+         locsub  tbuf_free, regf0 | regf1 | regf2
+;
+;   Scan the list of allocated regions looking for the one containing the
+;   target address.
+;
+;   Register usage:
+;
+;     REG1:REG0  -  Address within the region to deallocate.
+;
+;     REG2  -  Max number of region descriptors left to check.
+;
+         lfsr    0, dysend   ;point to start of first region descriptor
+         loadk8  reg2, n_xmitdesc ;init max number of descriptors left to check
+tbfr_look unbank             ;back here to check each new region descriptor
+         movf    postinc0, w ;get region start address low byte
+         subwf   reg0, w
+         btfsc   indf0, 7    ;this decriptor is not empty ?
+         jump    tbfr_leave  ;hit end of list, nothing more to do
+         movf    postinc0, w ;get region start address high byte
+         subwfb  reg1, w     ;make high byte of TARGET - START
+         bn      tbfr_leave  ;this region is past the target address ?
+         ;
+         ;   The target address is at or after the start of this region.  FSR0
+         ;   is pointing to the after address of this region.
+         ;
+         movf    postinc0, w ;get region after address low byte
+         subwf   reg0, w
+         movf    postinc0, w ;get region after address high byte
+         subwfb  reg1, w     ;make high byte of TARGET - AFTER
+         bn      tbfr_found  ;taget address is within this region ?
+
+         decfsz  reg2        ;count one less descriptor left to check
+         jump    tbfr_look   ;back to check the next descriptor
+         jump    tbfr_leave  ;didn't find region with target adr, nothing to do
+;
+;   A allocated region was found that includes the target address.  FSR0 is
+;   pointing to the start of the descriptor for the next region.  REG2 is the
+;   number of descriptors in the list from the one to delete on.
+;
+tbfr_found unbank
+         movf    reg2, w     ;get reverse descriptor number
+         sublw   n_xmitdesc  ;make 0-N number of descriptor to delete
+         movwf   reg2        ;save number of the descriptor to delete
+;
+;   Handle the case of no descriptors need to be moved.  This is the case if the
+;   target descriptor is physically the last in the list or logically the last
+;   because the next descriptor is unused (and therefore all subsequent
+;   descriptors are unused).
+;
+         incf    reg2, w     ;get 0-N index of next descriptor
+         sublw   n_xmitdesc-1 ;compare to last valid descriptor number
+         jmp_wgt tbfr_ulast  ;target descriptor is physically last in list ?
+
+         btfss   preinc0, 7  ;next descriptor is unused ?
+         jump    tbfr_move   ;no, need to move descriptors around
+
+         movf    postdec0, w
+         movf    postdec0, w
+         movf    postdec0, w
+         movf    postdec0, w
+         bsf     indf0, 7    ;mark this descriptor as unused
+         jump    tbfr_leave
+;
+;   At least one used descriptor follows the one to delete.  FSR0 is pointing to
+;   the second byte of the following descriptor.  REG2 contains the 0-N index of
+;   the descriptor to delete.
+;
+tbfr_move unbank
+         movf    reg2, w     ;get index of descriptor to remove
+         sublw   n_xmitdesc-1 ;make number of descriptors to move up, is at least 1
+         mullw   sz_dyent    ;make number of bytes in the descriptors to move
+         movf    prodl, w
+         movwf   reg2        ;init loop counter
+         movf    postdec0, w ;init source pointer
+  if fsrsc2_save             ;need to save/restore second pointer ?
+         movff   fsr#v(fsrsc2)l, reg0 ;save second pointer in REG6:REG5
+         movff   fsr#v(fsrsc2)h, reg1
+    endif
+         movf    fsr0l, w    ;set destination pointer
+         addlw   -sz_dyent
+         movwf   fsr#v(fsrsc2)l
+         movff   fsr0h, fsr#v(fsrsc2)h
+tbfr_loopcp unbank           ;back here to copy each new byte
+         movff   postinc0, postinc#v(fsrsc2) ;copy this byte
+         decfsz  reg2        ;count one less byte left to copy
+         jump    tbfr_loopcp ;back to copy next byte
+;
+;   Make sure the last physical descriptor is marked unused, then leave.
+;
+tbfr_ulast unbank
+         dbankif lbankadr
+         bsf     dysend + (sz_dysend - sz_dyent + 1), 7 ;mark last descriptor unused
+
+tbfr_leave unbank            ;common exit point
+  /endif                     ;end of using dynamic transmit buffer allocation case
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine XMIT_POINT
+;
+;   Point FSR0 to the transmit buffer descriptor given its index in REG8.  This
+;   is a low level internal routine, and the index is not checked for validity.
+;   Valid indexes are in the range of 0 to N_XMITDESC-1.
+;
+         locsub  xmit_point, noregs
+
+         lfsr    0, xbdesc   ;point to start of descriptors
+
+         movf    reg8, w     ;get the 0-N descriptor index number
+         mullw   sz_xbdesc   ;make address offset from start of descriptors
+
+         movf    prodl, w    ;add address offset to the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_ALLOC
+;
+;   Allocate a new transmit buffer.  The maximum data payload size to configure
+;   the buffer to is in REG1:REG0.  A smaller packet can be sent using the
+;   buffer, but the unused transmit buffer memory will not be available for
+;   other uses.  The maximum allowed payload size is 1500 bytes.  A request for
+;   a larger buffer always fails.
+;
+;   The buffer index for the new buffer is returned in REG8.  The value of this
+;   index has no meaning to the caller, except that it must be passed to other
+;   NETP_XMIT_xxx routines to identify the buffer.  If the requested buffer
+;   could not be allocated, then REG8 is returned with the high bit set.  In
+;   that case the remaining bits in REG8 are undefined.  Valid buffer indexes
+;   are in the 0-127 range.
+;
+/if [= n_xmitdesc 0]
+  /then                      ;no transmit buffer descriptors exist
+         glbsub  netp_xmit_alloc, noregs
+         bsf     reg0, 7     ;indicate buffer not allocated
+
+  /else                      ;configured for transmit buffer allocation
+         glbsub  netp_xmit_alloc, regf0 | regf1 | regf3 | regf4
+;
+;   Validate the requested data payload size.  The maximum allowed network
+;   packet payload size is 1500 bytes.
+;
+         movf    reg0, w     ;compute MAX - REQUESTED
+         sublw   low 1500
+         movlw   high 1500
+         subfwb  reg1, w
+         bn      xma_no      ;more than max requested ?
+;
+;   Find the first unused buffer descriptor.
+;
+         lfsr    0, xbdesc   ;init pointer to first descriptor
+         loadk8  reg8, n_xmitdesc ;init loop counter
+xma_look unbank              ;back here to check next descriptor
+         btfss   indf0, xbfl_inuse ;this descriptor is in use ?
+         jump    xma_fnd     ;found available descriptor
+         dcfsnz  reg8        ;count one less descriptor left to check
+         jump    xma_no      ;no descriptor is available
+         movlw   low sz_xbdesc ;update pointer to next descriptor
+         addwf   fsr0l
+         movlw   high sz_xbdesc
+         addwfc  fsr0h
+         jump    xma_look    ;back to check this new descriptor
+
+xma_no   unbank              ;unable to allocate the buffer
+         setf    reg8        ;indicate buffer not allocated
+         jump    xma_leave
+
+xma_fnd  unbank              ;found unused buffer descriptor
+         movf    reg8, w     ;get count of descriptors from here to end
+         sublw   n_xmitdesc  ;make index of this descriptor
+         movwf   reg8
+;
+;   A unused transmit buffer descriptor has been found and REG8 has been set to
+;   its index.
+;
+;   Try to allocate the transmit buffer memory.
+;
+;   Register usage in this section:
+;
+;     REG1:REG0  -  Starts user payload size, will be total transmit buffer
+;       size.
+;
+;     REG4:REG3  -  Saved user payload size.
+;
+;     REG8  -  0-N buffer descriptor index.
+;
+         movf    reg0, w     ;get payload size low byte
+         movwf   reg3        ;save it
+         addlw   low [v size_xmovh] ;add overhead bytes needed in transmit buffer
+         movwf   reg0
+         movf    reg1, w     ;get payload size high byte
+         movwf   reg4        ;save it
+         movlw   high [v size_xmovh]
+         addwfc  reg1        ;set total bytes needed high byte
+         mcall   tbuf_resv   ;try to reserve the transmit buffer space
+         btfsc   reg1, 7     ;got the buffer ?
+         jump    xma_no      ;no
+;
+;   The transmit buffer space has been allocated.  This routine will definitely
+;   return with success.
+;
+;   Current register usage:
+;
+;     REG1:REG0  -  Start address of the transmit buffer.
+;
+;     REG4:REG3  -  Max payload size the transmit buffer is configured for.
+;
+;     REG8  -  0-N buffer descriptor index.
+;
+         incf    reg0        ;round up to even address if at odd address
+         movlw   0
+         addwfc  reg1
+         bcf     reg0, 0
+
+         mcall   xmit_point  ;point FSR0 to the buffer descriptor indexed by REG8
+
+         dbankif gbankadr
+         swapf   currtask, w ;get current task ID in upper 4 bits
+         andlw   b'11110000' ;mask off the remaining bits
+         iorlw   1 << xbfl_inuse ;indicate descriptor in use but otherwise default
+         movwf   postinc0    ;set flags and task ID byte
+
+         movff   reg0, postinc0 ;set transmit buffer start address
+         movff   reg1, postinc0
+
+         movff   reg3, postinc0 ;set maximum allowed user payload size
+         movff   reg4, postinc0
+
+         clrf    postinc0    ;init payload offset for next user read or write
+         clrf    postinc0
+
+         clrf    postinc0    ;init actual payload size
+         clrf    postinc0
+
+xma_leave unbank             ;common exit point
+  /endif
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro BUFPNT0 ofs
+;
+;   Point FSR0 to OFS bytes into the buffer descriptor identified by REG8.
+;
+bufpnt0  macro   ofs
+         lfsr    0, xbdesc + (ofs) ;point to selected byte in descriptor 0
+         movf    reg8, w     ;get the 0-N descriptor index
+         mullw   sz_xbdesc   ;make offset for selected descriptor in PRODH:PRODL
+         movf    prodl, w    ;add the offset into the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Macro BUFID_SETUP abort
+;
+;   Set up for dealing with the transmit buffer identified by REG8.  The abort
+;   address is jumped to if the transmit buffer index in REG8 is invalid or the
+;   buffer is not in use.  Otherwise, execution continues after this macro and
+;   FSR0 is left pointing to the XB_FLAGS byte of the buffer descriptor.
+;
+bufid_setup macro abort
+         movf    reg8, w     ;get the buffer index number
+         sublw   n_xmitdesc-1 ;compare to max valid value
+         skip_wle            ;index is within range ?
+         jump    abort       ;no
+
+         bufpnt0 xb_flags    ;point FSR0 to the descriptor flags byte
+         btfss   indf0, xbfl_inuse ;this descriptor is in use ?
+         jump    abort       ;no
+         endm
+
+;*******************************************************************************
+;
+;   Macro ADDOFS ofs
+;
+;   Add the fixed offset OFS to the unsigned value in REG1:REG0.
+;
+addofs   macro   ofs
+         movlw   low (ofs)
+         addwf   reg0
+         movlw   high (ofs)
+         addwfc  reg1
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_DEST
+;
+;   Write the destination address into the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently allocated transmit buffer.  The
+;   address is passed by pointing FSR0 to it, and must be stored in high to low
+;   byte order.  FSR0 is trashed.
+;
+         glbsub  netp_xmit_dest, regf0 | regf1
+
+         pushreg fsr0l       ;save pointer passed in by caller
+         pushreg fsr0h
+
+         bufid_setup xdst_abort ;validate buffer ID, point FSR0 to descriptor
+         movff   preinc0, reg0 ;get buffer start address into REG1:REG0
+         movff   preinc0, reg1
+         addofs  1           ;add offset to get to the field to write to
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+         popreg  fsr0h       ;point to the data passed in by the caller
+         popreg  fsr0l
+
+         movff   postinc0, edata ;write the 6 byte destination MAC address
+         movff   postinc0, edata
+         movff   postinc0, edata
+         movff   postinc0, edata
+         movff   postinc0, edata
+         movff   postinc0, edata
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+xdst_leave unbank            ;common exit point
+         leaverest
+
+xdst_abort unbank            ;jump here on invalid packet ID
+         popreg  fsr0h
+         popreg  fsr0l
+         jump    xdst_leave
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_BCAST
+;
+;   Set the transmit packet identified by REG8 as being a broadcast packet.  The
+;   ID in REG8 must be of a currently allocated transmit  buffer.
+;
+         glbsub  netp_xmit_bcast, regf0 | regf1
+
+         bufid_setup bcst_leave ;validate buffer ID, point FSR0 to descriptor
+         movff   preinc0, reg0 ;get buffer start address in REG1:REG0
+         movff   preinc0, reg1
+         addofs  1           ;add offset to get to destination address field
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+
+         setf    reg0        ;set data byte value to write
+         movff   reg0, edata ;write the 6 byte destination MAC address
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+bcst_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_SRC
+;
+;   Write the source address into the transmit packet identified by REG8.  The
+;   ID in REG8 must be of a currently allocated transmit buffer.  The address is
+;   passed by pointing FSR0 to it, and must be stored in high to low byte order.
+;
+         glbsub  netp_xmit_src, regf0 | regf1
+
+         pushreg fsr0l       ;save pointer passed in by caller
+         pushreg fsr0h
+
+         bufid_setup xsrc_abort ;validate buffer ID, point FSR0 to descriptor
+         bsf     indf0, xbfl_srcadr ;indicate source address explicitly set
+         movff   preinc0, reg0 ;get buffer start address into REG1:REG0
+         movff   preinc0, reg1
+         addofs  7           ;add offset to get to the field to write to
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+         popreg  fsr0h       ;point to the data passed in by the caller
+         popreg  fsr0l
+
+         movff   postinc0, edata ;write the 6 byte destination MAC address
+         movff   postinc0, edata
+         movff   postinc0, edata
+         movff   postinc0, edata
+         movff   postinc0, edata
+         movff   postinc0, edata
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+xsrc_leave unbank            ;common exit point
+         leaverest
+
+xsrc_abort unbank            ;jump here on invalid packet ID
+         popreg  fsr0h
+         popreg  fsr0l
+         jump    xsrc_leave
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_TYPE
+;
+;   Write the type/length word into the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently allocated transmit buffer.  The 16 bit
+;   value to write is passed in REG1:REG0.
+;
+         glbsub  netp_xmit_type, regf0 | regf1 | regf2 | regf3
+
+         movff   reg0, reg2  ;save the data to write in REG3:REG2
+         movff   reg1, reg3
+
+         bufid_setup xtyp_leave ;validate buffer ID, point FSR0 to descriptor
+         bsf     indf0, xbfl_tywr ;indicate type/length explicitly set
+         movff   preinc0, reg0 ;get buffer start address into REG1:REG0
+         movff   preinc0, reg1
+         addofs  13          ;add offset to get to the field to write to
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+
+         movff   reg3, edata ;write the type/length word
+         movff   reg2, edata
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+xtyp_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_OFS
+;
+;   Sets which payload byte of the transmit packet identified by REG8 will be
+;   accessed next.  The offset from the first payload byte is passed in
+;   REG1:REG0.  The first payload byte is at offset 0.  This read/write offset
+;   is initialized to 0 when the transmit buffer is allocated.
+;
+         glbsub  netp_xmit_ofs, noregs
+
+         bufid_setup xofs_leave ;validate buffer ID, point FSR0 to descriptor
+         addfsr0 xb_next     ;point to start of NEXT field
+         movff   reg0, postinc0 ;update the next read/write offset
+         movff   reg1, postinc0
+
+xofs_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_WRITE
+;
+;   Write a payload byte to the transmit packet identified by REG8.  The offset
+;   into the payload of the next access is advanced by 1.  Therefore successive
+;   calls to this routine will write successive payload bytes.  The data byte
+;   to write is in REG0.
+;
+;   The used payload size is updated, if necessary, to include the new written
+;   byte.  The used payload size is initialized to 0 when the transmit buffer is
+;   allocated.  It is grown to include any valid payload bytes written via this
+;   routine.  This length is sent in the type/length field of the packet unless
+;   that value is explicitly set with a call to NETP_XMIT_TYPE.
+;
+         glbsub  netp_xmit_write, regf0 | regf1 | regf2 | regf3 | regf4
+
+         bufid_setup xwr_leave ;validate buffer ID, point FSR0 to descriptor
+         addfsr0 xb_next+1   ;point to NEXT high byte
+         btfsc   indf0, 7    ;current offset is not negative ?
+         jump    xwr_inc     ;is negative, increment the offset and leave
+         movff   postdec0, reg3 ;save payload write offset in REG3:REG2
+         movff   postdec0, reg2
+         movf    postdec0    ;point to MAXLEN low byte
+
+         movf    postinc0, w ;compute NEXT - MAXLEN, high byte of result in W
+         subwf   reg2, w
+         movf    postdec0, w
+         subwfb  reg3, w
+         bnn     xwr_leave   ;NEXT is currently past end of buffer ?
+;
+;   The write offset is within the payload buffer region, so the write will be
+;   performed.  The current register contents is:
+;
+;     REG0  -  Data byte to write.
+;
+;     REG1  -  Unused.
+;
+;     REG3:REG2  -  Offset into payload region of byte to write.
+;
+;     REG4  -  Unused.
+;
+;     FSR0  -  Pointing to start of MAXLEN field of descriptor.
+;
+         movff   reg0, reg4  ;save the data byte in REG4
+
+         movf    postdec0
+         movf    postdec0    ;point to ADR_START low byte
+         movf    postinc0, w ;make ADR_START + NEXT in REG1:REG0
+         addwf   reg2, w
+         movwf   reg0
+         movf    postinc0, w
+         addwfc  reg3, w
+         movwf   reg1
+         addofs  15          ;add fixed offset to start of payload
+;
+;   Register usage:
+;
+;     REG1:REG0  -  Address of ethernet buffer byte to write to.
+;
+;     REG3:REG2  -  Offset of target from start of payload.
+;
+;     REG4  -  The data byte to write.
+;
+;   Now perform the write.
+;
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+         movff   reg4, edata ;write the data byte into the ethernet buffer
+         mac_unlock          ;release exclusive access to the MAC/PHY
+;
+;   Make sure the used payload length includes this byte.
+;
+         incf    reg2        ;make minimum required LEN value in REG3:REG2
+         skip_ncarr
+         incf    reg3
+
+         bufpnt0 xb_len      ;point FSR0 to the LEN field in the buffer descriptor
+
+         movf    reg2, w     ;compute (curr len)-(new len) high byte into W
+         subwf   postinc0, w
+         movf    reg3, w
+         subwfb  postdec0, w
+         bnn     xwr_inc     ;current LEN already covers this byte ?
+
+         movff   reg2, postinc0 ;update LEN to cover this byte
+         movff   reg3, indf0
+;
+;   Increment the NEXT address by 1 and leave.  FSR0 is not assumed to be
+;   pointing to a particular location.  REG8 must be preserved from entry and
+;   therefore contain the 0-N index of the buffer descriptor.
+;
+xwr_inc  unbank
+         bufpnt0 xb_next     ;point FSR0 to the NEXT field
+         incf    postinc0    ;increment the low byte
+         skip_ncarr
+         incf    indf0       ;propagate the carry
+
+xwr_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_READ
+;
+;   Read the next payload byte from the transmit packet identified by REG8.  The
+;   offset into the payload of the next access is advanced by 1.  Therefore
+;   successive calls to this routine will return successive payload bytes.  The
+;   data byte is returned in REG0.
+;
+;   The returned value is undefined on a attempt to read past the end of the
+;   payload, as defined when the transmit buffer was allocated.
+;
+         glbsub  netp_xmit_read, regf1
+
+         bufid_setup xrd_leave ;validate buffer ID, point FSR0 to descriptor
+         addfsr0 xb_next     ;point to offset for this read
+         movff   postinc0, reg0 ;get user area offset into REG2:REG0
+         movff   postdec0, reg1
+
+         incf    postinc0    ;increment the stored offset for next time
+         skip_ncarr
+         incf    indf0
+
+         addfsr0 -5          ;point to buffer start address field
+         movf    postinc0, w ;add buffer start to the offset in REG1:REG0
+         addwf   reg0
+         movf    postinc0, w
+         addwfc  reg1
+         addofs  15          ;add fixed offset to start of payload
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         movff   reg0, erdptl ;set buffer read start address
+         movff   reg1, erdpth
+         movff   edata, reg0 ;read this data byte from the buffer
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+xrd_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_DEF
+;
+;   Fill in default values for transmit packet fields that have not been
+;   explicitly set and for which there is a reasonable default.  The following
+;   fields have default values:
+;
+;     Source address  -  Our MAC address will be used if known.  Our MAC address
+;       is in OUR_MAC if FLAG_MACADR is set, otherwise our MAC address is
+;       unknown.  If our MAC address is unknown, then FF-FF-FF-FF-FF-FF will be
+;       used.
+;
+;     Type/length  -  The default is the actual size of the payload region
+;       written to.  Note that this will be smaller than the size the transmit
+;       buffer was originally allocated with if the last byte of the payload
+;       region was not written to.  The type/length field can be set explicitly
+;       with NETP_XMIT_TYPE, in which case it will not be altered by this
+;       routine.
+;
+;   After this call, the fields above will be considered explicitly set.  This
+;   routine will therefore only fill in defaults for the fields at most once
+;   per transmit buffer.
+;
+         glbsub  netp_xmit_def, regf0 | regf1
+
+         bufid_setup xdef_leave ;validate buffer ID, point FSR0 to descriptor
+;
+;   Abort if no field left to default.
+;
+         btfss   indf0, xbfl_srcadr ;source address already set ?
+         jump    xdef_do     ;no
+         btfss   indf0, xbfl_tywr ;type/length field already set ?
+         jump    xdef_do     ;no
+         jump    xdef_leave  ;all fields already explicitly set
+         ;
+         ;   At least one field not set yet.  Something will get written.
+         ;
+xdef_do  unbank
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+;
+;   Make sure the MAC address is set.
+;
+         btfsc   indf0, xbfl_srcadr ;source MAC address not already set ?
+         jump    xdef_donesrc ;already set, skip this section
+         bsf     indf0, xbfl_srcadr ;this field will now be set
+
+         movff   preinc0, reg0 ;get transmit buffer start address into REG1:REG0
+         movff   preinc0, reg1
+         addofs  7           ;add fixed offset to get to source address
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+         dbankif gbankadr
+         btfsc   flag_macadr ;our MAC address is unknown ?
+         jump    xdef_havemac ;our MAC address is known
+         ;
+         ;   Our MAC address is not known to this code.
+         ;
+         loadk8  reg0, h'FF' ;use FF-FF-FF-FF-FF-FF as address
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         movff   reg0, edata
+         jump    xdef_dsrcw  ;done writing source address
+         ;
+         ;   Our MAC address is in OUR_MAC.
+         ;
+xdef_havemac unbank
+         movff   our_mac+0, edata ;write the 6 byte MAC address
+         movff   our_mac+1, edata
+         movff   our_mac+2, edata
+         movff   our_mac+3, edata
+         movff   our_mac+4, edata
+         movff   our_mac+5, edata
+
+xdef_dsrcw unbank            ;just wrote last byte of source address
+         bufpnt0 0           ;point FSR0 back to start of buffer descriptor
+
+xdef_donesrc unbank          ;done with source adr, FSR0 points to flags byte
+;
+;   Make sure the type/length word is set.
+;
+         btfsc   indf0, xbfl_tywr ;type/length not already set ?
+         jump    xdef_donetylen ;already set, skip this section
+         bsf     indf0, xbfl_tywr ;this field will now be set
+
+         movff   preinc0, reg0 ;get transmit buffer start address into REG1:REG0
+         movff   preinc0, reg1
+         addofs  13          ;add fixed offset to get to type/length field
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+
+         addfsr0 6           ;point to high byte of actual length
+         movff   postdec0, edata ;write the type/length word to ethernet buffer
+         movff   indf0, edata
+
+xdef_donetylen unbank        ;done with type/length field
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+xdef_leave unbank            ;common exit point
+         leaverest           ;end of NETP_XMIT_DEF
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_SEND
+;
+;   Send the packet in the transmit buffer identified by REG8.  The ID in REG8
+;   must be of a currently allocated transmit buffer.  This call does not
+;   deallocate the transmit buffer.  The packet can be sent any number of times
+;   until the transmit buffer is released by calling NETP_XMIT_RELEASE.
+;
+         glbsub  netp_xmit_send, regf0 | regf1
+
+         bufid_setup xmit_leave ;validate buffer ID, point FSR0 to descriptor
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+;
+;   Set the control byte to 0.  This sends the packet according to the current
+;   setup without overriding any parameters.
+;
+         movff   preinc0, reg0 ;get ethernet buffer start address into REG1:REG0
+         movff   preinc0, reg1
+
+         movff   reg0, ewrptl ;set data buffer write address from REG1:REG0
+         movff   reg1, ewrpth
+         clrf    edata       ;set the control byte to 0
+;
+;   Set up the transmitter hardware and start the transmission.  FSR0 is
+;   pointing to the second byte of the ADR_START field of our buffer descriptor.
+;   The ethernet buffer start address is in REG1:REG0.
+;
+         movff   reg0, etxstl ;set transmit start address
+         movff   reg1, etxsth
+
+         addofs  14          ;make address of last byte before user data
+         addfsr0 5           ;point to start of user length field in descriptor
+         movf    postinc0, w ;add user length to make transmit end address
+         addwf   reg0
+         movf    indf0, w
+         addwfc  reg1
+         movff   reg0, etxndl ;set transmit end address
+         movff   reg1, etxndh
+
+         dbankif econ1
+         bsf     econ1, txrts ;start the transmission
+         nop
+;
+;   Wait for this transmission to complete before releasing access to the
+;   MAC/PHY.  Some operations are restricted during a transmission, and this
+;   guarantees that other tasks can't perform any operations on the MAC/PHY
+;   until the transmission is complete.  A transmission in progress is indicated
+;   by the TXRTS bit of ECON1 set.
+;
+xmit_wready unbank           ;back here until no transmission in progress
+         dbankif econ1
+         btfss   econ1, txrts ;still transmitting ?
+         jump    xmit_done   ;no, transmission is all done
+         gcall   task_yield_save ;give all other tasks a chance to run
+         jump    xmit_wready ;back to check for transmit done again
+xmit_done unbank             ;transmission has completed
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+xmit_leave unbank            ;common exit point
+         leaverest           ;end of subroutine NETP_XMIT_SEND
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_RELEASE
+;
+;   Release the network transmit buffer allocated with NETP_XMIT_ALLOC.  REG8
+;   must contain the buffer index returned by NETP_XMIT_ALLOC.  The transmit
+;   buffer will be available for re-use by subsequent calls to NETP_XMIT_ALLOC.
+;   No attempt must be made to use the buffer after it has been released.
+;
+         glbsub  netp_xmit_release, regf0 | regf1
+
+         movf    reg8, w     ;get buffer index number
+         sublw   n_xmitdesc-1 ;compare to max valid value
+         jmp_wgt xmr_leave   ;invalid buffer index, ignore ?
+
+         mcall   xmit_point  ;point FSR0 to the buffer descriptor indexed by REG8
+         clrf    postinc0    ;mark the buffer descriptor as unused
+         movff   postinc0, reg0 ;get address within buffer into REG1:REG0
+         movff   postinc0, reg1
+         mcalll  tbuf_free   ;free the buffer memory
+
+xmr_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_TASK_RESET
+;
+;   Deallocate any resources the current task may have allocated here.  The
+;   MAC/PHY is unlocked if this task has it locked and all dynamic memory
+;   allocated by this task is released.
+;
+         glbsub  netp_task_reset, regf2 | regf8
+;
+;   Release the lock on the MAC/PHY if this task has it locked.
+;
+         dbankif gbankadr
+         btfss   flag_maclock ;some task has it locked ?
+         jump    ntr_unlk    ;no task has it locked, skip this section
+         movf    currtask, w ;get the ID of this task
+         xorwf   mac_locktsk, w ;compare to the locking task's ID
+         bnz     ntr_unlk    ;not us ?
+         gcall   fj60_unlock ;release the lock on the MAC/PHY
+ntr_unlk unbank              ;this tasks doesn't have the MAC/PHY locked
+;
+;   Release all the transmit buffers this task has allocated.
+;
+/if [> n_xmitdesc 0] then    ;configured for dynamic transmit buffer allocation ?
+         loadk8  reg8, 0     ;init ID of current buffer descriptor
+         loadk8  reg2, n_xmitdesc ;init loop counter
+ntr_xmbloop unbank           ;back here to check each new transmit buffer
+         mcall   xmit_point  ;point FSR0 to the buffer descriptor indexed by REG8
+         btfss   indf0, xbfl_inuse ;this descriptor is in use ?
+         jump    ntr_xmbnext ;no, skip it
+         dbankif gbankadr
+         swapf   currtask, w ;get the ID of this task in high nibble
+         xorwf   indf0, w    ;compare to ID of task that owns this buffer
+         andlw   b'11110000' ;mask in only task ID
+         bnz     ntr_xmbnext ;not us ?
+         mcall   netp_xmit_release ;release this buffer
+ntr_xmbnext unbank           ;advance to next descriptor
+         incf    reg8        ;make 0-N index of next descriptor
+         decfsz  reg2        ;count one less descriptor left to do
+         jump    ntr_xmbloop ;back to do the next descriptor
+  /endif
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_CHECKLINK
+;
+;   Check the network link status and update FLAG_LINK accordingly.  FLAG_LINK
+;   is set if we have network link and reset if not.
+;
+;   WARNING:  Any registers not preserved by a task swap may be trashed.
+;
+         glbsub  netp_checklink, regf0 | regf1 | regf2
+
+         dbankif gbankadr
+         btfss   flag_macready ;MAC/PHY is ready for general access ?
+         jump    chk_nolink  ;no, return no link status until it is
+
+         mac_lock            ;get exclusive access to the MAC/PHY hardware
+         loadk8  reg2, phy_phstat2 ;pass PHY register address
+         gcall   fj60_phyget ;read the PHY register into REG1:REG0
+         mac_unlock          ;release exclusive access to the MAC/PHY
+
+         dbankif gbankadr
+         btfsc   reg1, 2
+         bsf     flag_link   ;we have link
+         btfss   reg1, 2
+chk_nolink                   ;return with no link, GBANK must be set
+         bcf     flag_link   ;link was down some time since last check
+
+         leaverest

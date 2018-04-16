@@ -1,0 +1,31 @@
+;   Low level handler for UART 1.
+;
+;   The following must be previously defined:
+;
+;     FLAG_SIN1  -  Flag that indicates the UART has a input byte available.
+;       When this flag is set, UART1_GET is guaranteed to return quickly with a
+;       byte without waiting.  This flag is not guaranteed to be up to date
+;       until UART1_GET_CHECK is called.
+;
+;     FLAG_SOUT1  -  Flag that indicates the UART and its output FIFO (when
+;       applicable) can immediately accept another byte.  When this flag is set,
+;       UART1_PUT is guaranteed to return quickly without waiting.  This flag is
+;       not guaranteed to be up to date until UART1_PUT_CHECK is called.
+;
+;   *** Insert description here of the purpose of this UART and what it is
+;       connected to. ***
+;
+/include "qq2.ins.aspic"
+;
+;   Specific configuration unique to this UART.
+;
+/const   un      integer = 1 ;1-N number of the UART handled by this module
+/const   baud    real = 115200 ;desired baud rate
+/const   finsz   integer = 8 ;input FIFO size, 0 disables FIFO and interrupt
+/const   fousz   integer = 8 ;output FIFO size, 0 disables FIFO and interrupt
+/const   tasking bool = false ;using the multi-tasking system, PIC 18 only
+/const   lbank   integer = 1 ;bank for local state of this module
+
+/include "(cog)src/pic/uart.ins.aspic"
+
+         end

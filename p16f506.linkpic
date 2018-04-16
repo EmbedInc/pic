@@ -1,0 +1,10 @@
+//   Linker control file for the PIC 16F506 processor.
+//
+CODEPAGE NAME=code0  START=0x0000  END=0x01FF //code page 0
+CODEPAGE NAME=code1  START=0x0200  END=0x03FF //code page 1
+
+CODEPAGE NAME=config START=0x0FFF  END=0x0FFF PROTECTED //processor config word
+
+DATABANK NAME=bank0  START=0x0D    END=0x1F   //register bank 0
+
+SECTION NAME=.CONFIG ROM=config

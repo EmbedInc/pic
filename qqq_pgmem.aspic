@@ -1,0 +1,61 @@
+;   ***************************************************************
+;   * Copyright (C) 2015, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module provides a simple procedural interface for reading and writing
+;   program memory of a PIC 18.
+;
+;   The following symbols must be previously defined.
+;
+;     PROG_ERASESZ  -  Preprocessor integer constant for the size of the erase
+;       block of this processor.  This is the minimum number of program memory
+;       bytes that can be erased at one time by the firmware.  It should be
+;       defined in the STD_DEF.INS.ASPIC section for this processor.
+;
+;   The subroutines exported for normal operation by this module are:
+;
+;     PGMEM_WRITE
+;
+;       Write the byte in REG0 to the program memory address in REG3:REG2:REG1.
+;       The byte may be cached and is not guaranteed to be physically written to
+;       program memory until PGMEM_FLUSH is called.
+;
+;       Writes that don't change the value of a byte won't force a physical
+;       write, whether PGMEM_FLUSH is called or not.
+;
+;       The address in REG3:REG2:REG1 is incremented by 1.
+;
+;     PGMEM_READ
+;
+;       Read the byte at program memory address REG3:REG2:REG1 into REG0.  This
+;       reads the latest data written by PGMEM_WRITE, whether it has been
+;       physically written to program memory or not.
+;
+;       The address in REG3:REG2:REG1 is incremented by 1.
+;
+;     PGMEM_FLUSH
+;
+;       Force any cached data to be physically written to program memory.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     0           ;register bank for the local state of this module
+
+/include "(cog)src/pic/pgmem.ins.aspic"
+         end

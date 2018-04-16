@@ -1,0 +1,549 @@
+;   This file is intended to be included by the main application include file
+
+;   Settings for the Embed Inc networking routines, and common include file for
+;   all the network routines.  All the build-time policy choices that are
+;   intended to be customized for each use of the Embed Inc network routines are
+;   exposed in this file.
+;
+
+;   MACTYPE
+;
+;     Configures what type of MAC the network routines will drive.  This is a
+;     string variable that must contain one of the following:
+;
+;       FJ60  -  The internal MAC/PHY built into the 18FxxJ60 processor series.
+;
+;       28J60  -  External ENC28J60 MAC/PHY connected to this processor via SPI.
+;
+;       ZeroG  -  ZeroG 2100 or 2101 WiFi module connected to this processor
+;         via SPI.
+;
+;     The MACTYPE value is case-sensitive, and must be set exactly as shown
+;     above.
+;
+/const   mactype = "FJ60"
+
+;   LBANK_xxx
+;
+;     These constants set the bank the local state of the NET_xxx modules will
+;     be defined in.  Arrays and structures that are only accessed indirectly
+;     are defined in separate linker segments to allow the linker to place them
+;     wherever it sees fit.  The LBANK_xxx bank is only used for the collection
+;     of individual variables that are accessed directly, and it is therefore
+;     more efficient to know their bank at build time.
+;
+/const   lbank_enc28j60 integer = 2
+/const   lbank_18fj60 integer = 2
+/const   lbank_zerog integer = 2
+/const   lbank_packet integer = 2
+/const   lbank_arp integer = 2
+/const   lbank_ip integer = 2
+/const   lbank_icmp integer = 2
+/const   lbank_tcp integer = 2
+/const   lbank_net_task integer = 2
+/const   lbank_net_udp integer = 2
+/const   lbank_net_dhcp integer = 2
+
+;   BYTES_SENDBUF
+;
+;     The amount of memory to allocate in the MAC/PHY memory to transmit
+;     buffers.  This parameter is used differently by different MACs:
+;
+;     MAC FJ60, 28J60:
+;
+;       This MAC has 8192 bytes of memory where packets are sent from and
+;       received to.  BYTES_SENDBUF is the number of bytes of this memory to
+;       reserve for building packets to be sent.  The remainder of the memory
+;       will be a circular receive queue.
+;
+;       If BYTES_SENDBUF value is small, then there will be more contention for
+;       transmit buffer space and tasks will more often have to wait to get a
+;       transmit buffer allocated to them.  Note that when using a higher level
+;       protocol that requires the receiver of a packet to send a ACK (such as
+;       TCP), a task will usually keep a transmit buffer allocated until the ACK
+;       is received.  It is usually a good idea to provide enough transmit
+;       buffer space for each TCP connection to have one buffer allocated
+;       concurrently.  That prevents a lost ACK and associated retry on one TCP
+;       stream from hanging any other TCP stream.
+;
+;       If this value is large, then the receive buffer space will be small.
+;       This increases the chance of incoming packets being dropped due to lack
+;       of buffer space to hold them before they are processed by the network
+;       reception task.
+;
+;       The maximum allowed data payload size of a packet is 1500 bytes.  This
+;       implementation has a additional overhead of 22 transmit buffer bytes
+;       beyond the application payload, for a total of 1522 transmit buffer
+;       bytes required for each maximum size packet.  However most applications,
+;       especially in a small embedded system, have significantly smaller known
+;       upper limits on the per-packet payload size.  For example, if three TCP
+;       applications could run concurrently and each never transmits more than
+;       512 payload bytes at a time, then a total transmit buffer space of
+;       3(512 + 22) = 1602 bytes is sufficient to support simultaneous
+;       transmission by all three TCP applications.  Note however that if TCP is
+;       used, other low level protocols may also be enabled, such as ICMP which
+;       implements PING for example.  Packet sizes for such protocols tend to be
+;       small, but leaving a little room for them is generally a good idea.
+;
+;       The suggested value is for BYTES_SENDBUF is 2048.
+;
+;     MAC ZeroG:
+;
+;       This parameter is ignored.  The scratch RAM in the ZeroG module is used
+;       to hold the last received packet and transmit packets as they are being
+;       built or awaiting transmission.  This memory is allocated into fixed
+;       regions of 2048 bytes each.  One region is used for the last received
+;       packet, and the remaining regions are available for transmit buffers.
+;       Since this memory is typically 65536 bytes in size, up to 31 transmit
+;       packets can be supported simultaneously, which is way more than usually
+;       required by a small embedded system.
+;
+/const   bytes_sendbuf integer = 2048
+
+;   N_XMITDESC
+;
+;     The number of low level network packet transmit descriptors to create
+;     beyond the minimum required implicitly by higher level protocols.  This is
+;     the number of transmit packets that will be opened directly by the
+;     application simultaneously, which is usually 0.
+;
+;     Applications generally use only higher level protocols, like TCP and UDP,
+;     and would not directly send low level network packets.  Leave this value 0
+;     unless you know your application is doing something special.
+;
+;     Some implementation details are specific to the particular MAC in use:
+;
+;     MAC FJ60, 28J60:
+;
+;       Each transmit buffer descriptor consumes 13 bytes of processor RAM.
+;
+;     MAC ZeroG:
+;
+;       Each transmit buffer descriptor consumes 5 bytes of processor RAM.
+;
+/var exist n_xmitdesc integer = 0
+
+;   N_ARPCACHE
+;
+;     The number of ARP cache entries.  This is the number of different IP
+;     addresses for which hardware addresses will be remembered locally.  Every
+;     time a packet is sent to a particular IP address, that address is looked
+;     up in the ARP cache.  If found, then the hardware address for that IP
+;     address is returned quickly from the cache.  If the IP address is not in
+;     the cache, but the currently open received IP packet (if any) is from that
+;     address, then the hardware address is taken from the received IP packet.
+;     If there is no open received IP packet or its source IP address does not
+;     match the requested IP address, then a ARP request is sent.  It is
+;     generally a good idea to have at least one ARP cache entry for every
+;     expected concurrent higher level protocol connection that uses IP
+;     addresses (like TCP and UDP).
+;
+;     Each ARP cache entry consumes 12 bytes of processor RAM.
+;
+;     Setting this value to 0 attempts to disable the ARP client and eliminate
+;     the code from the project.  If the ARP client is required by higher level
+;     protocols that are enabled here, then the ARP client will be present with
+;     a minimal cache.
+;
+/var exist n_arpcache integer = 3
+
+;   USING_NET_ARP_SERVER
+;
+;     This switch enables the ARP server.  This is generally necessary for other
+;     network nodes to contact this node, such as to respond to PING requests or
+;     to connect to a TCP server running on this node.
+;
+;     The ARP server should be enabled for normal network operation.  It would
+;     only be disabled in very unusual cases when trying to partially "hide" on
+;     the network.  Disabling the ARP server is a bad idea unless you know
+;     exactly what you're doing.
+;
+/var exist using_net_arp_server bool = true
+
+;   N_IPXMIT
+;
+;     Maximum number of IP transmit packets that the will be open simultanously
+;     directly due to the application.  Transmit units required implicitly by
+;     higher level protocols will be added to this number.  If the total is 0,
+;     then the IP transmit code will not be included in the project.
+;
+;     This value is generally set to 0 unless the application will directly
+;     send packets via the IP layer.  Most applications have no reason to do so.
+;     Set this value to 0 unless you know what you're doing and know of a reason
+;     more IP transmit units are needed than the default computed automatically
+;     by the build time configuration logic.
+;
+;     8 bytes of processor RAM will be consumed for each IP transmit packet the
+;     system is configured for.
+;
+/var exist n_ipxmit integer = 0
+
+;   USING_NET_PING_REPLY
+;
+;     Set this to TRUE for the network stack to automatically reply to PING
+;     requests.  Setting it to FALSE eliminates the PING reply code.  Being able
+;     to respond to PING requests is useful for network diagnostics and should
+;     generally be enabled.
+;
+;     PING is implemented as part of ICMP, which requires IP.  Enabling this
+;     switch will therefore force IP to be included (which it generally would be
+;     in most useful stack configurations anyway).
+;
+/var exist using_net_ping_reply bool = true
+
+;   ICMP_REPLY_ARP
+;
+;     Get the hardware address for ICMP reply packets by doing a ARP resolution
+;     on the reply-to IP address.  This is probably the correct way to determine
+;     the hardware address to reply to, but puts more burden on our ARP cache.
+;     A ARP cache entry will be used to reply to PING packets, for example, even
+;     though the application has no other interest in communicating with the
+;     machine the PING reply is sent to.  The ARP cache entry will eventually
+;     get stale, and will be overwritten when newer requests are made, but will
+;     still temporarily delete one existing ARP cache entry if all are in use.
+;
+;     When this constant is set to FALSE, the hardware destination address of a
+;     ICMP reply will be taken from the hardware source address of the request.
+;     This should only differ from the real sender's hardware address if someone
+;     has sent deliberate fraudulent packets.  This is unlikely to be a problem
+;     for a small embedded system.  We recommend leaving this switch set to
+;     FALSE unless you understand the issues and know of a good reason not to.
+;
+/const   icmp_reply_arp bool = false
+
+;   N_TCPUNITS
+;
+;     The number of TCP I/O units to create.  Each TCP I/O unit holds the state
+;     for one TCP connection, so the N_TCPUNITS value is the maximum number of
+;     simultaneous TCP connections the system can have.
+;
+;     Each TCP I/O unit consumes 39 bytes of processor RAM.  The array of TCP
+;     I/O units will be defined in its own linker section to allow maximum
+;     flexibility to the linker in placing it.  The code can tolerate bank
+;     boundaries within the array, so it may be larger than one bank.  Note that
+;     the maximum number of I/O units that fit wholly in a bank is 6.  If more
+;     then 6 I/O units are needed, then the linker control file will need to be
+;     adjusted to define two consecutive banks as a single memory region.
+;
+;     Setting this constant to 0 disables TCP, and the TCP code will not be
+;     included.  This prevents use of higher level protocols that require TCP,
+;     such as HTTP, SMTP, and many others.
+;
+/var exist n_tcpunits integer = 2
+
+;   USING_NET_TCP_SERVER
+;   USING_NET_TCP_CLIENT
+;
+;     Indicates whether TCP server or client services will be used.  If the
+;     number of TCP units (N_TCPUNITS) is set to 0, then both the TCP client and
+;     server will be disabled regardless of the settings here.
+;
+/var exist using_net_tcp_server bool = true
+/var exist using_net_tcp_client bool = true
+
+;   TCP_INACTIVE_SEC
+;
+;     Sets the default inactivity timeout of a TCP connection.  A TCP connection
+;     is automatically closed if there has been no activity in either direction
+;     for TCP_INACTIVE_SEC seconds.  The maximum possible setting is 255 seconds
+;     (4 1/4 minutes).
+;
+/var exist tcp_inactive_sec integer = 120
+
+;   TCP_XMITSIZE
+;
+;     The default maximum payload size of TCP transmit packets.  TCP is a stream
+;     protocol, with packets being a implementation reality transparent to
+;     applications.  In this implementation of TCP, data bytes are sent by
+;     applications with the TCP_PUT call.  These data bytes are written to a
+;     pending transmit packet and are sent when the transmit packet fills up or
+;     the application calls TCP_FLUSH, after which a new transmit packet is
+;     started for subsequent output data.  Partially filled transmit packets may
+;     also be sent for other reasons internal to the TCP subsystem.
+;
+;     The TCP_XMITSIZE constant only sets the default for each new TCP
+;     connection.  Applications can change that default per connection with the
+;     TCP_OUTSIZE subroutine.  The maximum possible payload size of a TCP packet
+;     transmitted over ethernet is 1460 bytes.  However, a much smaller value is
+;     usually a better choice for a small embedded system.  The maximum size
+;     transmit buffer must be allocated when a TCP output packet is created.
+;     This ties up the transmit buffer space until the TCP packet is sent and
+;     ACKed.  Unless you expect high output data rate and fragmentation into
+;     more smaller packets actually matters on your network, we suggest you
+;     leave this value low, such as 128 bytes.
+;
+;     Some issues are specific to the particular MAC in use:
+;
+;     MAC FJ60, 28J60:
+;
+;       Transmit buffers are dynamically allocated from the limited MAC memory
+;       reserved for this purpose with BYTES_SENDBUF.
+;
+;     MAC ZeroG:
+;
+;       A fixed 2048 byte region is allocated in the scratch RAM for each
+;       transmit packet, so the maximum possible of 1460 payload bytes is always
+;       available.  This value set below is ignored and silently replaced with
+;       1460.
+;
+/var exist tcp_xmitsize integer = 128
+
+;   N_UDP_SEND
+;   N_UDP_RECV
+;
+;     These are the maximum number of UDP transmit and receive units,
+;     respectively, that will be used simultaneously by the application
+;     directly.
+;
+;     Each UDP transmit unit will automatically force a corresponding IP
+;     transmit unit and a low level packet transmit buffer and descriptor to be
+;     created.
+;
+;     The number of UDP units implicitly required by higher level protocols will
+;     automatically be added.  If the resulting value is 0, then the
+;     corresponding code will not be included in the project.
+;
+/var exist n_udp_send integer = 0
+/var exist n_udp_recv integer = 0
+
+;   USING_NET_DHCP
+;
+;     Indicates whether to include the DHCP client code.  Setting this value to
+;     TRUE includes that code and makes it possible to use DHCP instead of
+;     static configuration.  The application can still chose static
+;     configuration versus dynamic at runtime.  When this value is set to FALSE,
+;     static configuration is always used and the DHCP client code will not be
+;     included.
+;
+;     Enabling DHCP forces UDP send and receive code to be included with at
+;     least one I/O unit each.
+;
+/var exist using_net_dhcp bool = true
+
+;   DHCP_SERV_AVOIDn
+;
+;   These constants indicate specific servers to not accept DHCP leases from.
+;   Each constant is a string representing a IP address in standard dot notation
+;   format.  The constants are numbered sequentially starting with 1.  If a
+;   constant with a particular number does not exist, then constants with higher
+;   numbers are ignored.
+;
+;   Each server address to avoid adds 14 instruction words to the NET_DHCP
+;   module.
+;
+;/const   dhcp_serv_avoid1 string = "192.168.10.1"
+
+;   GET_MACADR_CALL
+;
+;     The name of the routine to call to get our MAC address.  This routine will
+;     be called by the network background task after NETWORK_START is called if
+;     the MAC address is not already set, and it is not known that the the MAC
+;     address can be determined from the network hardware.  The routine must
+;     return 0 in W to indicate failure or a non-zero value to indicate success.
+;     If the routine fails, then network operation may be severly restricted.
+;
+;     GET_MACADR_CALL can be set to the empty string to disable this call.  In
+;     that case the application must fill in OUR_MAC and set FLAG_MACADR before
+;     calling NETWORK_START, or it must be known that the MAC address can be
+;     determined by the packet driver from the network hardware.  For example,
+;     the ZeroG MAC type contains a MAC address, whereas the FJ60 MAC type does
+;     not.
+;
+/const   get_macadr_call = ""
+
+;   GET_IPCONFIG_CALL
+;
+;     The name of the routine to call to get the static IP configuration.  This
+;     would normally be stored in non-volatile memory which the network routines
+;     can not make assumptions about.
+;
+;     To set the IP configuration, the routine must fill in the following global
+;     variables:
+;
+;       OUR_IP  -  IP address, high to low byte order.
+;
+;       NETMASK  -  Mask for the local network segment, high to low byte order.
+;
+;       GATEWAY  -  IP address of the router to send packets to that are not
+;         for a address in our local network segment, high to low byte order.
+;
+;     W must be returned 0 to indicate failure and non-zero to indicate success.
+;     When failure is indicated and the network routines are configured for DHCP
+;     capability (USING_NET_DHCP is TRUE), then DHCP is enabled and will be used
+;     to determine the network configuration.  When failure is indicated and the
+;     network routines are not configured for DHCP capability, then the IP
+;     configuration will remain unknown and network facilities that require the
+;     IP configuration will be disabled or may only function partially.
+;
+;     This routine is called by the network background task after the
+;     application calls NETWORK_START.  This routine will not be called in the
+;     following circumstances:
+;
+;       *  No routine name is supplied (GET_IPADR_CALL is set to the empty
+;          string, below).
+;
+;       *  FLAG_IPCONFIG is set by the application before NETWORK_START is
+;          called.  Note that FLAG_IPCONFIG is initialized to cleared by
+;          NETWORK_INIT.  In this case the application is completely responsible
+;          for setting the network configuration and all logic associated with
+;          determining the configuration, including DHCP or any other means.
+;          OUR_IP, NETMASK, and GATEWAY must be properly set before
+;          NETWORK_START is called.  These are initialized to invalid values
+;          by NETWORK_INIT.
+;
+;       *  FLAG_DHCP is set before NETWORK_START is called.  FLAG_DHCP is the
+;          runtime switch that indicates DHCP is in use to determine and
+;          maintain the IP configuration.  FLAG_DHCP is cleared by NETWORK_INIT
+;          if the network routines are not configured for DHCP capability, and
+;          set if they are configured for DHCP capability.  In other words, the
+;          default set by NETWORK_INIT is to use DHCP if that capability has
+;          been included in the network routines.  This is done by setting
+;          USING_NET_DHCP to TRUE earlier in this file.
+;
+/const   get_ipconfig_call = ""
+
+;   PACK_RECV_CALL
+;
+;     Name of the subroutine to call when a network packet has been received
+;     and the appropriate bit in NETRMSK is set.  If enabled, this routine is
+;     called by the network background task before the packet is otherwise
+;     processed.  There is no requirement that the application process a packet
+;     directly for the network routines to function.  This hook is provided for
+;     statistics gathering, debugging, and other optional uses.  Setting
+;     PACK_RECV_CALL to the empty string disables this callback altogether,
+;     eliminates the code for checking the packet characteristics against
+;     NETRMSK, and eliminates the definition of NETRMSK.
+;
+;     Each bit in NETRMSK enables callback for a specific type of packet.  The
+;     bits in NETRMSK enable reporting of the following types of packets:
+;
+;       Bit 0 (LSB): Unicast
+;
+;       Bit 1: Broadcast
+;
+;       Bit 2: Multicast
+;
+;     The remaining bits of NETRMSK are reserved for future use and should be
+;     set to zero.
+;
+/const   pack_recv_call = ""
+
+;   IP_RECV_CALL
+;
+;     Name of the subroutine to call when a valid IP packet has been received
+;     and FLAG_IPR_CALL is set.  If enabled, this routine is called by the
+;     network background task before the IP packet is otherwise processed.
+;     There is no requirement that the application process a IP packet directly
+;     for the network routines to function.  This hook is provided for
+;     statistics gathering, debugging, and other optional uses.  Setting
+;     IP_RECV_CALL to the empty string disables this feature such that no code
+;     is generated to check FLAG_IPR_CALL, and the flag is therefore ignored.
+;
+/const   ip_recv_call = ""
+
+;   IDs for the WiFi security method.
+;
+/const   net_wsec_none integer = 0 ;none
+/const   net_wsec_wep64 integer = 1 ;WEP 64
+/const   net_wsec_wep128 integer = 2 ;WEP 128
+/const   net_wsec_wpa integer = 3 ;WPA
+/const   net_wsec_wpa2 integer = 4 ;WPA 2
+
+;   NET_STATUS_REPORT
+;
+;     Enables or disables the reporting of status and events from within the
+;     canned network routines.  When this constant is TRUE, the application
+;     supplied routine NET_STATUSn will be called when various events occur
+;     inside the network routines or to report status at various times.  When
+;     this constant is FALSE, the status reporting code is removed and the
+;     NET_STATUSn routines need not be present.  Individual events can be
+;     disabled by setting their STAT_NET_xxx constants (below) to -1.
+;
+;     The NET_STATUSn routines must be supplied by the application.  The N in
+;     routine name indicates the number of parameter bytes passed to the
+;     routine in addition to the status code.  The status code is always passed
+;     in W, with remaining parameters, if any, passed specifically to each
+;     routine.
+;
+;     This version of the network routines may call the following routines when
+;     NET_STATUS_REPORT is TRUE:
+;
+;       NET_STATUS0
+;
+;         Takes only the status code in W.
+;
+/const   net_status_report bool = false
+
+;   STAT_NET_xxx
+;
+;   Status codes used by the network routines when envoking the STATUSx macros.
+;   These macros are envoked to indicate certain state changes or events inside
+;   the network routines.  The application may want to use different IDs for the
+;   status codes to avoid conflicting with other IDs it may add to the same
+;   namespace.
+;
+/const   stat_net_sscan integer = 1 ;sending WiFi scan request
+/const   stat_net_rscan integer = 2 ;received WiFi scan result
+/const   stat_net_rjoin integer = 3 ;joined access point
+/const   stat_net_macext integer = 4 ;system MAC address set from external HW
+/const   stat_net_wsec_none integer = 5 ;WiFi security: none
+/const   stat_net_wsec_wep64 integer = 6 ;WiFi security: WEP 64
+/const   stat_net_wsec_wep128 integer = 7 ;WiFi security: WEP 128
+/const   stat_net_wsec_wpa integer = 8 ;WiFi security: WPA
+/const   stat_net_wsec_wpa2 integer = 9 ;WiFi security: WPA2
+/const   stat_net_cpsk integer = 10 ;computing PSK key
+/const   stat_net_gpsk integer = 11 ;received new computed PSK key
+/const   stat_net_rauth integer = 12 ;received authentication confirm
+/const   stat_net_rassoc integer = 13 ;received associate confirm
+/const   stat_net_rkey integer = 14 ;received key install result
+/const   stat_net_smac integer = 15 ;sending request for MAC address
+/const   stat_net_sjoin integer = 16 ;sending join request
+/const   stat_net_skey integer = 17 ;sending WiFi security key info
+/const   stat_net_sauth integer = 18 ;sending authenticate request
+/const   stat_net_sassoc integer = 19 ;sending associate request
+/const   stat_net_swepk integer = 20 ;installing WEP security keys
+/const   stat_net_rwepk integer = 21 ;received WEP keys installed confirm
+/const   stat_net_sbcast integer = 22 ;setting up MAC to receive broadcasts
+/const   stat_net_rbcast integer = 23 ;MAC has been set to receive broadcasts
+/const   stat_net_dhcplease integer = 24 ;received new DHCP lease for IP address
+
+;*******************************************************************************
+;
+;   Macro STATUS0 id
+;
+;   The state or event indicated by ID has occurred.  When this macro is envoked
+;   by the network routines, it is always passed one of the STAT_NET_xxx status
+;   codes defined above.
+;
+;   This status and event reporting mechanism is optional.  If no status or
+;   event reporting is desired by the application, set NET_STATUS_REPORT (above)
+;   to FALSE.  No code is generated by this macro if the ID parameter is not
+;   defined or its value is -1.
+;
+;   This version of the STATUSx macros takes no parameters beyond the status ID.
+;
+/macro status0
+  /if [exist -1 arg] then
+    /show "  Don't put a label in front of a STATUS0 macro call."
+         error   STATUS0 LABEL
+         end
+    /stop
+    /endif
+  /if [not [exist [qstr [arg 1]]]] then ;ID parameter is not a defined symbol ?
+    /quitmac
+    /endif
+  /var local id integer = [arg 1]
+  /if [= id -1] then         ;reporting of this event specifically disabled ?
+    /quitmac
+    /endif
+  /if [not net_status_report] then ;reporting is globally disabled ?
+    /quitmac
+    /endif
+  /write ""
+  /write "         ;   STATUS0 " [qstr [arg 1]]
+         movlw   [v id] [chars ";" [qstr [arg 1]]]
+         gcall   net_status0
+  /write ""
+  /endmac
+
+/include "(cog)src/pic/network2.ins.aspic" ;perform additional canned processing

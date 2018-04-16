@@ -1,0 +1,32 @@
+;   Subroutine SHIFTL
+;
+;   Perform a left shift of REGA.  REG4 is the number of bits to shift left.
+;   REG4 may be negative in which case a logical right shift of REGA will be
+;   performed.  Nothing will be done if REG4 is zero.
+;
+.shiftl  code
+         glbsub  shiftl, regf4
+
+         movf    reg4        ;set Z flag on zero shift count
+         skip_nz
+         goto    shiftl_leave ;nothing to do ?
+         btfsc   reg4, 7     ;shift count is positive ?
+         goto    shiftl_neg  ;shift count is negative
+;
+;   Shifting to the left.
+;
+shiftl_posl                  ;back here each additional bit to shift
+         shift32l1 reg0      ;shift accumulator left by one bit
+         decfsz  reg4        ;count one less bit shift to go
+         goto    shiftl_posl ;back to shift another bit right
+         goto    shiftl_leave
+;
+;   Shifting to the right.
+;
+shiftl_neg
+         shift32rl1 reg0     ;shift accumulator logical right by one bit
+         incfsz  reg4        ;count one less bit shift to go
+         goto    shiftl_neg  ;back to shift another bit left
+
+shiftl_leave                 ;common exit point
+         leave   regf4

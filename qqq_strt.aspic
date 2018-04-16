@@ -1,0 +1,255 @@
+;   ***************************************************************
+;   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Top module for the QQ2 project.  See the QQ2.INS.ASPIC include
+;   file for a description of the project.
+;
+/include "qq2.ins.aspic"
+
+         extern  regs        ;force general registers to be defined
+
+         extern  init        ;system startup after individual modules initialized
+
+/show "  Instruction clock = " [eng freq_inst 4] "Hz"
+
+;*******************************************************************************
+;
+;   Set static processor configuration bits.
+;
+
+;
+;   Sample for 16F628.
+;
+         __config b'11111101000010'
+                 ;  1111----------  code protection off
+                 ;  -----1--------  data memory protection off
+                 ;  ------0-------  low voltage programming disabled
+                 ;  -------1------  brown out detect enabled
+                 ;  --------0-----  RA5 is digital input, not MCLR
+                 ;  ----------0---  power up timer enabled
+                 ;  -----------0--  watchdog timer disabled
+                 ;  ---------0--10  HS oscillator mode
+;
+;   Sample for 16F876.
+;
+         __config b'11111101110010'
+                 ;  11------11----  code protection disabled
+                 ;  --1-----------  no in circuit debugging, RB6,RB7 general I/O
+                 ;  ---X----------  unused
+                 ;  ----1---------  flash memory is writeable by program
+                 ;  -----1--------  EEPROM read protection disabled
+                 ;  ------0-------  low volt in circ prog off, RB3 is general I/O
+                 ;  -------1------  brown out reset enabled
+                 ;  ----------0---  power up timer enabled
+                 ;  -----------0--  watchdog timer disabled
+                 ;  ------------10  high speed oscillator mode
+;
+;   Sample for 18F47J53.
+;
+.config  code_pack cfg_adr
+
+         db      b'10101100' ;CONFIG1L
+                 ; 1-------  RB6/RB7 debugging disabled
+                 ; -0------  disable extended instruction set
+                 ; --1-----  reset on stack overflow or underflow
+                 ; ---0----  96 MHz PLL enabled
+                 ; ----110-  input to PLL is divided by 2 (8 MHz osc)
+                 ; -------0  watchdog timer disabled
+
+         db      b'11111111' ;CONFIG1H
+                 ; XXXXX---  unused
+                 ; -----1--  code protection disabled
+                 ; ------11  CPU clock not divided from USB clock
+
+         db      b'00001101' ;CONFIG2L
+                 ; 0-------  two speed startup disabled
+                 ; -0------  failsafe clock monitor disabled
+                 ; --0-----  don't drive clock on CLKO (unused with XTAL)
+                 ; ---01---  timer 1 oscillator set to low power
+                 ; -----101  HSPLL oscillator mode (XTAL with PLL)
+
+         db      b'11111111' ;CONFIG2H
+                 ; 1111----  unused
+                 ; ----1111  watchdog timer prescaler divides by 32768
+
+         db      b'11110101' ;CONFIG3L
+                 ; 1111----  deep sleep watchdog maximum postscaler
+                 ; ----0---  deep sleep watchdog disabled
+                 ; -----1--  brownout reset enabled in deep sleep
+                 ; ------0-  real time clock uses INTRC as source
+                 ; -------1  deep sleep watchdog uses INTRC for clock
+
+         db      b'11111101' ;CONFIG3H
+                 ; 1111----  unused
+                 ; ----1---  select MSSP 8 bit adr mode, not 5 bit
+                 ; -----X--  unused
+                 ; ------0-  select A/D 12 bit mode, not 10 bit
+                 ; -------1  pin select unlock only allowed once
+
+         db      b'11111111' ;CONFIG4L
+                 ; 1-------  config words not write/erase protected
+                 ; -1111111  WPFP, write/erase page start/end (not used)
+
+         db      b'11111111' ;CONFIG4H
+                 ; 1111----  unused
+                 ; ----1---  indicate USB clock is 48 MHz
+                 ; -----X--  unused
+                 ; ------1-  protect from WPFP to config words (not used}
+                 ; -------1  write protection disabled, WPFP ignored
+;
+;   Sample for 16F630, 12F625, etc.
+;
+         __config b'11111110000100'
+                 ;  XX------------  band gap cal, preserved by programmer
+                 ;  --XXX---------  unused
+                 ;  -----1--------  data EEPROM protection disabled
+                 ;  ------1-------  program memory code protection disabled
+                 ;  -------0------  brownout detect disabled
+                 ;  --------0-----  MCLR disabled, RA3 is digital input
+                 ;  ---------0----  power up timer enabled
+                 ;  ----------0---  watchdog timer disabled
+                 ;  -----------100  internal oscillator, RA4 is normal I/O pin
+
+osc_cal_call equ h'3FF'      ;internal osc in use, adr of RETLW calibration value
+;*******************************************************************************
+;
+;   Global state.
+;
+         defram  gbankadr
+;
+;   Declare global flag bytes GFL0 - GFLn.  The assembly constant
+;   NFLAGB is set to the number of these flag bytes by the /FLAG
+;   preprocessor directives in QQ2.INS.ASPIC.
+;
+         flags_define        ;define the variables for the global flag bits
+
+;*******************************************************************************
+;
+;   Executable code.
+;
+;   Reset vector.
+;
+.reset   code    0
+         clrf    intcon      ;disable all interrupts
+         gjump   relstart    ;jump to relocatable startup code
+;
+;   Relocatable code.
+;
+;   This code only initializes the individual modules.  The remaining
+;   system initialization is done in the QQ2_INIT module, which jumps
+;   to MAIN when done.
+;
+.strt    code
+relstart unbank
+;
+;   Set the oscillator calibration value if this processor has one and
+;   we are using the internal oscillator.  The constant OSC_CAL_CALL
+;   is defined in the processor configuration section if the internal
+;   oscillator is being used and the factory calibration value is
+;   stored in a RETLW instruction at a particular address.
+;
+  ifdef osc_cal_call         ;internal oscillator being used, get value via RETLW
+         setpage osc_cal_call ;set up for calling the specific address
+         call    osc_cal_call ;get the calibration value into W
+         dbankif osccal
+         movwf   osccal      ;adjust the oscillator to the factory calibrated value
+         mypage              ;restore paging state to this page
+    endif
+;
+;   Init the interrupt system to completely off and default configuration.
+;
+  ifdef intcon2
+         dbankif intcon2
+         movlw   b'10000000'
+                 ; 1-------  disable port B passive pullups
+                 ; -0000000  init interrupts to disabled
+         movwf   intcon2     ;init interrupts off to extent possible
+    endif
+  ifdef intcon3
+         dbankif intcon3
+         clrf    intcon3
+    endif
+         ;
+         ;   Make sure all interrupts are individually disabled.
+         ;
+  ifdef pie1
+         dbankif pie1
+         clrf    pie1
+    endif
+  ifdef pie2
+         dbankif pie2
+         clrf    pie2
+    endif
+  ifdef pie3
+         dbankif pie3
+         clrf    pie3
+    endif
+         ;
+         ;   Clear any existing interrupt conditions.
+         ;
+  ifdef pir1
+         dbankif pir1
+         clrf    pir1
+    endif
+  ifdef pir2
+         dbankif pir2
+         clrf    pir2
+    endif
+  ifdef pir3
+         dbankif pir3
+         clrf    pir3
+    endif
+         ;
+         ;   Init all interrupt priorities to the lowest priority.
+         ;
+  ifdef ipr1
+         dbankif ipr1
+         clrf    ipr1
+    endif
+  ifdef ipr2
+         dbankif ipr2
+         clrf    ipr2
+    endif
+  ifdef ipr3
+         dbankif ipr3
+         clrf    ipr3
+    endif
+
+  ifdef rcon
+         dbankif rcon
+         bcf     rcon, ipen
+    endif
+;
+;   Initialize the global flag bits that are declared with /FLAG
+;   directives in the main include file.
+;
+         flags_clear         ;initialize all global flag bits to 0
+;
+;   Initialize the separate modules.
+;
+         gcallnr stack_init  ;init the software data stack
+         gcallnr port_init   ;init I/O ports
+         gcallnr uart_init   ;init serial I/O
+         gcallnr cmd_init    ;init host command processing
+
+         gcallnr intr_init   ;init interrupt management and enable interrupts
+;
+;   All the individual modules have been initialized.  Now start up the
+;   overall system.
+;
+         gjump   init        ;go to system initialization module
+
+         end

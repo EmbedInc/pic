@@ -1,0 +1,318 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This file is automatically included at the end of the application customized
+;   include file for the network routines, XXX_NETWORK.INS.ASPIC.  This file is
+;   therefore really part of XXX_NETWORK.INS.ASPIC, but contains the canned part
+;   that the application developer has no choice over.
+
+;   The variable SHOW_NET_CONFIG is usually not defined before this file is
+;   included.  It is defaulted to FALSE here, which prevents showing the network
+;   configuration and some of the logic behind it.  The template for the NET_TASK
+;   module enables this switch so that the network configuration is shown when
+;   that module is built.
+;
+/var exist show_net_config bool = false ;default to not show network configuration
+
+;   Check values, handle defaults, and create derived values from the user
+;   choices in the NETWORK.INS.ASPIC file modified for this project.
+;
+/if [not [exist "mactype"]] then
+  /const mactype string = ""
+  /endif
+/if [not [exist "bytes_sendbuf"]] then
+  /const bytes_sendbuf integer = 2048
+  /endif
+/var exist n_xmitdesc integer = 0
+/var exist n_arpcache integer = 0
+/var exist n_ipxmit integer = 0
+/if [not [exist "icmp_reply_arp"]] then
+  /const icmp_reply_arp bool = false
+  /endif
+/var exist n_tcpunits integer = 0
+/var exist tcp_inactive_sec integer = 255
+/var exist tcp_xmitsize integer = 128
+/if [not [exist "get_macadr_call"]] then
+  /const get_macadr_call string = ""
+  /endif
+/if [not [exist "get_ipadr_call"]] then
+  /const get_ipadr_call string = ""
+  /endif
+/if [not [exist "get_netmask_call"]] then
+  /const get_netmask_call string = ""
+  /endif
+/if [not [exist "get_gateway_call"]] then
+  /const get_gateway_call string = ""
+  /endif
+/if [not [exist "pack_recv_call"]] then
+  /const pack_recv_call string = ""
+  /endif
+/if [not [exist "ip_recv_call"]] then
+  /const ip_recv_call string = ""
+  /endif
+
+/var exist using_net_mac_fj60 bool = false
+/var exist using_net_mac_28j60 bool = false
+/var exist using_net_mac_zerog bool = false
+/var exist using_net_arp_server bool = false
+/var exist using_net_arp_client bool = false
+/var exist using_net_arp bool = false
+/var exist using_net_ip_send bool = false
+/var exist using_net_ip_recv bool = false
+/var exist using_net_ip bool = false
+/var exist using_net_ping_reply bool = false
+/var exist using_net_ping_send bool = false
+/var exist using_net_icmp bool = false
+/var exist using_net_tcp_server bool = false
+/var exist using_net_tcp_client bool = false
+/var exist using_net_tcp bool = false
+/var exist using_net_udp_send bool = false
+/var exist using_net_udp_recv bool = false
+/var exist using_net_udp bool = false
+/var exist using_net_dhcp bool = false
+
+/block
+  /var local ii integer
+  /var local s string
+  /var local macname string
+         ;
+         ;   Resolve and check the MAC type.
+         ;
+  /set using_net_mac_fj60 [or using_net_mac_fj60 [= mactype "FJ60"]]
+  /set using_net_mac_28j60 [or using_net_mac_28j60 [= mactype "28J60"]]
+  /set using_net_mac_zerog [or using_net_mac_zerog [= mactype "ZeroG"]]
+  /set s ""                  ;init names of enabled MAC types
+  /set ii 0                  ;init number of MAC types specified
+  /if using_net_mac_fj60 then
+    /set s [str s [if [= 0 [slen s]] "" " "]]
+    /set s [str s "FJ60"]
+    /set ii [+ ii 1]
+    /endif
+  /if using_net_mac_28j60 then
+    /set s [str s [if [= 0 [slen s]] "" " "]]
+    /set s [str s "28J60"]
+    /set ii [+ ii 1]
+    /endif
+  /if using_net_mac_zerog then
+    /set s [str s [if [= 0 [slen s]] "" " "]]
+    /set s [str s "ZeroG"]
+    /set ii [+ ii 1]
+    /endif
+  /if [= ii 0] then          ;no MAC selected
+    /show "  No MAC selected.  The MACTYPE value of """ mactype """ is invalid."
+         error   MACTYPE
+         end
+    /stop
+    /endif
+  /if [> ii 1] then          ;multiple MACs selected
+    /show "  Multiple MAC selected (" s "), only one is allowed."
+         error   Multiple MACs
+         end
+    /stop
+    /endif
+  /set macname s             ;save name of MAC for later reporting
+
+  /if [= macname "ZeroG"] then
+    /set tcp_xmitsize 1460   ;maximum size transmit packet always allocated
+    /endif
+         ;
+         ;   Resolve which protocols are in use.  Some protocols are implicitly enabled
+         ;   when higher level protocols that rely on them are explicitly enabled.
+         ;
+  /if [< n_tcpunits 1] then  ;not configured for any TCP connections ?
+    /set n_tcpunits 0
+    /set using_net_tcp_server false
+    /set using_net_tcp_client false
+    /endif
+
+  /set using_net_udp_send [or using_net_udp_send [> n_udp_send 0]]
+  /set using_net_udp_recv [or using_net_udp_recv [> n_udp_recv 0]]
+
+  /if [< n_ipxmit 1] then    ;not configured for any IP transmission ?
+    /set n_ipxmit 0
+    /set using_net_ip_send false
+    /endif
+
+  /if [< n_arpcache 1] then  ;not configured for ARP client ?
+    /set n_arpcache 0
+    /set using_net_arp_client false
+    /endif
+
+  /set using_net_tcp [or using_net_tcp_server using_net_tcp_client]
+  /if using_net_tcp then     ;TCP client and server code not currently seperable
+    /set using_net_tcp_server true
+    /set using_net_tcp_client true
+    /endif
+
+  /set using_net_udp_send [or using_net_udp_send using_net_dhcp]
+  /set using_net_udp_recv [or using_net_udp_recv using_net_dhcp]
+  /set using_net_udp [or using_net_udp_send using_net_udp_recv]
+
+  /set using_net_icmp [or using_net_icmp using_net_ping_reply]
+  /set using_net_icmp [or using_net_icmp using_net_ping_send]
+
+  /set using_net_ip_send [or using_net_ip_send using_net_tcp]
+  /set using_net_ip_send [or using_net_ip_send using_net_udp_send]
+  /set using_net_ip_send [or using_net_ip_send using_net_ping_send]
+  /set using_net_ip_send [or using_net_ip_send using_net_ping_reply]
+  /set using_net_ip_recv [or using_net_ip_recv using_net_tcp]
+  /set using_net_ip_recv [or using_net_ip_recv using_net_udp_recv]
+  /set using_net_ip_recv [or using_net_ip_recv using_net_ping_send]
+  /set using_net_ip_recv [or using_net_ip_recv using_net_ping_reply]
+  /set using_net_ip_recv [or using_net_ip_recv [<> ip_recv_call ""]]
+  /set using_net_ip [or using_net_ip_send using_net_ip_recv]
+  /if using_net_ip then      ;IP send and receive code not currently seperable
+    /set using_net_ip_send true
+    /set using_net_ip_recv true
+    /endif
+
+  /set using_net_arp_client [or using_net_arp_client using_net_tcp_client]
+  /set using_net_arp_client [or using_net_arp_client using_net_ping_send]
+  /set using_net_arp_client [or using_net_arp_client using_net_dhcp]
+  /set using_net_arp [or using_net_arp_client using_net_arp_server]
+  /if using_net_arp then     ;ARP client and server code not currently seperable
+    /set using_net_arp_client true
+    /set using_net_arp_server true
+    /endif
+         ;
+         ;   Make sure the number of I/O units, buffers, etc, are sufficient at each
+         ;   layer to satisfy the demands of any higher layers.
+         ;
+  /if using_net_tcp then
+    /set n_tcpunits [max n_tcpunits 1] ;at least one TCP unit if TCP enabled
+    /endif
+
+  /set n_udp_send [max 0 n_udp_send]
+  /if using_net_udp_send then ;make sure there are enough UDP transmit units
+    /if using_net_dhcp then
+      /set n_udp_send [+ n_udp_send 1] ;one more for DHCP
+      /endif
+    /set n_udp_send [max 1 n_udp_send] ;at least one if enabled
+    /endif
+  /set n_udp_recv [max 0 n_udp_recv]
+  /if using_net_udp_recv then ;make sure there are enough UDP receive units
+    /if using_net_dhcp then
+      /set n_udp_recv [+ n_udp_recv 1] ;one more for DHCP
+      /endif
+    /set n_udp_recv [max 1 n_udp_recv] ;at least one if enabled
+    /endif
+
+  /if using_net_ip_send then ;make sure enough IP transmit descriptors
+    /set ii 0                ;init number of temporary IP transmit units required
+    /set n_ipxmit [+ n_ipxmit n_tcpunits] ;one for each TCP unit
+    /set n_ipxmit [+ n_ipxmit n_udp_send] ;one for each UDP transmit unit
+    /if using_net_tcp_client then
+      /set ii 1              ;TCP client uses one unit temporarily
+      /endif
+    /if using_net_icmp then
+      /set ii 1              ;ICMP uses one temporary unit
+      /endif
+    /set n_ipxmit [+ n_ipxmit ii] ;total of long term and temporary units
+    /set n_ipxmit [max n_ipxmit 1] ;need at least one if IP is enabled
+    /endif
+
+  /if using_net_arp_client then ;make sure enough ARP cache entries
+    /set n_arpcache [max n_arpcache 1] ;need at least one if ARP client enabled
+    /endif
+
+  /set n_xmitdesc [+ n_xmitdesc n_ipxmit] ;transmit buffer per each IP out unit
+  /if using_net_arp then
+    /set n_xmitdesc [+ n_xmitdesc 1] ;one more simultaneously used by ARP
+    /endif
+         ;
+         ;   Done determining the network stack configuration.  Report the results if
+         ;   this is enabled by SHOW_NET_CONFIG being TRUE.
+         ;
+  /if show_net_config then
+    /show "  Network stack configuration:"
+    /if using_net_dhcp then
+      /show "    DHCP"
+      /endif
+    /if using_net_udp then
+      /set s "    UDP"
+      /if using_net_udp_send then
+        /set s [str s ", " n_udp_send " send"]
+        /endif
+      /if using_net_udp_recv then
+        /set s [str s ", " n_udp_recv " receive"]
+        /endif
+      /show s
+      /endif
+    /if using_net_tcp then
+      /set s "    TCP"
+      /if using_net_tcp_server then
+        /set s [str s ", server"]
+        /endif
+      /if using_net_tcp_client then
+        /set s [str s ", client"]
+        /endif
+      /show s ", " n_tcpunits " I/O units, def xmit size " tcp_xmitsize
+      /endif
+    /if using_net_icmp then
+      /set s "    ICMP"
+      /if using_net_ping_send then
+        /set s [str s ", PING send"]
+        /endif
+      /if using_net_ping_reply then
+        /set s [str s ", PING reply"]
+        /endif
+      /show s
+      /endif
+    /if using_net_ip then
+      /set s "    IP"
+      /if using_net_ip_recv then
+        /set s [str s ", recv"]
+        /endif
+      /if [<> ip_recv_call ""] then
+        /set s [str s ", callback " ip_recv_call]
+        /endif
+      /if using_net_ip_send then
+        /set s [str s ", send"]
+        /endif
+      /show s ", " n_ipxmit " transmit buffers"
+      /endif
+    /if using_net_arp then
+      /set s "    ARP"
+      /if using_net_arp_server then
+        /set s [str s ", server"]
+        /endif
+      /if using_net_arp_client then
+        /set s [str s ", client"]
+        /endif
+      /show s ", " n_arpcache " cache entries"
+      /endif
+    /show "    Packet, " macname " MAC, " n_xmitdesc " transmit desc"
+    /endif                   ;end of show network stack configuration
+  /endblock
+
+;*******************************************************************************
+;
+;   Define the global flags that are required by the network routines.
+;
+/flag    macready            ;hardware MAC/PHY initialized and ready for use
+/flag    macpack             ;MAC address set by packet layer in NETP_SETUP
+/flag    macadr              ;MAC address is known and set in OUR_MAC
+/flag    maclock             ;MAC/PHY hardware locked for exclusive use by a task
+/flag    link                ;network link established
+/flag    ipconfig            ;IP config (IP adr, netmask, router IP) all set
+/flag    netrun              ;network system is running (has been started)
+/flag    netstop             ;stop network system as soon as reasonably possible
+/flag    netready            ;network routines are ready for application use
+/flag    netp_recv           ;received packet open in packet layer
+/flag    recvip              ;received IP packet is open
+/flag    arpcache            ;ARP cache locked for exclusive access by a task
+/flag    arp15s              ;15 second clock tick, internal to ARP module
+/flag    dhcp                ;using DHCP to determine network config

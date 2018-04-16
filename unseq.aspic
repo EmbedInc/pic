@@ -1,0 +1,35 @@
+;   This file is run thru PREPIC only to back up the sequence number of the
+;   current firmware that is set up for debugging.  See the UNSEQ BAT file
+;   for details.
+;
+/var exist srcdir string = [evar "srcdir"] ;firmware source library name
+/var exist fwname string = [evar "fwname"] ;firmware name
+/var exist buildname string = [evar "buildname"] ;build name
+
+/block
+  /if [= fwname ""] then
+    /set fwname buildname
+    /endif
+  /if [or [= srcdir ""] [= fwname ""]] then
+    /show "No firmware set up for debugging"
+    /quit
+    /endif
+
+  /var new fnam string       ;scratch file name
+  /var new fwseq integer     ;resulting sequence number
+
+  /if [= buildname ""]
+    /then                    ;using flat source structure
+      /set fnam [str "(cog)source/" srcdir "/" fwname]
+    /else                    ;this build has its own subdirectory
+      /set fnam [str "(cog)source/" srcdir "/" buildname "/seq/" fwname]
+    /endif
+  /const fwver integer = [seq fnam 0] ;get firmware version number
+  /set fnam [str fnam fwver] ;sequence number file name
+  /set fwseq [seq fnam aft -1] ;back up one sequence number
+  /if [< fwseq 1] then       ;decremented past 1 ?
+    /set fwseq [seq fnam aft +1] ;restore to original sequence number
+    /endif
+
+  /show "Next build will be firmware " [ucase fwname] " version " fwver " sequence " fwseq
+  /endblock

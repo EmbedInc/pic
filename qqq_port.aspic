@@ -1,0 +1,13 @@
+;   This module contains subroutine PORT_INIT.  This is a generic
+;   subroutine that sets up the ports according to the /INBIT and
+;   /OUTBIT preprocessor directives in the project include file.
+;   All analog inputs are also initialized to digital.  If any
+;   analog peripherals are in use by this project, then they must
+;   be separately initialized after PORT_INIT is called.
+;   Assembly time logic is used to configure PORT_INIT to the
+;   specific target PIC and its mix of analog peripherals and
+;   ports.
+;
+/include "qq2.ins.aspic"
+/include "(cog)src/pic/port.ins.aspic"
+         end

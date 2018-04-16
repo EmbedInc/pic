@@ -1,0 +1,1350 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Internet Protocol (IP) layer of the network stack.
+;
+;   This version is layered on the NETP module, which provides low level network
+;   packet I/O capabilities.
+;
+;   The Internet Protocol is defined in RFC 791.  The documentation in this
+;   module assumes a basic undestanding of IP.
+;
+;   Below is a overview of externally exported subroutines from this module
+;   intended for normal use by applications.  This section is only meant to give
+;   a quick idea of what is available.  The details are described in the
+;   comments at the beginning of each subroutine.
+;
+;     IP_RECV_LEN
+;
+;       Get payload size of received packet.
+;
+;     IP_RECV_SRC
+;
+;       Get received packet source IP address.
+;
+;     IP_RECV_OFS
+;
+;       Set offset into received packet payload of next read.
+;
+;     IP_RECV_READ
+;
+;       Read payload byte at current offset, advance offset by one.
+;
+;
+;
+;     IP_XMIT_OPEN
+;
+;       Create and initialize new transmit IP packet.
+;
+;     IP_XMIT_PROT
+;
+;       Set the protocol ID in a IP transmit packet.
+;
+;     IP_XMIT_DEST_IP
+;
+;       Set destination IP address in a IP transmit packet.
+;
+;     IP_XMIT_DEST
+;
+;       Set destination IP address in a IP transmit packet and the destination
+;       MAC address in the low level network packet.  The MAC address is
+;       automatically found from the IP address.
+;
+;     IP_XMIT_OFS
+;
+;       Set offset into payload of a IP transmit packet for the next read or
+;       write.
+;
+;     IP_XMIT_WRITE
+;
+;       Write byte into payload of a IP transmit packet, then increment offset
+;       for next access.
+;
+;     IP_XMIT_WRITE2
+;
+;       Write the 16 bit word in REG1:REG0 into the payload at the current
+;       offset, then increments the offset by 2.
+;
+;     IP_XMIT_READ
+;
+;       Read byte from payload of a IP transmit packet, then increment offset
+;       for next access.
+;
+;     IP_XMIT_SEND
+;
+;       Send a IP transmit packet.
+;
+;     IP_XMIT_CLOSE
+;
+;       Delete a IP transmit packet, deallocate resources.
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;     I/O pins:
+;
+;     Global flags:
+;
+;       FLAG_RECVIP  -  A received IP packet is open.
+;
+;       FLAG_IPR_CALL  -  Call the application routine indicated by IP_RECV_CALL
+;         when a valid IP packet is received.  This flag is only required when
+;         IP_RECV_CALL is not set to the empty string.
+;
+;     Preprocessor symbols not defined in the NETWORK.INS.ASPIC include file:
+;
+         extern  our_ip      ;our IP address
+         extern_flags        ;declare global flag bits EXTERN
+
+/var new ii integer          ;scratch preprocessor integer
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   n_xmitdesc integer = n_ipxmit ;max possible simultaneous transmit packets open
+/const   arp_retry_ms real = 2000 ;ARP request retry period, mS
+arp_try_n equ    5           ;maximum number of ARP attempts
+ttlive   equ     30          ;time to live set in all outgoing packets
+lbank    equ     [v lbank_ip] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+/if [< n_xmitdesc 1] then
+  /show "  Not configured for any IP transmit packets."
+  /show "  N_XMITDESC is set to " n_xmitdesc ", must be at least 1."
+         error   n_xmitdesc
+         end
+  /stop
+  /endif
+/show "  Configured for " n_xmitdesc " simultaneous IP transmit packets."
+
+n_xmitdesc equ   [v n_xmitdesc] ;number of simultaneous transmit packets configured for
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+recv_destip res  4           ;dest IP address of received packet, high to low
+
+         global  recv_destip
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+nextid   res     2           ;unique ID to stamp next transmit packet with
+;
+;   State of current open received packet.  This state is meaningless when there
+;   is no open received packet.
+;
+recv_hdsz res    1           ;number of bytes in IP header, always 20-60
+recv_plen res    2           ;size of received IP packet payload, bytes
+recv_rofs res    2           ;received packet current read offset into IP payload
+;
+;   Transmit packet descriptors.  Each descriptor keeps the current state of one
+;   transmit packet.  The number of descriptors is set by the user constant
+;   N_XMITDESC defined earlier in this module.  This is the maximum number of IP
+;   transmit packets that can be open at a time.
+;
+;   The sizes and relative placement of fields within each descriptor may be
+;   assumed in the code in this module.  The sizes and offsets of fields must
+;   not be changed without inspecting and likely adjusting the code.
+;
+;   The transmit packet descriptors are always accessed via pointers, so their
+;   bank does not need to be known at assembly time.  They are put in their own
+;   section so the linker can place them anywhere it sees fit.
+;
+;   Each individual field is named XPn_xxx, where N is the 0-N IP transmit
+;   packet number and xxx the specific name of the field.  The constants
+;   XP_xxx are the offsets of the fields from the start of the descriptor.
+;
+.xipdesc udata               ;separate linker section for IP transmit descriptors
+xpdesc   res     0           ;start address of the array of transmit descriptors
+
+/set ii 0
+/block
+
+xp[v ii]_flags res 1         ;flags byte, see XPFL_xxx constants below
+xp[v ii]_id res  1           ;NETP transmit buffer ID
+xp[v ii]_max res 2           ;maximum payload size packet configured for
+xp[v ii]_next res 2          ;payload offset for next read or write
+xp[v ii]_len res 2           ;actual payload length used
+
+  /if [= ii 0] then
+sz_xpdesc equ    $-xpdesc    ;make size of one transmit packet descriptor
+    /endif
+  /set ii [+ ii 1]
+  /if [< ii n_xmitdesc] then
+    /repeat
+    /endif
+  /endblock
+         ;
+         ;   Symbols for the offsets of each field from the start of the
+         ;   descriptor.
+         ;
+xp_flags equ     xp0_flags - xpdesc
+xp_id    equ     xp0_id - xpdesc
+xp_max   equ     xp0_max - xpdesc
+xp_next  equ     xp0_next - xpdesc
+xp_len   equ     xp0_len - xpdesc
+         ;
+         ;   Flag bits in the XP_FLAGS field.  Each symbol here is the bit
+         ;   number for the particular flag within the XP_FLAGS byte.  The
+         ;   sense of all bits is such that 0 is the default or unused value.
+         ;
+xpfl_inuse equ   0           ;descriptor in use, network transmit buffer allocated
+xpfl_cksum equ   1           ;checksum has been written to header and is up to date
+xpfl_len equ     2           ;actual length written to header is up to date
+
+
+.ip      code
+
+;*******************************************************************************
+;
+;   Subroutine NET_IP_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  net_ip_init, regf0
+
+         dbankif lbankadr
+         loadk8  nextid, 0   ;init next ID for transmitted IP packet
+;
+;   Init all the transmit packet descriptors to unused.
+;
+         loadk8  reg0, n_xmitdesc * sz_xpdesc ;init bytes left to initialize
+         lfsr    0, xpdesc   ;point to start of first descriptor
+ini_xploop unbank
+         clrf    postinc0    ;init this byte to 0
+         decfsz  reg0
+         jump    ini_xploop
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_RECV_LEN
+;
+;   Get the size of the received IP packet payload in bytes into REG1:REG0.
+;
+         glbsub  ip_recv_len, noregs
+
+         movff   recv_plen+0, reg0
+         movff   recv_plen+1, reg1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_RECV_SRC
+;
+;   Get the received packet source IP address into REG3:REG2:REG1:REG0.
+;
+         glbsub  ip_recv_src, noregs
+
+         loadk16 reg0, 12    ;set network packet offset for source IP address
+         gcall   netp_recv_ofs
+
+         gcall   netp_recv_read ;get address
+         movff   reg0, reg3
+         gcall   netp_recv_read
+         movff   reg0, reg2
+         gcall   netp_recv_read
+         movff   reg0, reg1
+         gcall   netp_recv_read
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_RECV_OFS
+;
+;   Set the offset into the received packet payload where the next byte will
+;   be read from.  The offset is passed in REG1:REG0.
+;
+         glbsub  ip_recv_ofs, noregs
+
+         movff   reg0, recv_rofs+0 ;update offset
+         movff   reg1, recv_rofs+1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_RECV_READ
+;
+;   Read the next payload byte and advance to the next byte.  Successive calls
+;   to this routine read successive payload bytes.  The byte value is returned
+;   in REG0.
+;
+         glbsub  ip_recv_read, regf1
+
+         dbankif lbankadr
+         movf    recv_hdsz, w ;compute the network packet offset in REG1:REG0
+         addwf   recv_rofs+0, w
+         movwf   reg0
+         movlw   0
+         addwfc  recv_rofs+1, w
+         movwf   reg1
+
+         incf    recv_rofs+0 ;increment the IP payload offset for next time
+         skip_ncarr
+         incf    recv_rofs+1
+
+         gcall   netp_recv_ofs ;set network packet offset for the read
+         gcall   netp_recv_read ;read the byte from the network packet
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_HDWORD
+;
+;   Reads the next two bytes from the packet, returns them in REG1:REG0 as a 16
+;   bit word, and updates the checksum in REG3:REG2 with that word.  This
+;   routine is intended for reading words from the IP header while
+;   simultaneously computing the checksum on them.
+;
+         locsub  get_hdword, noregs
+
+         gcall   netp_recv_read ;get high byte into REG0
+         movff   reg0, reg1  ;move it into position
+         gcall   netp_recv_read ;get low byte into REG0
+         gcall   net_cksum_word ;add word REG1:REG0 into checksum REG3:REG2
+
+         leavecheck
+
+;*******************************************************************************
+;
+;   Routine IP_RECV_PACKET
+;
+;   Process a received Internet Protocol (IP) packet.  This routine is run from
+;   the network background processing task when a packet is received with the
+;   type/length word set to 0800h, which indicates IP.
+;
+;   The received packet is currently open, and must be left open.  When done,
+;   this routine must jump or call to DONE_PACKET, or execute a RETURN at the
+;   same nesting level as on entry.  The data stack is currently empty, and
+;   the call stack contains the single entry to DONE_PACKET.  Extraneous data
+;   may be left on both stacks when jumping to DONE_PACKET.  All the REGn
+;   general registers may be trashed.
+;
+;   The REGn registers currently contain:
+;
+;     REG3:REG2  -  Type/length word of the packet.
+;
+;     REG5:REG4  -  Number of payload data bytes in the packet.
+;
+;   The current packet data read offset is set to 0.  In other words, if no
+;   call to NETP_RECV_OFS is made, the next call to NETP_RECV_READ will return
+;   the first data byte.
+;
+         glbent  ip_recv_packet
+;
+;   Look thru the header for anything we aren't prepared to handle, while at the
+;   same time computing the header checksum.  The header is treated as valid
+;   even before the checksum is validated.  If header content is found that
+;   indicates a packet that can't be handled, then this routine can be aborted
+;   immediately.  It doesn't matter if that is because the header was corrupt
+;   and it erroneously appeared to be a unhandlable packet, or it really is a
+;   unhandlable packet.  Either way the packet must be discarded.
+;
+;   Register usage:
+;
+;     REG1:REG0  -  Each new 16 bit word read from the IP header.
+;
+;     REG3:REG2  -  Accumulated checksum on the header words read so far.
+;
+         loadk16 reg2, 0     ;init the checkum accumulator in REG3:REG2
+         ;
+         ;   Word 0:
+         ;     4 bits: IP version
+         ;     4 bits: Header length in 32 bit words
+         ;     8 bits: Type of network service requested by sender
+         ;
+         ;   The IP version must be 4, which is the only version defined in RFC
+         ;   791 and that we know anything about.  The IP header length will be
+         ;   converted to bytes and saved.  We don't care what type of service
+         ;   the sender wanted from the network.  This means things like speed
+         ;   and reliability of delivery.  This information is for routers, and
+         ;   in any case the packet got here so it means nothing anymore.
+         ;
+         mcall   get_hdword  ;get version/IHL/service word
+         swapf   reg1, w     ;get version into low 4 bits
+         andlw   h'0F'       ;mask in only the version number
+         xorlw   4           ;compare to only version we know how to handle
+         skip_z              ;is version 4 ?
+         return              ;no
+
+         rlncf   reg1, w     ;make 4x IHL
+         rlncf   wreg
+         andlw   b'00111100' ;mask in only IHL x 4 field
+         dbankif lbankadr
+         movwf   recv_hdsz   ;save header size in bytes
+
+         mcall   get_hdword  ;get total packet size in bytes
+         dbankif lbankadr
+         movf    recv_hdsz, w ;get header size
+         subwf   reg0        ;make payload size
+         movlw   0
+         subwfb  reg1
+         movff   reg0, recv_plen+0 ;save payload size
+         movff   reg1, recv_plen+1
+
+         mcall   get_hdword  ;ID word, we don't care
+         ;
+         ;   Flags and fragement offset word.  We don't have the facilities for
+         ;   reassembling a packet from multiple fragments, so ignore this
+         ;   packet if it is a fragment.  That means the More Fragments flag
+         ;   must be 0 and the fragment offset must be 0.
+         ;
+         mcall   get_hdword  ;flags and fragment offset
+         movf    reg1, w
+         andlw   b'10111111' ;mask in required 0, MF flag, fragment offset high bits
+         skip_z              ;all looks good ?
+         return              ;no
+         movf    reg0
+         skip_z              ;low bits of fragment offset 0 ?
+         return              ;no
+
+         mcall   get_hdword  ;time to live and protocol ID
+         movff   reg0, reg8  ;save protocol ID for later in REG8
+
+         mcall   get_hdword  ;header checksum
+
+         mcall   get_hdword  ;source address, save in REG7:REG6:REG5:REG4
+         movff   reg1, reg7
+         movff   reg0, reg6
+         mcall   get_hdword
+         movff   reg1, reg5
+         movff   reg0, reg4
+         ;
+         ;   Handle the destination IP address.  This is always saved in
+         ;   RECV_DESTIP.  If our IP address is known, then the packet is
+         ;   discarded unless it was addressed to us.
+         ;
+         mcall   get_hdword  ;get destination address high bytes
+         dbankif gbankadr
+         movf    reg1, w     ;IP address byte 3
+         movwf   recv_destip+0
+         xorwf   our_ip+0, w
+         movwf   reg9
+         movf    reg0, w     ;IP address byte 2
+         movwf   recv_destip+1
+         xorwf   our_ip+1, w
+         iorwf   reg9
+
+         mcall   get_hdword  ;get destination address low bytes
+         dbankif gbankadr
+         movf    reg1, w     ;IP address byte 1
+         movwf   recv_destip+2
+         xorwf   our_ip+2, w
+         iorwf   reg9
+         movf    reg0, w     ;IP address byte 0
+         movwf   recv_destip+3
+         xorwf   our_ip+3, w
+         iorwf   reg9, w     ;zero if matches our IP address
+         btfss   flag_ipconfig ;our IP configuration is known ?
+         andlw   0           ;no, accept packets for any IP address
+         skip_z              ;destination address matches our IP address ?
+         return              ;no, discard this packet
+d_checkip                    ;done checking against our IP address
+;
+;   The fixed part of the IP header has been read, checked for any obvious
+;   reason to discard this packet, and has been accumulated into the checksum
+;   in REG3:REG2.  RECV_HDSZ has been set to the IP header length, RECV_PLEN to
+;   the payload length, the protocol ID has been saved in REG8, and the source
+;   address in REG7:REG6:REG5:REG4.
+;
+;   Read any remaining words of the header to accumulate them into the checksum.
+;   These are option commands and possibly padding.  The fixed part of the
+;   header that has already been read is 20 bytes long.  The header length is
+;   always a multiple of 4 bytes.
+;
+         dbankif lbankadr
+         movlw   20
+         subwf   recv_hdsz, w ;make number of header bytes left to read
+         bz      rdhead_done ;done reading all header bytes ?
+         movwf   reg5
+         rrncf   reg5        ;make number of 16 bit words left to read
+rdhead_loop unbank           ;loop to read all remaining header words
+         mcall   get_hdword  ;read this header word
+         decfsz  reg5        ;count one less header word left to read
+         jump    rdhead_loop ;back to read next header word
+rdhead_done unbank           ;done reading the whole IP header
+;
+;   All the header words have been read and their checksum accumulated in
+;   REG3:REG2.  The way the checksum is arranged, this value must now be
+;   FFFFh for the header to be valid.
+;
+         movf    reg2, w     ;make AND of both checksum bytes
+         andwf   reg3
+         incfsz  reg3        ;result is FFh, checksum is valid ?
+         return              ;checksum mismatch
+
+         dbankif gbankadr
+         bsf     flag_recvip ;indicate a received IP packet is open
+;
+;   The last byte read was the last byte of the header, so the packet read
+;   offset is currently positioned at the start of the IP packet payload.
+;
+         dbankif lbankadr
+         loadk16 recv_rofs, 0 ;init IP payload read offset
+;
+;   Notify the application of the new received IP packet if FLAG_IPR_CALL is set
+;   and IP_RECV_CALL is not the empty string.  FLAG_IPR_CALL is a runtime flag
+;   to allow the application to enable/disable this callback on the fly.
+;   IP_RECV_CALL is a build time constant that provides the name of the routine
+;   to call.
+;
+/if [not [= ip_recv_call ""]] then ;configured for application callback ?
+  /show "  Received IP packet callback routine: " ip_recv_call
+         dbankif gbankadr
+         btfss   flag_ipr_call ;callback currently enabled ?
+         jump    done_ipr_call ;no, skip this section
+
+         gcall   [chars ip_recv_call] ;perform the callback
+         dbankif lbankadr
+         loadk16 recv_rofs, 0 ;reset IP payload read offset
+done_ipr_call unbank
+  /endif
+;
+;   Dispatch to the routine for the specific protocol identified in the header.
+;   The protocol ID is in REG8.  The source address is in REG7:REG6:REG5:REG4.
+;
+;   The protocol handling routines are jumped to since they are really
+;   considered a continuation of this routine.  Like this routine, they must
+;   RETURN or go to DONE_PACKET when done processing this packet.  The following
+;   registers are set on entry to the IP protocol handling routine:
+;
+;     REG3:REG2  -  Number of payload bytes.
+;
+;     REG7:REG6:REG5:REG4  -  Source IP address.
+;
+         movff   recv_plen+0, reg2 ;pass number of payload bytes
+         movff   recv_plen+1, reg3
+         check_yield         ;let other tasks run if needed
+         ;
+         ;   Check for TCP protocol, ID = 6.
+         ;
+/if using_net_tcp then
+         movlw   6
+         xorwf   reg8, w
+         bnz     not_tcp
+         extern  tcp_recv_packet
+         gjump   tcp_recv_packet
+not_tcp  unbank
+  /endif
+         ;
+         ;   Check for UDP protocol, ID = 17
+         ;
+/if using_net_udp_recv then
+         movlw   17
+         xorwf   reg8, w
+         bnz     not_udp
+         extern  udp_recv_packet
+         gjump   udp_recv_packet
+not_udp  unbank
+  /endif
+         ;
+         ;   Check for ICMP protocol, ID = 1.
+         ;
+/if using_net_icmp then
+         movlw   1
+         xorwf   reg8, w
+         bnz     not_icmp
+         extern  icmp_recv_packet
+         gjump   icmp_recv_packet
+not_icmp unbank
+  /endif
+
+         return              ;not a protocol we know how to handle
+
+;*******************************************************************************
+;
+;   Local subroutine XMIT_POINT
+;
+;   Point FSR0 to the transmit packet descriptor given its index in REG8.  This
+;   is a low level internal routine, and the index is not checked for validity.
+;   Valid indexes are in the range of 0 to N_XMITDESC-1.
+;
+         locsub  xmit_point, noregs
+
+         lfsr    0, xpdesc   ;point to start of descriptors
+
+         movf    reg8, w     ;get the 0-N descriptor index number
+         mullw   sz_xpdesc   ;make address offset from start of descriptors
+
+         movf    prodl, w    ;add address offset to the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro BUFPNT0 ofs
+;
+;   Point FSR0 to OFS bytes into the packet descriptor identified by REG8.
+;
+bufpnt0  macro   ofs
+         lfsr    0, xpdesc + (ofs) ;point to selected byte in descriptor 0
+         movf    reg8, w     ;get the 0-N descriptor index
+         mullw   sz_xpdesc   ;make offset for selected descriptor in PRODH:PRODL
+         movf    prodl, w    ;add the offset into the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Macro BUFID_SETUP abort
+;
+;   Set up for dealing with the transmit packet identified by REG8.  The abort
+;   address is jumped to if the transmit packet index in REG8 is invalid or the
+;   descriptor is not in use.  Otherwise, execution continues after this macro
+;   and FSR0 is left pointing to the first byte of the packet descriptor.
+;
+bufid_setup macro abort
+         movf    reg8, w     ;get the buffer index number
+         sublw   n_xmitdesc-1 ;compare to max valid value
+         skip_wle            ;index is within range ?
+         jump    abort       ;no
+
+         mcall   xmit_point  ;point FSR0 to the start of the descriptor
+         btfss   indf0, xpfl_inuse ;this descriptor is in use ?
+         jump    abort       ;no
+
+         endm
+
+;*******************************************************************************
+;
+;   Macro ADDOFS ofs
+;
+;   Add the fixed offset OFS to REG1:REG0.
+;
+addofs   macro   ofs
+         movlw   low (ofs)
+         addwf   reg0
+         movlw   high (ofs)
+         addwfc  reg1
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_OPEN
+;
+;   Create and initialize a new IP transmit packet.  The maximum data payload
+;   size to configure the transmit buffer to is in REG1:REG0.  A smaller packet
+;   can be sent, but the unused memory will not be available for other packets.
+;   The maximum allowed payload size is 1480 bytes.  A request for a larger
+;   packet always fails.
+;
+;   A open IP packet will have a network transmit buffer allocated to it.  The
+;   number and total memory for network transmit buffers is limited, so the IP
+;   packet should be closed as soon as it is no longer needed.
+;
+;   REG8 is returned the ID of the newly opened IP packet.  The value of this
+;   ID has no meaning to the caller except that it must be passed to other
+;   IP_XMIT_xxx routines to identify the packet.  If the requested packet could
+;   not be allocated, then REG8 is returned with the high bit set.  In that
+;   case the remaining bits in REG8 are undefined.  Valid packet IDs are
+;   therefore in the 0-127 range.
+;
+         glbsub  ip_xmit_open, regf0 | regf1 | regf2 | regf3
+;
+;   Find the first unused transmit packet descriptor.
+;
+         loadk8  reg2, n_xmitdesc ;init loop counter
+         clrf    reg8        ;init index of first descriptor
+xop_fdsc_loop unbank         ;back here to check each new descriptor
+         mcall   xmit_point  ;point FSR0 to this descriptor
+         btfss   indf0, xpfl_inuse ;this descriptor is in use ?
+         jump    xop_fdsc_done ;no, found available descriptor
+         incf    reg8        ;make index of next descriptor
+         decfsz  reg2
+         jump    xop_fdsc_loop
+
+         setf    reg8        ;indicate no packet opened
+         jump    xop_leave
+
+xop_fdsc_done unbank         ;REG8 is index of available descriptor
+;
+;   Allocate the network transmit buffer.
+;
+         movff   reg8, reg2  ;save index of available packet descriptor
+
+         addofs  20          ;add IP header size to make net packet payload size
+         gcall   netp_xmit_alloc ;allocate the network transmit buffer
+         btfsc   reg8, 7     ;got the buffer ?
+         jump    xop_leave   ;no, return indicating failure
+;
+;   A transmit packet descriptor is available and the network transmit buffer
+;   was successfully allocated.  This routine will now return with success.  The
+;   network buffer ID is in REG8 and our packet descriptor index is in REG2.
+;   REG1:REG0 contains the total network packet payload bytes, which is the
+;   maximum IP payload bytes plus the IP header size.
+;
+;   Fill in the IP transmit packet descriptor.
+;
+         movff   reg8, reg3  ;save network buffer ID in REG3
+         movff   reg2, reg8  ;set packet index in REG8
+         mcall   xmit_point  ;point FSR0 to the packet descriptor start
+
+         movlw   (1 << xpfl_inuse) | (1 << xpfl_len) ;in use, data length up to date
+         movwf   postinc0    ;init flags byte to indicate this descriptor in use
+
+         movff   reg3, postinc0 ;save network buffer ID
+
+         addofs  -20         ;make max allowed IP payload size in REG1:REG0
+         movff   reg0, postinc0 ;save it in the packet descriptor
+         movff   reg1, postinc0
+
+         clrf    postinc0    ;init offset of next payload byte to read or write
+         clrf    postinc0
+
+         clrf    postinc0    ;init actual payload size
+         clrf    postinc0
+;
+;   Initialize the network packet basics.
+;
+         movff   reg3, reg8  ;pass network buffer ID for writing to packet
+         loadk16 reg0, h'0800' ;set length/type to indicate IP protocol
+         gcall   netp_xmit_type
+;
+;   Initialize the IP header.  We always use a fixed size header of 20 bytes,
+;   meaning there are no option commands.
+;
+         loadk8  reg0, (4 << 4) | 5
+         gcall   netp_xmit_write ;IP version, header len in 32 bit words
+
+         loadk8  reg0, 0
+         gcall   netp_xmit_write ;type of service fields
+
+         loadk8  reg0, high 20
+         gcall   netp_xmit_write ;total length high byte
+         loadk8  reg0, low 20
+         gcall   netp_xmit_write ;total length low byte
+
+         movff   nextid+1, reg0
+         gcall   netp_xmit_write ;arbitrary ID high byte
+         movff   nextid+0, reg0
+         gcall   netp_xmit_write ;arbitrary ID low byte
+         dbankif lbankadr
+         incf    nextid+0    ;increment to make ID for next time
+         skip_ncarr
+         incf    nextid+1
+
+         movlw   b'01000000'
+                 ; 0-------  reserved, must be zero
+                 ; -1------  don't fragment
+                 ; --0-----  this is last fragment
+                 ; ---00000  high 5 bits of fragment offset
+         movwf   reg0
+         gcall   netp_xmit_write ;flags and high bits of fragment offset
+         clrf    reg0
+         gcall   netp_xmit_write ;low byte of fragment offset
+
+         loadk8  reg0, ttlive
+         gcall   netp_xmit_write ;time to live
+
+         loadk8  reg0, 0
+         gcall   netp_xmit_write ;init protocol ID
+
+         loadk8  reg0, 0
+         gcall   netp_xmit_write ;init checksum to 0
+         gcall   netp_xmit_write
+
+         movff   our_ip+0, reg0 ;source IP address
+         gcall   netp_xmit_write
+         movff   our_ip+1, reg0
+         gcall   netp_xmit_write
+         movff   our_ip+2, reg0
+         gcall   netp_xmit_write
+         movff   our_ip+3, reg0
+         gcall   netp_xmit_write
+
+         loadk8  reg0, h'FF' ;init destination IP address to invalid
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+
+         movff   reg2, reg8  ;pass back index of newly opened IP packet
+
+xop_leave unbank             ;common exit point, REG8 all set
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_PROT
+;
+;   Set the protocol ID of the transmit packet identified by REG8.  The ID in
+;   REG8 must be of a currently open IP transmit packet.  The protocol ID is
+;   passed in REG0.
+;
+         glbsub  ip_xmit_prot, regf1 | regf8
+
+         bufid_setup xpro_leave ;validate packet ID, point FSR0 to descriptor
+
+         bcf     postinc0, xpfl_cksum ;invalidate header checksum, if any
+         movff   indf0, reg8 ;get network packet buffer ID
+
+         pushreg reg0        ;temp save protocol ID on stack
+         loadk16 reg0, 9     ;set write offset to protocol ID byte in header
+         gcall   netp_xmit_ofs
+         popreg  reg0        ;get protocol ID back into REG0
+         gcall   netp_xmit_write ;write the protocol ID into the IP header
+
+xpro_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_DEST_MAC
+;
+;   Set the destination MAC address of the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently open IP transmit packet.  The MAC
+;   address is passed by pointing FSR0 to it, and must be in high to low byte
+;   order.
+;
+         glbsub  ip_xmit_dest_mac, regf2 | regf3 | regf8
+
+         movff   fsr0l, reg2 ;save pointer to the MAC address
+         movff   fsr0h, reg3
+
+         bufid_setup xdstmac_leave ;validate packet ID, point FSR0 to descriptor
+         movff   preinc0, reg8 ;get ID of network transmit buffer in REG8
+         movff   reg2, fsr0l ;restore FSR0 pointing to MAC address
+         movff   reg3, fsr0h
+         gcall   netp_xmit_dest ;set the destination MAC address
+
+xdstmac_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_DEST_IP
+;
+;   Set the destination IP address of the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently open IP transmit packet.  The IP
+;   address is passed in REG3:REG2:REG1:REG0.  This routine only sets the
+;   destination IP address, not the destination MAC address of the network
+;   packet.
+;
+         glbsub  ip_xmit_dest_ip, regf8
+
+         bufid_setup xdstip_leave ;validate packet ID, point FSR0 to descriptor
+
+         bcf     postinc0, xpfl_cksum ;invalidate header checksum, if any
+         movff   indf0, reg8 ;get network packet buffer ID
+
+         pushreg reg0        ;save IP address low bytes
+         pushreg reg1
+         loadk16 reg0, 16    ;set write offset to dest IP adr in IP header
+         gcall   netp_xmit_ofs
+
+         movff   reg3, reg0  ;write dest adr into IP header
+         gcall   netp_xmit_write
+         movff   reg2, reg0
+         gcall   netp_xmit_write
+         popreg  reg1
+         movff   reg1, reg0
+         gcall   netp_xmit_write
+         popreg  reg0
+         gcall   netp_xmit_write
+
+xdstip_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_DEST_GETH
+;
+;   Get the high word of the destination IP address stored in the IP transmit
+;   packet identified by REG8.  The data is returned in REG1:REG0.
+;
+         glbsub  ip_xmit_dest_geth, regf8
+
+         bufid_setup xdstgh_leave ;validate packet ID, point FSR0 to descriptor
+         movf    postinc0
+         movff   indf0, reg8 ;get network packet buffer ID
+
+         loadk16 reg0, 16    ;set write offset to dest IP adr in IP header
+         gcall   netp_xmit_ofs
+         gcall   netp_xmit_read ;read high byte
+         movff   reg0, reg1
+         gcall   netp_xmit_read ;read low byte
+
+xdstgh_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_DEST_GETL
+;
+;   Get the low word of the destination IP address stored in the IP transmit
+;   packet identified by REG8.  The data is returned in REG1:REG0.
+;
+         glbsub  ip_xmit_dest_getl, regf8
+
+         bufid_setup xdstgl_leave ;validate packet ID, point FSR0 to descriptor
+         movf    postinc0
+         movff   indf0, reg8 ;get network packet buffer ID
+
+         loadk16 reg0, 18    ;set write offset to dest IP adr + 2
+         gcall   netp_xmit_ofs
+         gcall   netp_xmit_read ;read high byte
+         movff   reg0, reg1
+         gcall   netp_xmit_read ;read low byte
+
+xdstgl_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_DEST
+;
+;   Set the destination addresses in the IP transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently open IP transmit packet.  The
+;   destination IP address is passed in REG3:REG2:REG1:REG0.  The destination
+;   IP address will be set to this value, and the low level network packet
+;   destination MAC address will be set as needed for the target IP address.
+;
+;   If the destination IP address is the broadcast address of 255.255.255.255,
+;   then the destination MAC address is set to FF-FF-FF-FF-FF-FF, which will
+;   cause the packet to be broadcast on the local network segment.  No ARP
+;   resolution will be attempted in this case.
+;
+;   If the IP address is not the special broadcast address, then a ARP request
+;   will be made to determine the MAC address to send packets to for the
+;   supplied IP address.  If the MAC address for this IP address is not locally
+;   cached, then a ARP request is sent.  Note that this requires a additional
+;   network transmit buffer.  ARP resolution is attempted every 2 seconds until
+;   the MAC address is found or a time limit is reached.  This routine returns
+;   with the C flag set on success and cleared on failure.
+;
+;   To avoid sending a new ARP request and thereby requiring a additional
+;   transmit buffer and delaying this task waiting on ARP reception, the caller
+;   can request ARP resolution of the target IP address before opening the IP
+;   transmit packet.  This causes the MAC address for that IP address to be in
+;   the local ARP cache so that this routine can get the MAC address immediately
+;   and return quickly.
+;
+;   Note that previously getting ARP resolution of the target IP address will
+;   put that IP address into the ARP cache, but that this cache entry may be
+;   invalid by the time this routine is called.  If the target machine is
+;   available, this will only happen when new ARP requests are made to new IP
+;   addresses.  It is therefore recommended that the size of the ARP cache be
+;   configured to at least the maximum number of target machines that IP packets
+;   could be sent to concurrently.  See the documentation in the ARP module for
+;   more information on the ARP cache.
+;
+         glbsub  ip_xmit_dest, regf0 | regf1 | regf2 | regf4 | regf5 | regf8
+
+         mcall   ip_xmit_dest_ip ;write the target IP address into the packet
+;
+;   Check for special case of broadcast.
+;
+         movf    reg3, w     ;make AND of all the IP address bytes
+         andwf   reg2, w
+         andwf   reg1, w
+         andwf   reg0, w
+         addlw   1           ;make 0 if IP address is 255.255.255.255
+         bnz     xdst_nbcast ;this is not a broadcast ?
+
+         stack_makebuf 6, fsr0l ;alloc MAC adr buf, point FSR0 to it
+         addfsr0 5           ;point to last byte of the buffer
+         movlw   h'FF'       ;write broadcast MAC address to the buffer
+         movwf   postdec0
+         movwf   postdec0
+         movwf   postdec0
+         movwf   postdec0
+         movwf   postdec0
+         movwf   indf0       ;FSR0 now points to start of buffer
+         mcall   ip_xmit_dest_mac ;set the destination MAC address
+         popstack 6          ;deallocate temp MAC address buffer
+         bsf     status, c   ;indicate success
+         jump    xdst_leaveall
+
+xdst_nbcast unbank           ;not broadcast
+;
+;   Unicast.
+;
+         stack_makebuf 4, reg4 ;alloc buffer for IP adr, buf adr into REG5:REG4
+
+         bufid_setup xdst_abort ;validate packet ID, point FSR0 to descriptor
+         movff   preinc0, reg8 ;get network packet buffer ID into REG8
+
+         movff   reg4, fsr0l ;point FSR0 to IP address buffer
+         movff   reg5, fsr0h
+         movff   reg3, postinc0 ;write IP address to buffer, high to low byte order
+         movff   reg2, postinc0
+         movff   reg1, postinc0
+         movff   reg0, postinc0
+
+         loadk8  reg2, arp_try_n ;init number of ARP tries left
+xdst_arp_loop unbank         ;back here each new time to try ARP resolution
+         movff   reg4, fsr0l ;pass pointer to IP address to resolve
+         movff   reg5, fsr0h
+         gcall   arp_resolve ;try to get MAC address for this IP address
+         movf    fsr0l, w
+         iorwf   fsr0h, w
+         bnz     xdst_havemac ;got MAC address, FSR0 pointing to it?
+         dcfsnz  reg2        ;count one less ARP attempt left
+         jump    xdst_abort  ;hit maximum ARP try limit, give up
+         waitms  arp_retry_ms ;wait a while before next ARP try
+         jump    xdst_arp_loop ;back to try getting MAC address again
+
+xdst_havemac unbank          ;FSR0 is pointing to the destination MAC address
+         gcall   netp_xmit_dest ;set destination MAC address in network buffer
+         bsf     status, c   ;indicate success
+         jump    xdst_leave
+
+xdst_abort unbank            ;return indicating failure
+         bcf     status, c
+
+xdst_leave unbank            ;common exit for unitcast, C flag already set
+         popstack 4          ;deallocate temporary IP address buffer
+xdst_leaveall unbank         ;common exit point, C flag already set
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_OFS
+;
+;   Set the payload read/write offset of the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently open IP transmit packet.  The offset
+;   from the start of the IP packet payload is passed in REG1:REG0.
+;
+;   This offset was initialized to 0 when the packet was opened.
+;
+         glbsub  ip_xmit_ofs, noregs
+
+         bufid_setup xofs_leave ;validate packet ID, point FSR0 to descriptor
+         addfsr0 xp_next     ;point FSR0 to field NEXT
+         movff   reg0, postinc0 ;update the offset of the next read or write
+         movff   reg1, indf0
+
+xofs_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_WRITE
+;
+;   Write a payload byte into the IP transmit packet identified by REG8.  The ID
+;   in REG8 must be of a currently open IP transmit packet.  The byte will be
+;   written at the current payload read/write offset, then the offset
+;   incremented by one.  The byte value is passed in REG0.  Attempts to write
+;   past the end of the payload are ignored.  If the write is within the maximum
+;   payload region as specified when the IP transmit packet was created, then
+;   the used payload length is increased, if necessary, to include the new byte.
+;
+         glbsub  ip_xmit_write, regf0 | regf1 | regf2 | regf8
+
+         bufid_setup xwr_leave ;validate packet ID, point FSR0 to descriptor
+         movff   reg0, reg2  ;save data byte in REG2
+;
+;   Abort if current offset is past end of payload.
+;
+         addfsr0 xp_max      ;point to max allowed payload size field
+         movff   postinc0, reg0 ;get MAXLEN into REG1:REG0
+         movff   postinc0, reg1
+         movf    reg0, w     ;compute OFFSET - MAXLEN
+         subwf   postinc0, w
+         movf    reg1, w
+         subwfb  postdec0, w
+         bnn     xwr_leave   ;offset is past end of max payload ?
+;
+;   Get the offset into the payload region into REG1:REG0 and increment the
+;   offset for next time by 1.  FSR0 is currently pointing to the low byte of
+;   the offset in the transmit packet descriptor.
+;
+         movff   postinc0, reg0 ;get offset of this transfer into REG1:REG0
+         movff   postdec0, reg1
+
+         movlw   1           ;add 1 to offset in the packet descriptor
+         addwf   postinc0
+         movlw   0
+         addwfc  postinc0
+
+         btfsc   reg1, 7     ;offset is not before payload region ?
+         jump    xwr_leave   ;before payload region, don't do the transfer
+;
+;   Update the LEN field, if necessary, to cover the offset in REG1:REG0.
+;   FSR0 is pointing to the low byte of LEN.
+;
+         movf    postinc0, w ;compute OFFSET - LEN
+         subwf   reg0, w
+         movf    postdec0, w
+         subwfb  reg1, w
+         bn      xwr_len_done ;length already covers this offset ?
+         ;
+         ;   The payload length must be updated to cover the offset in
+         ;   REG1:REG0.  FSR0 is pointing to the low byte of LEN.
+         ;
+         movlw   1           ;write OFFSET+1 into LEN
+         addwf   reg0, w
+         movwf   postinc0
+         movlw   0
+         addwfc  reg1, w
+         movwf   indf0
+         ;
+         ;   The payload length has been updated.  Make sure the LEN flag in the
+         ;   packet descriptor is not set.
+         ;
+         mcall   xmit_point  ;point FSR0 to start of transmit packet descriptor
+         bcf     indf0, xpfl_len ;length written to header is not up to date
+xwr_len_done unbank          ;done updating packet payload length
+;
+;   Write the byte into the network buffer.  Current register usage:
+;
+;     REG1:REG0  -  Offset of where to write the byte into the IP payload.
+;
+;     REG2  -  Data byte value.
+;
+;     REG8  -  Index of this IP transmit packet.
+;
+         bufpnt0 xp_id       ;point FSR0 to ID of network transmit buffer
+         movff   indf0, reg8 ;pass network transmit buffer ID in REG8
+         addofs  20          ;add IP header size to make net buffer offset
+         gcall   netp_xmit_ofs ;set offset into network buffer payload
+         movff   reg2, reg0  ;pass the byte to write
+         gcall   netp_xmit_write ;write the byte into the network buffer
+
+xwr_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_WRITE2
+;
+;   Write the 16 bit word in REG1:REG0 into the payload of the IP transmit
+;   packet identified by REG8.  The word will be written in high then low byte
+;   order.  The first byte will be written at the current payload offset, with
+;   the second immediately after the first.  The payload offset will be advanced
+;   by 2.
+;
+         glbsub  ip_xmit_write2, noregs
+
+         pushreg reg0        ;temp save low byte
+         movff   reg1, reg0
+         mcall   ip_xmit_write ;write the high byte
+         popreg  reg0        ;restore the low byte
+         mcall   ip_xmit_write ;write the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_READ
+;
+;   Read a payload byte from the IP transmit packet identified by REG8.  The ID
+;   in REG8 must be of a currently open IP transmit packet.  The byte will be
+;   read at the current payload read/write offset, then the offset
+;   incremented by one.  The byte value is returned in REG0.
+;
+         glbsub  ip_xmit_read, regf1 | regf8
+
+         bufid_setup xrd_leave ;validate packet ID, point FSR0 to descriptor
+         addfsr0 xp_next     ;point FRS0 to offset into IP payload
+
+         movff   postinc0, reg0 ;get IP offset of this transfer into REG1:REG0
+         movff   postdec0, reg1
+         movlw   1           ;increment offset in descriptor for next time
+         addwf   postinc0
+         movlw   0
+         addwfc  postdec0
+         addofs  20          ;add IP header size to make net buffer offset
+
+         movf    postdec0
+         movf    postdec0
+         movf    postdec0
+         movff   indf0, reg8 ;get network buffer ID into REG8
+         gcall   netp_xmit_ofs ;set offset into network buffer payload
+         gcall   netp_xmit_read ;read the byte into REG0
+
+xrd_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine XMIT_CKSUM_WORD
+;
+;   Read the next 16 bit word from the network transmit buffer identified by
+;   REG8 and accumulate them into the checksum in REG3:REG2.
+;
+         locsub  xmit_cksum_word, regf0 | regf1
+
+         gcall   netp_xmit_read ;get high byte into REG0
+         movff   reg0, reg1  ;move it into position
+         gcall   netp_xmit_read ;get low byte into REG0
+;
+;   The new word is in REG1:REG0.
+;
+;   Update the checksum in REG3:REG2 with the new word.  This is done by
+;   performing a "one's complement add" of the new word into the checksum.  A
+;   one's complement add is the same as a normal two's complement add with the
+;   carry recirculated.  In other words, the carry out of the high bit is added
+;   back into the low bit.
+;
+         movf    reg0, w     ;add in new low byte
+         addwf   reg2
+         movf    reg1, w     ;add in new high byte
+         addwfc  reg3
+         movlw   0
+         addwfc  reg2        ;add the carry back into the checksum accumulator
+         addwfc  reg3
+
+         check_yield         ;let other tasks run if needed
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_SEND
+;
+;   Send the IP transmit packet identified by REG8.  The ID in REG8 must be of a
+;   currently open IP transmit packet.
+;
+         glbsub  ip_xmit_send, regf0 | regf1 | regf2 | regf3 | regf8
+
+         bufid_setup xsnd_leave ;validate packet ID, point FSR0 to descriptor
+         movff   fsr0l, reg2 ;save address of IP descriptor in REG3:REG2
+         movff   fsr0h, reg3
+         movff   preinc0, reg8 ;pass network transmit buffer ID in REG8
+         movf    postdec0    ;point FSR0 back to start of IP packet descriptor
+;
+;   Current register usage:
+;
+;     REG0  -  Unused.
+;
+;     REG1  -  Unused.
+;
+;     REG3:REG2  -  Address of IP packet descriptor.
+;
+;     REG8  -  ID of the network transmit buffer for this IP packet.
+;
+;     FSR0  -  Pointing to start of IP transmit packet descriptor.
+;
+;   Update the total length in the IP packet header if it is not up to date.
+;
+         btfsc   indf0, xpfl_len ;length in IP header not up to date ?
+         jump    xsnd_done_len ;is up to date, skip this section
+         bsf     indf0, xpfl_len ;indicate length will be up to date
+         bcf     indf0, xpfl_cksum ;IP checksum will now be invalid
+
+         loadk16 reg0, 2     ;set network buffer offset to IP length field
+         gcall   netp_xmit_ofs
+
+         movff   reg2, fsr0l ;point to start of IP packet descriptor
+         movff   reg3, fsr0h
+         addfsr0 xp_len      ;point to payload length in IP packet descriptor
+         movlw   20          ;make total IP length in REG0:REG1
+         addwf   postinc0, w
+         movwf   reg1
+         movlw   0
+         addwfc  indf0, w
+         movwf   reg0
+
+         gcall   netp_xmit_write ;write IP length high byte
+         movff   reg1, reg0
+         gcall   netp_xmit_write ;write IP length low byte
+
+         movff   reg2, fsr0l ;restore FSR0 pointing to start of IP packet descriptor
+         movff   reg3, fsr0h
+
+xsnd_done_len unbank         ;done making sure IP length is set
+;
+;   Update the IP header checksum if it is not already known to be set.  FSR0 is
+;   pointing to the start of the IP transmit packet descriptor.
+;
+         btfsc   indf0, xpfl_cksum ;checksum not already set ?
+         jump    xsnd_done_cksum ;is up to date, skip this section
+         bsf     indf0, xpfl_cksum ;indicate checksum will be up to date
+
+         loadk16 reg0, 0
+         gcall   netp_xmit_ofs ;set network buffer read offset to start of IP header
+         clrf    reg2        ;init the checksum accumulator
+         clrf    reg3
+
+         loadk8  reg1, 5     ;number of 16 bit words to accumulate into checksum
+xsnd_ck1 unbank
+         mcall   xmit_cksum_word ;read header word and update checksum in REG3:REG2
+         decfsz  reg1
+         jump    xsnd_ck1
+
+         gcall   netp_xmit_read ;skip over checksum in IP header, as if checksum 0
+         gcall   netp_xmit_read
+
+         loadk8  reg1, 4     ;number of 16 bit words to accumulate into checksum
+xsnd_ck2 unbank
+         mcall   xmit_cksum_word ;read header word and update checksum in REG3:REG2
+         decfsz  reg1
+         jump    xsnd_ck2
+
+         loadk16 reg0, 10    ;set network buffer write offset to IP header checksum
+         gcall   netp_xmit_ofs
+         comf    reg3, w
+         movwf   reg0
+         gcall   netp_xmit_write ;write checksum high byte
+         comf    reg2, w
+         movwf   reg0
+         gcall   netp_xmit_write ;write checksum low byte
+
+xsnd_done_cksum unbank       ;done making sure IP header checksum is set
+;
+;   Send the packet.
+;
+         gcall   netp_xmit_def ;fill in default values for any fields not set
+         gcall   netp_xmit_send ;send the packet
+
+xsnd_leave unbank
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine IP_XMIT_CLOSE
+;
+;   Close the IP transmit packet identified by REG8.  The ID in REG8 must be of
+;   a currently open IP transmit packet.  The transmit packet will be
+;   deallocated and related system resources released.  REG8 is returned invalid
+;   since the packet no longer exists after this call.
+;
+         glbsub  ip_xmit_close, noregs
+
+         bufid_setup xcls_leave ;validate packet ID, point FSR0 to descriptor
+
+         clrf    postinc0    ;mark IP transmit packet descriptor unused
+         movff   indf0, reg8 ;get ID of network transmit buffer
+         gcall   netp_xmit_release ;releast the network transmit buffer
+         setf    reg8        ;return IP transmit packet ID as invalid
+
+xcls_leave unbank
+         leaverest

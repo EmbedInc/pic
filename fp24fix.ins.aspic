@@ -1,0 +1,443 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Subroutine FP24FIX
+;
+;   Convert the 24 bit floating point number in the low 3 bytes of REGA into
+;   a signed fixed point number in all 4 bytes of REGA.  REG8 is a signed value
+;   indicating the number of fraction bits that should be in the final fixed
+;   point number.
+;
+;   The returned number is clipped to the maximum representable magnitude.
+;
+;   See the comments in FP24FLT for a description of the floating point
+;   format.
+;
+didit    set     0           ;init to no code written
+
+.fp24fix code
+;
+;*******************************************************************************
+;
+;   This section is for PIC 16 family (14 bit core).
+;
+  if fam_16
+didit    set     1           ;this processor is supported
+
+         glbsub  fp24fix, regf8
+;
+;   Check for the special case of 0.
+;
+         movf    rega+2      ;set Z if sign and EXP are both zero
+         skip_nz             ;FP value is not zero ?
+         goto    mag_zero    ;go return integer value of zero
+;
+;   Compute the number of bits the mantissa value must be shifted left
+;   to result in the desired number of fraction bits.  The mantissa bits
+;   are already positioned for 16 fraction bits, and the EXP value
+;   provides a measure of how many bits the mantissa is already shifted
+;   right, with an offset of 64.  Overall, the number of bits to shift
+;   the mantissa left is REG8 - 16 + (EXP - 64), or more simply:
+;
+;     bits to shift left = REG8 + EXP - 80
+;
+;   This computation will be performed using 16 bits so that overflow and
+;   underflow can be dealt with once at the end.  REG3 (high byte of REGA)
+;   will be temporarily used for the upper 8 bits of the REG8 value.
+;
+         ;
+         ;   Sign extend REG8 into REG3.
+         ;
+         clrf    reg3        ;init REG3 assuming positive value
+         btfsc   reg8, 7     ;indeed positive ?
+         decf    reg3        ;negative, set REG3 accordingly
+         ;
+         ;   Add EXP into REG3,REG8.
+         ;
+         movf    rega+2, w   ;get byte containing EXP in low bits
+         andlw   b'01111111' ;mask in EXP field
+         addwf   reg8        ;add EXP into low byte
+         skip_ncarr          ;no carry into high byte ?
+         incf    reg3        ;propagate the carry
+         ;
+         ;   Subtract 80 from REG3,REG8.
+         ;
+         movlw   80          ;get value to subtract
+         subwf   reg8        ;subtract from the low byte
+         skip_nborr          ;no borrow from the high byte ?
+         decf    reg3        ;propagate the borrow
+;
+;   Convert the 16 bit value in REG3,REG8 to an 8 bit value in REG8.
+;   The maximum range of valid shift counts is -16 (right) to +14 (left).
+;   The maximum and minimum magnitude values can be automatically
+;   substituted for shift counts outside this range.
+;
+         btfsc   reg3, 7     ;the value is positive ?
+         goto    shl_neg     ;the value is negative
+         ;
+         ;   The left shift count is positive.
+         ;
+         movf    reg3        ;set Z if whole upper byte is 0
+         skip_z              ;didn't overflow into upper byte ?
+         goto    mag_max     ;go return maximum magnitude number
+         movf    reg8, w     ;get number of bits to shift left
+         sublw   14          ;compare to maximum useful
+         skip_wle            ;within range ?
+         goto    mag_max     ;go return maximum magnitude number
+         goto    have_shift  ;left shift count all set in REG8
+         ;
+         ;   The left shift count is negative (shifting right).
+         ;
+shl_neg
+         incf    reg3        ;set Z if whole upper byte only sign (negative)
+         skip_z              ;didn't overflow into upper byte ?
+         goto    mag_min     ;go return minimum magnitude number
+         movf    reg8, w     ;get signed single byte shift count
+         sublw   low -17     ;compare to first unsigned value that is too small
+         skip_wgt            ;within range ?
+         goto    mag_min     ;go return minimum magnitude number
+have_shift
+;
+;   REG8 is the signed number of bits the mantissa needs to be shifted
+;   left from it current position in REGA.  REG8 is guaranteed to be
+;   within the valid range from -16 to +14.
+;
+;   Now restore the implied 1 integer part of the mantissa, set its sign
+;   to reflect the S bit, and sign extend the result into the full 32
+;   bits of REGA.
+;
+         btfsc   rega+2, 7   ;FP value is positive ?
+         goto    fpneg       ;FP value is negative
+         ;
+         ;   The floating point value is positive.
+         ;
+         clrf    rega+2      ;init high 16 bits to 0
+         clrf    rega+3
+         bsf     rega+2, 0   ;restore implied mantissa integer part
+         goto    have_fixp   ;have initial fixed point value in REGA
+         ;
+         ;   The floating point value is negative.
+         ;
+fpneg
+         comf    rega+0      ;complement existing mantissa fraction bits
+         comf    rega+1
+         movlw   b'11111110' ;restore implied mantissa integer part, complemented
+         movwf   rega+2
+         movlw   b'11111111' ;set high byte to one's complement
+         movwf   rega+3
+
+         incfsz  rega+0      ;increment the complemented number in REGA
+         goto    have_fixp   ;no carry into byte 1
+         incfsz  rega+1      ;propagate carry into byte 1
+         goto    have_fixp   ;no carry into byte 2
+         incf    rega+2      ;propagate carry into byte 2, will never carry further
+have_fixp                    ;initial fixed point value in REGA is all set
+;
+;   The mantissa value has been expanded into all of REGA, and REG8 is the number
+;   of bits this value must be shifted left to form the final fixed point
+;   number to return in REGA.  Note that REG8 could be negative indicating
+;   that REGA must be shifted right.
+;
+;   Now shift REGA as described in REG8.  Separate routines will be used
+;   for shifting left and right.
+;
+         btfsc   reg8, 7     ;shift count is positive, shifting left ?
+         goto    shift_right ;shift count is negative, shifting right
+;
+;   Shift REGA left by the number of bits specified in REG8.  REG8 is
+;   guaranteed to be in the range from 0 to 14.
+;
+         movf    reg8        ;set Z if no bits left to shift
+         skip_nz             ;still need to shift another bit ?
+         goto    done_shift  ;all done shifting REGA
+loop_left                    ;back here after shift of 1 bit left
+         bcf     status, c   ;set bit to shift in at right
+         rlf     rega+0      ;shift REGA left one bit
+         rlf     rega+0
+         rlf     rega+0
+         rlf     rega+0
+         decfsz  reg8        ;count one less bit left to shift
+         goto    loop_left   ;back to shift one more bit left
+         goto    done_shift  ;all done shifting REGA left
+;
+;   Shift REGA right.  REG8 contains the negative of the number of bits
+;   REGA needs to be shifted.  REG8 is guaranteed to be in the range from
+;   -1 to -16.
+;
+shift_right
+loop_right                   ;back here to shift REGA another bit right
+         rlf     rega+3, w   ;set C to the sign bit to shift in at left
+         rrf     rega+3      ;arithmetic shift REGA right one bit
+         rrf     rega+2
+         rrf     rega+1
+         rrf     rega+0      ;C is set to the bit shifted out at right
+         incfsz  reg8        ;count one less bit left to shift
+         goto    loop_right  ;back to shift REGA another bit right
+         ;
+         ;   REGA has been shifted the prescribed number of bits right,
+         ;   and C is set to the last bit shifted out at right.  Now
+         ;   round REGA up by 1 if C is 1.
+         ;
+         btfss   status, c   ;first bit below REGA is 1 ?
+         goto    done_shift  ;first bit below REGA is 0, already at rounded value
+
+         incfsz  rega+0      ;add 1 to low byte
+         goto    done_shift  ;no carry into byte 1
+         incfsz  rega+1      ;propagate carry into byte 1
+         goto    done_shift  ;no carry into byte 2
+         incfsz  rega+2      ;propagate carry into byte 2
+         goto    done_shift  ;no carry into byte 3
+         incf    rega+3      ;propagate carry into byte 3
+done_shift
+
+fix_leave                    ;common exit point
+         leaverest
+;
+;   Return the maximum magnitude value.  The original FP sign bit is still
+;   in the high bit of REGA+2.
+;
+mag_max
+         btfsc   rega+2, 7   ;FP sign is positive ?
+         goto    max_neg     ;FP sign is negative
+         ;
+         ;   Return the maximum magnitude positive number.
+         ;
+         loadk32 rega, h'7FFFFFFF'
+         goto    fix_leave
+         ;
+         ;   Return the maximum magnitude negative number.
+         ;
+max_neg
+         loadk32 rega, h'80000000'
+         goto    fix_leave
+;
+;   Return the minimum magnitude value.
+;
+mag_min
+;
+;   Return zero.
+;
+mag_zero
+         loadk32 rega, 0
+         goto    fix_leave
+    endif                    ;end of PIC 16 case
+;
+;*******************************************************************************
+;
+;   This section is for PIC 18 family (16 bit core).
+;
+  if fam_18
+didit    set     1           ;this processor is supported
+
+         glbsub  fp24fix, regf8
+;
+;   Check for the special case of 0.
+;
+         movf    rega+2      ;set Z if sign and EXP are both zero
+         bz      mag_zero    ;go return integer value of zero
+;
+;   Compute the number of bits the mantissa value must be shifted left
+;   to result in the desired number of fraction bits.  The mantissa bits
+;   are already positioned for 16 fraction bits, and the EXP value
+;   provides a measure of how many bits the mantissa is already shifted
+;   right, with an offset of 64.  Overall, the number of bits to shift
+;   the mantissa left is REG8 - 16 + (EXP - 64), or more simply:
+;
+;     bits to shift left = REG8 + EXP - 80
+;
+;   This computation will be performed using 16 bits so that overflow and
+;   underflow can be dealt with once at the end.  REG3 (high byte of REGA)
+;   will be temporarily used for the upper 8 bits of the REG8 value.
+;
+         ;
+         ;   Sign extend REG8 into REG3.
+         ;
+         clrf    reg3        ;init REG3 assuming positive value
+         btfsc   reg8, 7     ;indeed positive ?
+         decf    reg3        ;negative, set REG3 accordingly
+         ;
+         ;   Add EXP into REG3,REG8.
+         ;
+         movf    rega+2, w   ;get byte containing EXP in low bits
+         andlw   b'01111111' ;mask in EXP field
+         addwf   reg8        ;add EXP into low byte
+         skip_ncarr          ;no carry into high byte ?
+         incf    reg3        ;propagate the carry
+         ;
+         ;   Subtract 80 from REG3,REG8.
+         ;
+         movlw   80          ;get value to subtract
+         subwf   reg8        ;subtract from the low byte
+         skip_nborr          ;no borrow from the high byte ?
+         decf    reg3        ;propagate the borrow
+;
+;   Convert the 16 bit value in REG3,REG8 to an 8 bit value in REG8.
+;   The maximum range of valid shift counts is -16 (right) to +14 (left).
+;   The maximum and minimum magnitude values can be automatically
+;   substituted for shift counts outside this range.
+;
+         btfsc   reg3, 7     ;the value is positive ?
+         jump    shl_neg     ;the value is negative
+         ;
+         ;   The left shift count is positive.
+         ;
+         movf    reg3        ;set Z if whole upper byte is 0
+         bnz     mag_max     ;value overflowed into upper byte ?
+         movf    reg8, w     ;get number of bits to shift left
+         sublw   14          ;compare to maximum useful
+         jmp_wgt mag_max     ;out of range, go return maximum magnitude number
+         jump    have_shift  ;left shift count all set in REG8
+         ;
+         ;   The left shift count is negative (shifting right).
+         ;
+shl_neg
+         incf    reg3        ;set Z if whole upper byte only sign (negative)
+         bnz     mag_min     ;value overflowed into upper byte ?
+         movf    reg8, w     ;get signed single byte shift count
+         sublw   low -17     ;compare to first unsigned value that is too small
+         jmp_wle mag_min     ;out of range, return minimum magnitude number
+
+have_shift
+;
+;   REG8 is the signed number of bits the mantissa needs to be shifted
+;   left from its current position in REGA.  REG8 is guaranteed to be
+;   within the valid range from -16 to +14.
+;
+;   Now restore the implied 1 integer part of the mantissa, set its sign
+;   to reflect the S bit, and sign extend the result into the full 32
+;   bits of REGA.
+;
+         btfsc   rega+2, 7   ;FP value is positive ?
+         jump    fpneg       ;FP value is negative
+         ;
+         ;   The floating point value is positive.
+         ;
+         clrf    rega+2      ;init high 16 bits to 0
+         clrf    rega+3
+         bsf     rega+2, 0   ;restore implied mantissa integer part
+         jump    have_fixp   ;have initial fixed point value in REGA
+         ;
+         ;   The floating point value is negative.
+         ;
+fpneg
+         comf    rega+0      ;complement existing mantissa fraction bits
+         comf    rega+1
+         movlw   b'11111110' ;restore implied mantissa integer part, complemented
+         movwf   rega+2
+         movlw   b'11111111' ;set high byte to one's complement
+         movwf   rega+3
+
+         incf    rega+0      ;increment the complemented number in REGA
+         movlw   0
+         addwfc  rega+1
+         addwfc  rega+2
+         addwfc  rega+3
+
+have_fixp                    ;initial fixed point value in REGA is all set
+;
+;   The mantissa value has been expanded into all of REGA, and REG8 is the number
+;   of bits this value must be shifted left to form the final fixed point
+;   number to return in REGA.  Note that REG8 could be negative indicating
+;   that REGA must be shifted right.
+;
+;   Now shift REGA as described in REG8.  Separate routines will be used
+;   for shifting left and right.
+;
+         btfsc   reg8, 7     ;shift count is positive, shifting left ?
+         jump    shift_right ;shift count is negative, shifting right
+;
+;   Shift REGA left by the number of bits specified in REG8.  REG8 is
+;   guaranteed to be in the range from 0 to 14.
+;
+         movf    reg8        ;set Z if no bits to shift
+         bz      done_shift  ;no need to shift at all ?
+
+loop_left                    ;back here after shift of 1 bit left
+         bcf     status, c   ;set bit to shift in at right
+         rlcf    rega+0      ;shift REGA left one bit
+         rlcf    rega+0
+         rlcf    rega+0
+         rlcf    rega+0
+         decfsz  reg8        ;count one less bit left to shift
+         jump    loop_left   ;back to shift one more bit left
+         jump    done_shift  ;all done shifting REGA left
+;
+;   Shift REGA right.  REG8 contains the negative of the number of bits
+;   REGA needs to be shifted.  REG8 is guaranteed to be in the range from
+;   -1 to -16.
+;
+shift_right
+
+loop_right                   ;back here to shift REGA another bit right
+         rlcf    rega+3, w   ;set C to the sign bit to shift in at left
+         rrcf    rega+3      ;arithmetic shift REGA right one bit
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0      ;C is set to the bit shifted out at right
+         incfsz  reg8        ;count one less bit left to shift
+         jump    loop_right  ;back to shift REGA another bit right
+         ;
+         ;   REGA has been shifted the prescribed number of bits right,
+         ;   and C is set to the last bit shifted out at right.  Now
+         ;   round REGA up by 1 if C is 1.
+         ;
+         movlw   0
+         addwfc  rega+0
+         addwfc  rega+1
+         addwfc  rega+2
+         addwfc  rega+3
+
+done_shift
+
+fix_leave                    ;common exit point
+         leaverest
+;
+;   Return the maximum magnitude value.  The original FP sign bit is still
+;   in the high bit of REGA+2.
+;
+mag_max
+         btfsc   rega+2, 7   ;FP sign is positive ?
+         jump    max_neg     ;FP sign is negative
+         ;
+         ;   Return the maximum magnitude positive number.
+         ;
+         loadk32 rega, h'7FFFFFFF'
+         jump    fix_leave
+         ;
+         ;   Return the maximum magnitude negative number.
+         ;
+max_neg
+         loadk32 rega, h'80000000'
+         jump    fix_leave
+;
+;   Return the minimum magnitude value.
+;
+mag_min
+;
+;   Return zero.
+;
+mag_zero
+         loadk32 rega, 0
+         jump    fix_leave
+    endif                    ;end of PIC 18 case
+;
+;*******************************************************************************
+;
+;   Check that code was emitted for this processor.
+;
+  if !didit
+         error   FP24FIX not implemented for this processor.
+    endif

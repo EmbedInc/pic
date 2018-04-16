@@ -1,0 +1,555 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Subroutine FP24FLT
+;
+;   Convert the signed fixed point number in REGA to 24 bit floating point
+;   in the low 24 bits of REGA.  REG8 is a signed value indicating the number
+;   of fraction bits included in the fixed point REGA value.
+;
+;   24 bit floating point format:
+;
+;     24 bits are used to describe a floating point value using 1 sign bit
+;     7 exponent bits, and 16 mantissa bits as follows:
+;
+;     |         byte 2        |         byte 1        |         byte 0        |
+;     |           |           |           |           |           |           |
+;      23 22 21 20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+;     ------------------------------------------------------------------------
+;     |  |                    |                                               |
+;     | S|      EXP           |                   MANT                        |
+;     |  |                    |                                               |
+;     ------------------------------------------------------------------------
+;
+;     S  -  Sign bit.  0 for positive or zero value, 1 for negative value.
+;
+;     EXP  -  Exponent.  The overall floating point value is the mantissa
+;       value times 2 ** (EXP - 64) when EXP is in the range from 1 to 127.
+;       The special EXP value of 0 is only used when the overall floating
+;       point value is 0.0.
+;
+;     MANT  -  Mantissa.  Except for the special case when the overall
+;       floating point value is 0, the mantissa represents a fixed point
+;       value such that 1 <= mantissa < 2.  This means the integer part of
+;       the mantissa is always 1.  Since this integer part is always the
+;       same, it is not stored.  The MANT field contains the 16 most
+;       significant fraction bits of the mantissa value.  Therefore
+;       MANT = (mantissa - 1) * 65536.  An overall floating point value of
+;       0.0 is indicated by EXP = 0.  In that case MANT is reserved, and
+;       should be 0.
+;
+;    Consider the following examples:
+;
+;      0.0 --> 000000h
+;
+;        S = 0  (positive or zero)
+;        EXP = 0  (special case for 0.0)
+;        MANT = 0  (special case for 0.0)
+;
+;      1.0 --> 400000h
+;
+;        S = 0  (positive or zero)
+;        exponent = 0, EXP = 64 --> 40h
+;        mantissa = 1.0, MANT = 0
+;
+;      -3.141593 --> C19220h
+;
+;        S = 1  (negative)
+;        exponent = 1, EXP = 65 --> 41h
+;        mantissa = 1.570797, MANT = 37,408 --> 9220h
+;
+;   Unless otherwise specified, overflow and underflow values are silently
+;   clipped to the maximum magnitude (7FFFFF for positive, FFFFFF for negative)
+;   and zero, respectively.
+;
+didit    set     0           ;init to no code written
+
+.fp24flt code
+;
+;*******************************************************************************
+;
+;   This section is for PIC 16 family (14 bit core).
+;
+  if fam_16
+didit    set     1           ;this processor is supported
+
+#define flag_neg reg4, 7
+
+         glbsub  fp24flt, regf3 | regf4 | regf8
+;
+;   Check for special case of zero value.
+;
+         movf    rega+0, w   ;OR all the bytes of REGA
+         iorwf   rega+1, w
+         iorwf   rega+2, w
+         iorwf   rega+3, w
+         skip_nz             ;REGA is not all zero ?
+         goto    flt_leave   ;value is 0, REGA already set to FP zero
+;
+;   set FLAG_NEG to indicate the original sign of the REGA value, then
+;   set REGA to its absolute value.
+;
+         movf    rega+3, w   ;get byte containing original sign bit
+         movwf   reg4        ;save original sign bit
+         btfss   flag_neg    ;value is negative ?
+         goto    done_abs    ;already positive, REGA already set to absolute value
+         ;
+         ;   REGA contains a negative value.  Negate REGA by complementing
+         ;   then incrementing it.
+         ;
+         comf    rega+0      ;set REGA to its one's complement
+         comf    rega+1
+         comf    rega+2
+         comf    rega+3
+
+         incfsz  rega+0      ;increment byte 0
+         goto    done_abs    ;no carry from byte 0
+         incfsz  rega+1      ;propagate carry to byte 1
+         goto    done_abs    ;no carry from byte 1
+         incfsz  rega+2      ;propagate carry to byte 2
+         goto    done_abs    ;no carry from byte 2
+         incf    rega+3      ;propagate carry to byte 3
+done_abs                     ;REGA is absolute value, FLAG_NEG is original sign
+;
+;   REGA is the magnitude of its original value, which is not zero, and the
+;   original sign has been saved in FLAG_NEG.
+;
+;   Now init REG8 to the EXP value.  REGA will be normalized later so that
+;   the high byte is 1 which puts the MANT value nicely in the next two
+;   lower bytes.  REG8 will be set up as if REGA is already normalized,
+;   then REG8 will be incremented and decremented as REGA is shifted left
+;   and right.  The EXP value is therefore 88 - REG8.  (This results in
+;   EXP = 64, meaning 2 ** 0 when REG8 = 24 fraction bits.)
+;
+;   Note that the EXP value resulting from 88 - REG8 could be too large
+;   or too small for the floating point representation.  The valid range
+;   of EXP is from 1 to 127.  Note also that REGA could be shifted as
+;   much as 7 bits right (EXP will be incremented) or 24 bits left
+;   (EXP will be decremented).  The maximum range of the resulting EXP
+;   values are therefore from 88 - REG8 + 7 = 95 - REG8 to 88 - REG8 -24
+;   = 64 - REGA.  The maximum range of REG8 values that could possibly
+;   result in valid EXP values is therefore from -63 to +94.  REG8 is
+;   first checked for being within this range.  Special maximum and
+;   minimum magnitude values are returned if REG8 is outside this range.
+;   Once REG8 is known to be within range, the 88 - REG8 computation and
+;   any subsequent increment or decrement can be peformed without any
+;   chance that there will be an overflow from an 8 bit value, if EXP
+;   is maintained with an additional offset of 32.
+;
+;   REG8 is first converted to "offset 128" format so that it can be
+;   manipulated as an unsigned number.
+;
+         movlw   128         ;get offset to add to REG8
+         addwf   reg8        ;make fraction bits in REGA + 128
+
+         movlw   -63 + 128   ;get minimum valid REG8 value
+         subwf   reg8, w     ;compare to actual REG8 value
+         skip_wle            ;within range ?
+         goto    mag_max     ;pass back maximum magnitude number
+
+         movf    reg8, w     ;get the REG8 value
+         sublw   94 + 128    ;compare it to the maximum valid value
+         skip_wle            ;within range ?
+         goto    mag_min     ;pass back minimum magnitude number
+         ;
+         ;   REG8 is the number of fraction bits in REGA + 128.
+         ;   Now convert REG8 to the initial EXP value.
+         ;
+         movf    reg8, w     ;get number of REGA fraction bits + 128
+         sublw   88 + 128 + 32 ;make initial EXP+32 value in W
+         movwf   reg8        ;save it in REG8
+;
+;   Normalize the value in REGA such that the upper byte is exactly 1.
+;   The EXP+32 value in REG8 is updated accordingly.
+;
+         movf    rega+3      ;set Z if upper byte is 0
+         skip_z              ;upper byte is zero, need to shift REGA left ?
+         goto    shift_right ;upper byte is not zero, may need to shift right
+;
+;   Shift REGA left until the upper byte is exactly 1.  The upper byte is
+;   currently 0.
+;
+loop_shleft                  ;back here to shift REGA left one more bit
+         bcf     status, c   ;set bit to shift in from the right
+         rlf     rega+0      ;shift REGA left one bit
+         rlf     rega+1
+         rlf     rega+2
+         rlf     rega+3
+
+         decf    reg8        ;update EXP
+         ;
+         ;   Go back to shift REGA another bit left if the high byte is
+         ;   still 0.
+         ;
+         movf    rega+3      ;set Z flag if REGA high byte is 0
+         skip_nz             ;high byte is no longer 0 ?
+         goto    loop_shleft ;the high byte is still 0, shift REGA left another bit
+         goto    done_shift  ;done normalizing REGA
+;
+;   Shift REGA right until the upper byte is exactly 1.
+;
+shift_right                  ;jump if REGA may need to be shifted right
+
+loop_shright                 ;back here after shift each bit right
+         decf    rega+3, w   ;set Z if high byte exactly 1
+         skip_nz             ;still need to shift another bit right ?
+         goto    done_shift  ;upper byte exactly 1, done shifting REGA
+         ;
+         ;   Shift REGA one bit right.
+         ;
+         bcf     status, c   ;set bit to shift in from the left
+         rrf     rega+3      ;shift REGA right one bit
+         rrf     rega+2
+         rrf     rega+1
+         rrf     rega+0
+
+         incf    reg8        ;update EXP
+         goto    loop_shright ;back to check REGA again after shift
+done_shift                   ;done shifting REGA
+;
+;   The REGA value has been normalized such that the high byte is exaclty 1.
+;   The EXP+32 value in REG8 has been updated accordingly.
+;
+;   The MANT value is in REGA bytes 1 and 2, except that the next higher value
+;   may be more appropriate due to roundoff from the next less significant
+;   bits.
+;
+;   Now round the value in the high 3 bytes of REGA.  Note that this means
+;   the high 3 bytes of REGA are either incremented or left alone.  However,
+;   if the bytes are incremented, an overflow could result which would require
+;   REGA to be shifted one more bit right to re-normalize the value.
+;
+         btfss   rega+0, 7   ;need to round high 3 bytes of REGA up ?
+         goto    done_round  ;no change required to make rounded value
+
+         incfsz  rega+1      ;increment the low byte of the three
+         goto    done_round  ;no carry into next byte
+         incfsz  rega+2
+         goto    done_round  ;no carry into next byte
+         ;
+         ;   The low two bytes of the mantissa value in REGA+2,REGA+1 have
+         ;   been incremented due to rounding, and a carry was generated
+         ;   when the upper of the two bytes was incremented.  This means
+         ;   that the REGA value must be shifted right one bit to re-normalize
+         ;   it after the roundoff.  However, note that the full rounded value
+         ;   before the shift is always REGA+3 = 2, and REGA+2,REGA+1 = 0.
+         ;   This means computing the REGA+3 value and then shifting REGA
+         ;   right one bit is a waste of time, since we know this will always
+         ;   result in REGA+2,REGA+1 set to 0 and REGA+3 set to 1.  Note
+         ;   that this is already how all three bytes are set right now.
+         ;   We therefore only need to update the EXP+32 value in REG8.
+         ;
+         incf    reg8        ;update EXP for REGA re-normalize after round
+done_round                   ;done rounding REGA
+;
+;   The final MANT bits are in REGA+2,REGA+1, and REG8 is the corresponding
+;   EXP value plus 32.
+;
+;   Now check that EXP+32 is within the valid range and convert REG8 to the
+;   final EXP value.  If out of range, the appropriate minimum or maximum
+;   magnitude value is returned.  The valid range of final EXP values is
+;   1 to 127.
+;
+         movlw   1 + 32      ;get minimum valid EXP+32 value
+         subwf   reg8, w     ;compare to actual EXP+32 value
+         skip_wle            ;within range ?
+         goto    mag_min     ;pass back minimum magnitude number
+
+         movf    reg8, w     ;get the EXP+32 value
+         sublw   127 + 32    ;compare it to the maximum valid value
+         skip_wle            ;whithin range ?
+         goto    mag_max     ;pass back maximum magnitude number
+
+         movlw   32          ;get offset to subtract from EXP+32 value
+         subwf   reg8        ;make final EXP value in REG8
+;
+;   The final EXP value is in REG8.
+;
+;   Now move the MANT bits to their final location in the low 16 bits of REGA.
+;
+         movf    rega+1, w   ;move MANT low byte
+         movwf   rega+0
+         movf    rega+2, w   ;move MANT high byte
+         movwf   rega+1
+;
+;   Move the EXP field into position.
+;
+         movf    reg8, w     ;get the EXP field value
+         movwf   rega+2      ;write it into the final FP number
+;
+;   The EXP and MANT fields are all set.  Now set the sign bit to make the
+;   final floating point number.
+;
+set_sign                     ;jump here if EXP and MANT all set
+         bcf     rega+2, 7   ;init sign bit as if positive
+         btfsc   flag_neg    ;indeed supposed to be positive ?
+         bsf     rega+2, 7   ;set sign to negative
+
+flt_leave                    ;common exit point
+         leaverest
+;
+;   Pass back the maximum magnitude number.
+;
+mag_max
+         movlw   h'FF'
+         movwf   rega+0
+         movwf   rega+1
+         movwf   rega+2
+         goto    set_sign    ;set the sign and return the number
+;
+;   Pass back the minimum magnitude number.
+;
+mag_min
+         clrf    rega+0
+         clrf    rega+1
+         clrf    rega+2
+         goto    flt_leave   ;final number all set
+    endif                    ;end of PIC 16 case
+;
+;*******************************************************************************
+;
+;   This section is for PIC 18 family (16 bit core).
+;
+  if fam_18
+didit    set     1           ;this processor is supported
+
+#define flag_neg reg4, 7
+
+         glbsub  fp24flt, regf3 | regf4 | regf8
+;
+;   Check for special case of zero value.
+;
+         movf    rega+0, w   ;OR all the bytes of REGA
+         iorwf   rega+1, w
+         iorwf   rega+2, w
+         iorwf   rega+3, w
+         skip_nz             ;REGA is not all zero ?
+         jump    flt_leave   ;value is 0, REGA already set to FP zero
+;
+;   set FLAG_NEG to indicate the original sign of the REGA value, then
+;   set REGA to its absolute value.
+;
+         movf    rega+3, w   ;get byte containing original sign bit
+         movwf   reg4        ;save original sign bit
+         btfss   flag_neg    ;value is negative ?
+         jump    done_abs    ;already positive, REGA already set to absolute value
+         ;
+         ;   REGA contains a negative value.  Negate REGA by complementing
+         ;   then incrementing it.
+         ;
+         comf    rega+0      ;set REGA to its one's complement
+         comf    rega+1
+         comf    rega+2
+         comf    rega+3
+
+         incf    rega+0      ;increment byte 0
+         movlw   0
+         addwfc  rega+1      ;propagate carry to byte 1
+         addwfc  rega+2      ;propagate carry to byte 2
+         addwfc  rega+3      ;propagate carry to byte 3
+
+done_abs                     ;REGA is absolute value, FLAG_NEG is original sign
+;
+;   REGA is the magnitude of its original value, which is not zero, and the
+;   original sign has been saved in FLAG_NEG.
+;
+;   Now init REG8 to the EXP value.  REGA will be normalized later so that
+;   the high byte is 1 which puts the MANT value nicely in the next two
+;   lower bytes.  REG8 will be set up as if REGA is already normalized,
+;   then REG8 will be incremented and decremented as REGA is shifted left
+;   and right.  The EXP value is therefore 88 - REG8.  (This results in
+;   EXP = 64, meaning 2 ** 0 when REG8 = 24 fraction bits.)
+;
+;   Note that the EXP value resulting from 88 - REG8 could be too large
+;   or too small for the floating point representation.  The valid range
+;   of EXP is from 1 to 127.  Note also that REGA could be shifted as
+;   much as 7 bits right (EXP will be incremented) or 24 bits left
+;   (EXP will be decremented).  The maximum range of the resulting EXP
+;   values are therefore from 88 - REG8 + 7 = 95 - REG8 to 88 - REG8 -24
+;   = 64 - REGA.  The maximum range of REG8 values that could possibly
+;   result in valid EXP values is therefore from -63 to +94.  REG8 is
+;   first checked for being within this range.  Special maximum and
+;   minimum magnitude values are returned if REG8 is outside this range.
+;   Once REG8 is known to be within range, the 88 - REG8 computation and
+;   any subsequent increment or decrement can be peformed without any
+;   chance that there will be an overflow from an 8 bit value, if EXP
+;   is maintained with an additional offset of 32.
+;
+;   REG8 is first converted to "offset 128" format so that it can be
+;   manipulated as an unsigned number.
+;
+         movlw   128         ;get offset to add to REG8
+         addwf   reg8        ;make fraction bits in REGA + 128
+
+         movlw   -63 + 128   ;get minimum valid REG8 value
+         subwf   reg8, w     ;compare to actual REG8 value
+         jmp_wgt mag_max     ;out of range, pass back maximum magnitude number ?
+
+         movf    reg8, w     ;get the REG8 value
+         sublw   94 + 128    ;compare it to the maximum valid value
+         jmp_wgt mag_min     ;out of range, pass back minimum magnitude number ?
+         ;
+         ;   REG8 is the number of fraction bits in REGA + 128.
+         ;   Now convert REG8 to the initial EXP value.
+         ;
+         movf    reg8, w     ;get number of REGA fraction bits + 128
+         sublw   88 + 128 + 32 ;make initial EXP+32 value in W
+         movwf   reg8        ;save it in REG8
+;
+;   Normalize the value in REGA such that the upper byte is exactly 1.
+;   The EXP+32 value in REG8 is updated accordingly.
+;
+         movf    rega+3      ;set Z if upper byte is 0
+         bnz     shift_right ;upper byte is not zero, may need to shift right ?
+;
+;   Shift REGA left until the upper byte is exactly 1.  The upper byte is
+;   currently 0.
+;
+loop_shleft                  ;back here to shift REGA left one more bit
+         bcf     status, c   ;set bit to shift in from the right
+         rlcf    rega+0      ;shift REGA left one bit
+         rlcf    rega+1
+         rlcf    rega+2
+         rlcf    rega+3
+
+         decf    reg8        ;update EXP
+         ;
+         ;   Go back to shift REGA another bit left if the high byte is
+         ;   still 0.
+         ;
+         movf    rega+3      ;set Z flag if REGA high byte is 0
+         bz      loop_shleft ;upper byte still zero, back to shift another bit ?
+         jump    done_shift  ;done normalizing REGA
+;
+;   Shift REGA right until the upper byte is exactly 1.
+;
+shift_right                  ;jump if REGA may need to be shifted right
+
+loop_shright                 ;back here after shift each bit right
+         decf    rega+3, w   ;set Z if high byte exactly 1
+         bz      done_shift  ;upper byte = 1, done shifting REGA ?
+         ;
+         ;   Shift REGA one bit right.
+         ;
+         bcf     status, c   ;set bit to shift in from the left
+         rrcf    rega+3      ;shift REGA right one bit
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0
+
+         incf    reg8        ;update EXP
+         jump    loop_shright ;back to check REGA again after shift
+
+done_shift                   ;done shifting REGA
+;
+;   The REGA value has been normalized such that the high byte is exaclty 1.
+;   The EXP+32 value in REG8 has been updated accordingly.
+;
+;   The MANT value is in REGA bytes 1 and 2, except that the next higher value
+;   may be more appropriate due to roundoff from the next less significant
+;   bits.
+;
+;   Now round the value in the high 3 bytes of REGA.  Note that this means
+;   the high 3 bytes of REGA are either incremented or left alone.  However,
+;   if the bytes are incremented, an overflow could result which would require
+;   REGA to be shifted one more bit right to re-normalize the value.
+;
+         btfss   rega+0, 7   ;need to round high 3 bytes of REGA up ?
+         jump    done_round  ;no change required to make rounded value
+
+         incfsz  rega+1      ;increment the low byte of the three
+         jump    done_round  ;no carry into next byte
+         incfsz  rega+2
+         jump    done_round  ;no carry into next byte
+         ;
+         ;   The low two bytes of the mantissa value in REGA+2,REGA+1 have
+         ;   been incremented due to rounding, and a carry was generated
+         ;   when the upper of the two bytes was incremented.  This means
+         ;   that the REGA value must be shifted right one bit to re-normalize
+         ;   it after the roundoff.  However, note that the full rounded value
+         ;   before the shift is always REGA+3 = 2, and REGA+2,REGA+1 = 0.
+         ;   This means computing the REGA+3 value and then shifting REGA
+         ;   right one bit is a waste of time, since we know this will always
+         ;   result in REGA+2,REGA+1 set to 0 and REGA+3 set to 1.  Note
+         ;   that this is already how all three bytes are set right now.
+         ;   We therefore only need to update the EXP+32 value in REG8.
+         ;
+         incf    reg8        ;update EXP for REGA re-normalize after round
+done_round                   ;done rounding REGA
+;
+;   The final MANT bits are in REGA+2,REGA+1, and REG8 is the corresponding
+;   EXP value plus 32.
+;
+;   Now check that EXP+32 is within the valid range and convert REG8 to the
+;   final EXP value.  If out of range, the appropriate minimum or maximum
+;   magnitude value is returned.  The valid range of final EXP values is
+;   1 to 127.
+;
+         movlw   1 + 32      ;get minimum valid EXP+32 value
+         subwf   reg8, w     ;compare to actual EXP+32 value
+         jmp_wgt mag_min     ;below range, pass back minimum magnitude number ?
+
+         movf    reg8, w     ;get the EXP+32 value
+         sublw   127 + 32    ;compare it to the maximum valid value
+         jmp_wgt mag_max     ;above range, pass back maximum magnitude number ?
+
+         movlw   32          ;get offset to subtract from EXP+32 value
+         subwf   reg8        ;make final EXP value in REG8
+;
+;   The final EXP value is in REG8.
+;
+;   Now move the MANT bits to their final location in the low 16 bits of REGA.
+;
+         movf    rega+1, w   ;move MANT low byte
+         movwf   rega+0
+         movf    rega+2, w   ;move MANT high byte
+         movwf   rega+1
+;
+;   Move the EXP field into position.
+;
+         movf    reg8, w     ;get the EXP field value
+         movwf   rega+2      ;write it into the final FP number
+;
+;   The EXP and MANT fields are all set.  Now set the sign bit to make the
+;   final floating point number.  The sign bit is currently 0.
+;
+set_sign                     ;jump here if EXP and MANT all set
+         btfsc   flag_neg    ;indeed supposed to be positive ?
+         bsf     rega+2, 7   ;set sign to negative
+
+flt_leave                    ;common exit point
+         leaverest
+;
+;   Pass back the maximum magnitude number.
+;
+mag_max
+         loadk24 rega, h'7FFFFF'
+         jump    set_sign    ;set the sign and return the number
+;
+;   Pass back the minimum magnitude number.
+;
+mag_min
+         loadk24 rega, h'000000'
+         jump    flt_leave   ;final number all set
+    endif                    ;end of PIC 18 case
+;
+;*******************************************************************************
+;
+;   Check that code was emitted for this processor.
+;
+  if !didit
+         error   FP24FLT not implemented for this processor.
+    endif

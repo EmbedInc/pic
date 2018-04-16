@@ -1,0 +1,32 @@
+;   Subroutine SHIFTRA
+;
+;   Perform a arithmetic shift right of REGA.  REG4 is the number of bits
+;   to shift right.  REG4 may be negative in which case REGA will be shifted
+;   left -REG4 bits.  Nothing will be done if REG4 is zero.
+;
+.shiftra code
+         glbsub  shiftra, regf4
+
+         movf    reg4        ;set Z flag on zero shift count
+         skip_nz
+         goto    shiftra_leave ;nothing to do ?
+         btfsc   reg4, 7     ;shift count is positive ?
+         goto    shiftra_neg ;shift count is negative
+;
+;   Shifting to the right.
+;
+shiftra_posl                 ;back here each additional bit to shift
+         shift32ra1 reg0     ;shift accumulator arithmetic right by one bit
+         decfsz  reg4        ;count one less bit shift to go
+         goto    shiftra_posl ;back to shift another bit right
+         goto    shiftra_leave
+;
+;   Shifting to the left.
+;
+shiftra_neg
+         shift32l1 reg0      ;shift accumulator left by one bit
+         incfsz  reg4        ;count one less bit shift to go
+         goto    shiftra_neg ;back to shift another bit left
+
+shiftra_leave                ;common exit point
+         leaverest

@@ -1,0 +1,1768 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Universal Serial Bus (USB) handler.
+;
+;   The configuration of the endpoints and their buffer sizes is defined in the
+;   USB include file.
+;
+;   To keep the wording consistent with the USB spec, IN and OUT are from the
+;   point of view of the USB host controller.  Therefore we write data on an IN
+;   transfer and read it on an OUT transfer.
+;
+         extern  currtask    ;0-N number of the currently running task
+         extern_flags        ;declare global flag bits EXTERN
+
+  ifndef debug_clrusbbuf
+debug_clrusbbuf equ 0
+    endif
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+stacksz  equ     32          ;size of USB background task data stack
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+  ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+    endif
+;
+;   Set MAXENDP to the largest number endpoint in use.
+;
+maxendp  set     0           ;number of highest endpoint in use
+ii       set     0           ;init endpoint number
+  while ii <= 15             ;loop once for each possible endpoint
+    if out#v(ii)sz | in#v(ii)sz
+maxendp  set     ii
+      endif
+ii       set     ii + 1
+    endw
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register bank by
+;   other modules.
+;
+         defram  gbankadr
+
+usbtask  res     1           ;number of the USB processing task
+
+         global  usbtask
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+usbadr   res     1           ;temp save for new USB address
+usbstack res     stacksz     ;data stack for the USB background task
+
+/if debug then
+         global  usbadr
+  /endif
+
+;*******************************************************************************
+;
+;   USB buffer descriptors used by the hardware.
+;
+;   The following symbols are the offsets for the specific registers within each
+;   buffer descriptor used by the USB hardware:
+;
+bdstat   equ     0           ;status
+bdcnt    equ     1           ;byte count
+bdadr    equ     2           ;buffer start address, 16 bits, low byte first
+bdadrl   equ     2           ;buffer start address low byte
+bdadrh   equ     3           ;buffer start address high byte
+;
+;   Buffer descriptors.  These are all in the bank containing the address
+;   USB_BD0 and must be at specific offsets from USB_BD0 as a function of the
+;   endpoint number.
+;
+.usbbd   udata   usb_bd0     ;start of USB buffer descriptors
+;
+;   Allocate the actual buffer descriptors.  Two descriptors are allocated for
+;   each direction/endpoint from 0 to the maximum endpoint number in use.  The
+;   addresses of these buffer descriptors are defined by the hardware and can
+;   not be relocated.
+;
+usbbd_start res  0           ;relocatable symbol for start of buffer descriptors
+
+ii       set     0           ;init endpoint number
+  while ii <= maxendp        ;up to last endpoint in use
+ep#v(ii)out0 res 4           ;OUT direction buffer 0
+ep#v(ii)out1 res 4           ;OUT direction buffer 1
+ep#v(ii)in0 res  4           ;IN direction buffer 0
+ep#v(ii)in1 res  4           ;IN direction buffer 1
+ii       set     ii + 1      ;advance to next endpoint number
+    endw
+
+after_usbbd res  0           ;marker for first byte after buffer descriptors
+bdallsz  equ     after_usbbd - usbbd_start ;number of bytes in all buffer descriptors
+;
+;   Our private control state for each direction of each endpoint.  These are
+;   only used by the firmware and are not known to the USB hardware.  All this
+;   control state will be in the same bank as the USB hardware descriptors.
+;   USB_BD0 is a constant that is an address within this bank.
+;
+;   The ST field (current state byte) of each descriptor has the following
+;   format:
+;
+;         7       6       5       4       3       2       1       0
+;     -----------------------------------------------------------------
+;     |       |       |       |       |       |       |               |
+;     |  HOLD |  CTRL |  FULL |  FW2  |  FW1  |  NXO  |     FWBUF     |
+;     |       |       |       |       |       |       |               |
+;     -----------------------------------------------------------------
+;
+;     FWBUF  -  0-2 number of the buffer currently owned by the firmware.
+;       Buffers are always used circularly in the order 0, 1, 2, 0, etc.
+;
+;       For an OUT endpoint (meaning we receive data from the host) FWBUF is the
+;       oldest buffer.  The hardware is normally set up to read into the
+;       following two buffers automatically.  When the FWBUF buffer has been
+;       exhausted by the firmware and the hardware has read data into the
+;       following buffer, FWBUF is advanced by one.
+;
+;       For an IN endpoint (meaning we send data to the host) FWBUF is the
+;       newest buffer.  The hardware is normally set up to send the two previous
+;       buffers automatically.  When the oldest buffer has been sent by the
+;       hardware and there is at least one byte in the FWBUF buffer, FWBUF is
+;       advanced by one.
+;
+;     NXO  -  The buffer following FWBUF is an odd hardware buffer.  Hardware
+;       buffers alternate between even and odd, alternately using the even and
+;       odd hardware buffer descriptors.
+;
+;     FW2, FW1  -  FW1 is set if the next sequential buffer after FWBUF is
+;       available to the firmware, and FW2 is set if the next buffer after that
+;       is available to the firware.  For example, if FWBUF was 1, then FW1
+;       refers to buffer 2 and FW2 to buffer 0.  Being available to the firmware
+;       means the buffer is not owned by the hardware.
+;
+;     FULL  -  For an IN buffer, indicates that the current firmware buffer is
+;       full.  No more bytes can written to this buffer.  For an OUT buffer,
+;       indicates that all possible bytes have already been read from the
+;       firmware buffer and it is not possible to read an additional byte.
+;
+;     CTRL  -  For a IN endpoint, sending a empty packet is pending.  If there
+;       are any bytes in the buffer, these must be sent normally first.  Once
+;       the buffer is empty, the next transmission will be an empty packet.  No
+;       new data bytes can be accepted until the empty packet has been sent
+;       (CTRL cleared).  For this reason, FULL must always be set when CTRL is
+;       set so that no new bytes are accepted.
+;
+;       For a OUT endpoint, this indicates that the packet in the buffer was
+;       received with a SETUP token, not a OUT token.
+;
+;     HOLD  -  For IN endpoint, do not send a packet even if the hardware is
+;       ready to send a new buffer and if there is data available.  HOLD
+;       overrides the CTRL bit for IN endpoints.
+;
+;   The control state for a IN direction has an additional S2 status field:
+;
+;         7       6       5       4       3       2       1       0
+;     -----------------------------------------------------------------
+;     |       |       |       |       |       |       |       |       |
+;     |       |       |       |       |       | LFULL | SENDE |  ODD  |
+;     |       |       |       |       |       |       |       |       |
+;     -----------------------------------------------------------------
+;
+;     ODD  -  The data will be sent with the toggle bit set according to this
+;       bit.  When the bit is clear, DATA0 PID will be used, and DATA1 PID when
+;       set.  This bit is automatically toggled each transfer, but can be
+;       explicitly set to 0 or 1 with the USB_0DATn or USB_1DATn subroutines.
+;
+;     SENDE  -  This transfer type requires sending empty packets, before
+;       NACKing subsequent IN tokens, to indicate no data immediately available.
+;       This is the case for the bulk transfer type, for example.  See the LFULL
+;       bit description for more detail.
+;
+;       This bit is set when the state for this buffer is initialized.  It is
+;       not altered later.
+;
+;     LFULL  -  Indicates that the last sent buffer was completely full, and
+;       that this transfer type (SENDE set) may requires sending empty packets
+;       to indicate no more data is immediately available.  This bit is used to
+;       indicate a empty packet may need to be sent next.
+;
+;       USB uses empty packets to indicate to the host driver that there is no
+;       more data immediately available, so any data collected so far should be
+;       passed to the application without waiting for more data to fill some
+;       internal buffer or whatever.  NACKing a IN token only tells the low
+;       layer that there is no reply with data.
+;
+;       In a continuous data stream that might have gaps long enough so that
+;       there is no immediate data to respond to IN tokens with, the device must
+;       send a non-full packet to indicate a temporary break in the data.  If
+;       the break happens to occur right after a full packet was sent, then a
+;       empty packet must be sent next.  The LFULL bit is set whenever a full
+;       packet is sent, which then triggers sending whatever is available, which
+;       could be 0 bytes, next opportunity to send a packet for bulk endpoints.
+;
+;       The LFULL bit is only set if the SENDE bit is also set.
+;
+nxo_bit  equ     2           ;symbols for individual bits in the state byte
+fw1_bit  equ     3
+fw2_bit  equ     4
+full_bit equ     5
+ctrl_bit equ     6
+hold_bit equ     7
+odd_bit  equ     0
+sende_bit equ    1
+lfull_bit equ    2
+
+alloc_usbct_out macro ep     ;macro to allocate descriptor for OUT endpoint
+cto#v(ep) res    0           ;symbol for start of whole descriptor
+cto#v(ep)st res  1           ;current state
+cto#v(ep)bd res  1           ;byte offset of first buffer descriptor from USB_BD0
+cto#v(ep)ln res  2           ;allocated length of each buffer in bytes
+cto#v(ep)cn res  2           ;number of bytes left to read from firmware-owned buffer
+cto#v(ep)in res  2           ;index of next byte to read from buffer
+cto#v(ep)b0 res  2           ;start address of buffer 0
+cto#v(ep)b1 res  2           ;start address of buffer 1
+cto#v(ep)b2 res  2           ;start address of buffer 2
+         endm
+
+alloc_usbct_in macro ep      ;macro to allocate descriptor for IN endpoint
+cti#v(ep) res    0           ;symbol for start of whole descriptor
+cti#v(ep)st res  1           ;current state
+cti#v(ep)s2 res  1           ;additinal state flags
+cti#v(ep)bd res  1           ;byte offset of first buffer descriptor from USB_BD0
+cti#v(ep)ln res  2           ;allocated length of each buffer in bytes
+cti#v(ep)cn res  2           ;number of bytes in the firmware-owned buffer
+cti#v(ep)b0 res  2           ;start address of buffer 0
+cti#v(ep)b1 res  2           ;start address of buffer 1
+cti#v(ep)b2 res  2           ;start address of buffer 2
+         endm
+         ;
+         ;   Define the actual control state descriptors.
+         ;
+ii       set     0           ;init endpoint number
+  while ii <= 15             ;loop thru all possible endpoints
+    if out#v(ii)sz
+         alloc_usbct_out #v(ii)
+      endif
+    if in#v(ii)sz
+         alloc_usbct_in #v(ii)
+      endif
+ii       set     ii + 1      ;advance to next endpoint number
+    endw
+         ;
+         ;   Use the symbols defined for the endpoint 0 fields to define symbols
+         ;   for the offsets of the fields from the start of the descriptor.
+         ;
+ctost    equ     cto0st - cto0 ;defined here, but always guaranteed to be 0
+ctobd    equ     cto0bd - cto0
+ctoln    equ     cto0ln - cto0
+ctocn    equ     cto0cn - cto0
+ctoin    equ     cto0in - cto0
+ctob0    equ     cto0b0 - cto0
+ctob1    equ     cto0b1 - cto0
+ctob2    equ     cto0b2 - cto0
+
+ctist    equ     cti0st - cti0 ;defined here, but always guaranteed to be 0
+ctis2    equ     cti0s2 - cti0
+ctibd    equ     cti0bd - cti0
+ctiln    equ     cti0ln - cti0
+cticn    equ     cti0cn - cti0
+ctib0    equ     cti0b0 - cti0
+ctib1    equ     cti0b1 - cti0
+ctib2    equ     cti0b2 - cti0
+
+after_usbct res  0           ;marker for first byte after endpoint control state
+         ;
+         ;   Cause an assembly error if any of the assumptions about the private
+         ;   endpoint state used in subsequent code are not valid.
+         ;
+  if (after_usbct - usbbd_start) > 256
+         error   USB control state not in same bank as buffer descriptors.
+    endif
+  if ctost != 0
+         error   ST field of USB OUT endpoint control state not at offset 0.
+    endif
+  if ctist != 0
+         error   ST field of USB IN endpoint control state not at offset 0.
+    endif
+;
+;   Define the raw data buffers that will be referenced by the buffer
+;   descriptors above.  We use ping-pong buffers, meaning that two buffers per
+;   endpoint per direction are reserved for use by the hardware at any one time.
+;   Three buffers will be reserved so that one buffer is available for the
+;   software to transfer bytes to/from while the other two are owned by the
+;   hardware.
+;
+.usbbuf  udata               ;fill in any remaining space in USB memory
+
+bufsstart                    ;start address of all the USB data buffers
+
+ii       set     0           ;init endpoint number
+  while ii <= 15             ;loop thru all possible endpoints
+    if out#v(ii)sz
+buf#v(ii)out0 res out#v(ii)sz
+buf#v(ii)out1 res out#v(ii)sz
+buf#v(ii)out2 res out#v(ii)sz
+      endif
+    if in#v(ii)sz
+buf#v(ii)in0 res in#v(ii)sz
+buf#v(ii)in1 res in#v(ii)sz
+buf#v(ii)in2 res in#v(ii)sz
+      endif
+ii       set     ii + 1      ;advance to next endpoint number
+    endw
+
+bufslen  equ     $ - bufsstart ;length of all USB buffers together
+
+
+.usb     code
+
+;*******************************************************************************
+;
+;   Endpoint control descriptors pointers table.
+;
+;   Each table entry occupies 2 bytes of program memory and contains the address
+;   of one firmware direction/endpoint control descriptor.  The first entry is
+;   for endpoint 0 OUT, then endpoint 0 IN, then endpoint 1 OUT, endpoint 1 IN,
+;   etc.  If a direction/endpoint is not used, then the table entry contains
+;   FFFFh, which is an invalid address.
+;
+tablect                      ;start of control descriptors addresses table
+
+ii       set     0           ;init endpoint number
+  while ii <= 15             ;loop thru all possible endpoints
+    if out#v(ii)sz
+         data    cto#v(ii)
+      else
+         data    h'FFFF'
+      endif
+    if in#v(ii)sz
+         data    cti#v(ii)
+      else
+         data    h'FFFF'
+      endif
+ii       set     ii + 1      ;advance to next endpoint number
+    endw
+
+;*******************************************************************************
+;
+;   Subroutine USB_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  usb_init, noregs
+
+         dbankif gbankadr
+         setf    usbtask     ;indicate USB background task is not running
+
+         dbankif ucon
+         clrf    ucon        ;make sure USB hardware is disabled
+
+         dbankif ucfg
+         movlw   b'00010110'
+                 ; 0-------  disable eye pattern test
+                 ; -0------  do not drive OE to external pin
+                 ; --X-----  not used
+                 ; ---1----  enable on-chip pullup
+                 ; ----0---  enable on-chip transceiver
+                 ; -----1--  select full speed (12MHz) operation, not low speed
+                 ; ------10  pingpong buffers for all endpoints
+         movwf   ucfg        ;set static configuration
+
+         dbankif ueie
+         setf    ueie        ;enable all possible errors to set UIR,UERRIF
+
+         dbankif gbankadr
+         bcf     flag_usbon  ;init to the USB is not ready for app use
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine USB_START
+;
+;   Start up USB communication.  This must be the first USB routine called after
+;   USB_INIT or USB_OFF.
+;
+         glbsub  usb_start, regf0 | regf1 | regf2 | regf3
+
+         mcall   usb_reset   ;set USB hardware/software to the reset state
+         dbankif ucon
+         bsf     ucon, usben ;enable the USB hardware
+
+         task_create usb_task, usbstack ;start the USB background task
+         gcall   task_yield  ;let new task run once and save its task ID
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine USB_STOP
+;
+;   Stop USB communication and disable the USB hardware.
+;
+         glbsub  usb_off, noregs
+
+         movff   usbtask, reg0
+         gcall   task_end    ;stop the background processing task
+         dbankif gbankadr
+         btfss   flag_nameusb0 ;task had name get routines locked ?
+         jump    st_dtask    ;no
+         gcall   name_get_end ;release the name get routines
+st_dtask unbank              ;done ending the background task
+         dbankif gbankadr
+         setf    usbtask     ;indicate background task is not running
+
+         dbankif ucon
+         clrf    ucon        ;make sure USB hardware is disabled
+
+         dbankif gbankadr
+         bcf     flag_usbon  ;the USB is not available for app use
+/if [exist "usb_is_off"] then
+         usb_is_off
+  /endif
+         leaverest
+
+;*******************************************************************************
+;
+;   Local entry point USB_TASK
+;
+;   This routine handles all the USB background tasks transparent to the
+;   application.  It runs in a separate task.  This task is started when
+;   USB_START is called, and ended when USB_STOP is called.
+;
+usb_task unbank              ;task start point
+         movff   currtask, usbtask ;save our task ID to allow stopping later
+
+usbtask_loop unbank          ;start of main loop
+         gcall   task_yield  ;give other tasks a chance to run
+;
+;   Check for USB hardware event.
+;
+         mcall   usb_run     ;handle USB hardware event if one is pending
+         dbankif gbankadr
+         btfsc   flag_usbev  ;no event was handled ?
+         jump    usbtask_loop ;a event was handled
+
+         gcall   task_yield  ;give other tasks a chance to run
+;
+;   Run the USB endpoint 0 request processing task for a time slice.
+;
+         gcall   usb0_run
+         jump    usbtask_loop
+
+;*******************************************************************************
+;
+;   Macro POINT_BDO ofs
+;
+;   Point FSR1 to the OUT endpoint hardware buffer descriptor indicated by the
+;   NXO bit of the firmware buffer state pointed to by FSR0.  OFS is the offset
+;   of the particular byte in the buffer descriptor to point FSR1 to.
+;
+point_bdo macro  ofs
+         movlw   ctobd
+         movff   plusw0, fsr1l ;init low pointer byte for even buffer
+         movlw   ofs         ;get offset to set pointer to from start of BD
+         btfsc   indf0, nxo_bit ;really is even buffer ?
+         addlw   4           ;no, add offset to get to odd buffer
+         addwf   fsr1l       ;make low byte of pointer to selected buffer
+         movlw   high usb_bd0 ;set high byte of pointer
+         movwf   fsr1h
+         endm
+
+;*******************************************************************************
+;
+;   Macro POINT_BDI ofs
+;
+;   Point FSR1 to the IN endpoint hardware buffer descriptor indicated by the
+;   NXO bit of the firmware buffer state pointed to by FSR0.  OFS is the offset
+;   of the particular byte in the buffer descriptor to point FSR1 to.
+;
+point_bdi macro  ofs
+         movlw   ctibd
+         movff   plusw0, fsr1l ;init low pointer byte for even buffer
+         movlw   ofs         ;get offset to set pointer to from start of BD
+         btfsc   indf0, nxo_bit ;really is even buffer ?
+         addlw   4           ;no, add offset to get to odd buffer
+         addwf   fsr1l       ;make low byte of pointer to selected buffer
+         movlw   high usb_bd0 ;set high byte of pointer
+         movwf   fsr1h
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine USB_NEXTOUT
+;
+;   Advance the buffers of an OUT endpoint (we read from the host).  Nothing is
+;   done unless the current firmware-owned buffer is empty and the hardware is
+;   done with the next buffer.  FSR0 points to the internal control state for
+;   the endpoint.
+;
+;   FSR1 is trashed.
+;
+         locsub  usb_nextout, regf0
+
+         btfss   indf0, fw1_bit ;hardware is done with the next buffer ?
+         jump    nxo_leave   ;no, nothing to do
+         movlw   ctocn
+         movff   plusw0, reg0 ;get bytes left low byte
+         movlw   ctocn+1
+         movf    plusw0, w   ;get bytes left high byte
+         iorwf   reg0, w     ;make merged number of bytes left this buffer
+         skip_z              ;the current buffer is empty ?
+         jump    nxo_leave   ;no, nothing to do
+;
+;   The current firmware buffer is empty and the hardware is done with the next
+;   buffer.
+;
+         point_bdo 0         ;point FSR1 to the start of the buffer descriptor
+;
+;   Check for this packet was received with a SETUP token.  If so, set the CTRL
+;   bit in the firmware buffer state.  FSR1 is pointing to the start of the
+;   hardware buffer descriptor.
+;
+         bcf     indf0, ctrl_bit ;init to this is not a setup request
+         movf    indf1, w    ;get buffer descriptor status byte
+         andlw   b'00111100' ;mask in only the packet identifier
+         xorlw   b'00110100' ;compare to SETUP PID
+         skip_nz             ;this is not a setup packet ?
+         bsf     indf0, ctrl_bit ;flag this buffer as being a setup request
+;
+;   Grab the byte count from the hardware buffer descriptor before we start the
+;   hardware going on reading into the current buffer.
+;
+         bcf     indf0, full_bit ;init to at least one byte available from buffer
+         movf    postinc1, w ;get the hardware status byte
+         andlw   3           ;mask in only the high byte count bits
+         movwf   reg0        ;temp save count high byte
+         movlw   ctocn+1
+         movff   reg0, plusw0 ;set byte count high byte
+         movlw   ctocn
+         movff   indf1, plusw0 ;set byte count low byte
+         movf    postinc1, w ;get the byte count low byte
+         iorwf   reg0, w     ;merge with byte count high byte
+         skip_nz             ;there is at least one byte in the buffer ?
+         bsf     indf0, full_bit ;no, indicate all bytes have been read
+;
+;   Set up the hardware to read into the buffer being vacated by the firmware.
+;   FSR1 is currently pointing to the buffer start address low byte in the
+;   hardware buffer descriptor.
+;
+         ;   Set the buffer start address.
+         ;
+         movf    postinc1, w ;point FSR1 to the buffer address high byte
+         rlcf    indf0, w    ;get 2x buffer number
+         andlw   b'110'
+         addlw   ctob0+1     ;make offset of this buffer address in FW buffer state
+         movff   plusw0, postdec1 ;transfer buffer address high byte
+         addlw   low -1      ;make offset of low byte
+         movff   plusw0, postdec1 ;transfer buffer address low byte
+         ;
+         ;   Set the buffer length in the hardware buffer descriptor.  This is
+         ;   the maximum number of bytes the hardware is allowed to write into
+         ;   the buffer.  FSR1 is currently pointing to the low count byte.
+         ;
+         movlw   ctoln       ;get offset of buffer size low byte
+         movff   plusw0, postdec1 ;transfer the buffer size low byte
+         ;
+         ;   Set the hardware buffer descriptor (BD) status byte.  FSR1 is
+         ;   pointing to this byte.
+         ;
+         movlw   ctoln+1     ;get offset of buffer size high byte
+         movf    plusw0, w   ;get the high two size bits into W
+ii       set     b'00000000' ;control bits part of BD status byte
+                 ; 0-------  firmware owns the buffer descriptor, for now
+                 ; -X------  1/0 data packet toggle bit (not used)
+                 ; --0-----  HW will release BD when transfer completed
+                 ; ---0----  increment address for each byte transferred
+                 ; ----0---  ignore 1/0 packet toggle bit
+                 ; -----0--  buffer is not stalled
+                 ; ------NN  high two bits of buffer size, already in W
+  if ii != 0
+         iorlw   ii          ;merge in control bits with high buffer count bits
+    endif
+         movwf   indf1       ;set the buffer descriptor status byte
+         bsf     indf1, uown ;transfer buffer ownership to the hardware
+;
+;   Update the firmware control state to make the next buffer current.
+;
+         ;
+         ;   Advance to the next 0,1,2 buffer number in circular fashion.
+         ;
+         movlw   b'01'       ;init XOR mask for incrementing FWBUF field 0 --> 1
+         btfsc   indf0, 0
+         movlw   b'11'       ;XOR mask for 1 --> 2
+         btfsc   indf0, 1
+         movlw   b'10'       ;XOR mask for 2 --> 0
+         xorwf   indf0       ;advance the FWBUF field to the next value
+         ;
+         ;   Update the FW1, FW2, and NXO bits.
+         ;
+         bcf     indf0, fw1_bit ;copy FW1 bit from old FW2 bit
+         btfsc   indf0, fw2_bit
+         bsf     indf0, fw1_bit
+         bcf     indf0, fw2_bit ;HW owns the next next buffer
+         btg     indf0, nxo_bit ;toggle even/odd HW buffer descriptor for next buffer
+         ;
+         ;   Init the buffer index to 0.
+         ;
+         movlw   ctoin
+         clrf    plusw0      ;init the index of the next byte to read to 0
+         addlw   1
+         clrf    plusw0
+
+nxo_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro INIT_STOUT n
+;
+;   Init the private state for endpoint N OUT (we receive from the host).
+;
+init_stout macro n
+         local   jj
+
+         dbankif usb_bd0
+
+jj       set     0           ;current 0-2 firmware buffer number
+jj       set     jj | (0 << nxo_bit) ;next buffer even, not odd, to the HW
+jj       set     jj | (1 << fw1_bit) ;hardware is done with next buffer
+jj       set     jj | (1 << fw2_bit) ;hardware is done with next next buffer
+jj       set     jj | (1 << full_bit) ;no byte left to read from this buffer
+         movlw   jj
+         movwf   cto#v(n)st  ;set status byte
+
+         movlw   (n) * 16
+         movwf   cto#v(n)bd  ;byte offset of first buffer descriptor
+
+         loadk16 cto#v(n)ln, out#v(n)sz ;set size of each buffer in bytes
+
+         loadk16 cto#v(n)cn, 0 ;init firmware owned buffer to empty
+
+         movlw   low buf#v(n)out0 ;set address of buffer 0
+         movwf   cto#v(n)b0+0
+         movlw   high buf#v(n)out0
+         movwf   cto#v(n)b0+1
+
+         movlw   low buf#v(n)out1 ;set address of buffer 1
+         movwf   cto#v(n)b1+0
+         movlw   high buf#v(n)out1
+         movwf   cto#v(n)b1+1
+
+         movlw   low buf#v(n)out2 ;set address of buffer 2
+         movwf   cto#v(n)b2+0
+         movlw   high buf#v(n)out2
+         movwf   cto#v(n)b2+1
+         endm
+
+;*******************************************************************************
+;
+;   Macro INIT_STIN n
+;
+;   Init the private state for endpoint N IN (we send to the host).
+;
+init_stin macro  n
+         local   jj
+
+         dbankif usb_bd0
+
+jj       set     0           ;current 0-2 firmware buffer number
+jj       set     jj | (0 << nxo_bit) ;next buffer even, not odd, to the HW
+jj       set     jj | (1 << fw1_bit) ;hardware is done with next buffer
+jj       set     jj | (1 << fw2_bit) ;hardware is done with next next buffer
+jj       set     jj | (0 << full_bit) ;there is room to write a byte into buffer
+         loadk8  cti#v(n)st, jj ;set status byte
+
+jj       set     0           ;init to all ST byte bits should be 0
+  if (in#v(n)type == iotype_bulk)
+jj       set     jj | (1 << sende_bit) ;may need to send empty packets
+    endif
+         loadk8  cti#v(n)s2, jj ;init second status byte
+
+         movlw   ((n) * 16) + 8
+         movwf   cti#v(n)bd  ;byte offset of first buffer descriptor
+
+         loadk16 cti#v(n)ln, in#v(n)sz ;set size of each buffer in bytes
+
+         loadk16 cti#v(n)cn, 0 ;init firmware owned buffer to empty
+
+         movlw   low buf#v(n)in0 ;set address of buffer 0
+         movwf   cti#v(n)b0+0
+         movlw   high buf#v(n)in0
+         movwf   cti#v(n)b0+1
+
+         movlw   low buf#v(n)in1 ;set address of buffer 1
+         movwf   cti#v(n)b1+0
+         movlw   high buf#v(n)in1
+         movwf   cti#v(n)b1+1
+
+         movlw   low buf#v(n)in2 ;set address of buffer 2
+         movwf   cti#v(n)b2+0
+         movlw   high buf#v(n)in2
+         movwf   cti#v(n)b2+1
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine USB_RESET
+;
+;   Set the USB hardware and firmware to the RESET state.  Only the default
+;   control pipe on endpoint 0 is enabled.
+;
+         glbsub  usb_reset, regf0 | regf1
+
+/if [exist "usb_is_off"] then
+         usb_is_off
+  /endif
+         dbankif gbankadr
+         bcf     flag_usbon  ;the USB is not available for app use
+         bsf     flag_usbreset ;tell app the USB has been reset
+;
+;   Init all endpoints to disabled.
+;
+/loop
+  /var local ii integer = 0
+  ifdef uep[v ii]
+         dbankif uep[v ii]
+         clrf    uep[v ii]
+    endif
+  /if [>= ii 15] then
+    /quit
+    /endif
+  /set ii [+ ii 1]
+  /endloop
+;
+;   Init all buffer descriptors to be owned by the CPU.  This means the USB
+;   hardware will not attempt to alter the descriptors nor access the data
+;   buffers.  This requires setting the UOWN bit of the STAT register in each
+;   buffer descriptor to 0.  We will initialize all buffer descriptor bytes to
+;   zero.  This also sets the number of bytes field to zero.
+;
+         lfsr    0, usb_bd0  ;init pointer to first byte
+         movlw   bdallsz     ;init number of bytes left to clear
+         movwf   reg0
+loop_bdinit                  ;back here to clear each new BD byte
+         clrf    postinc0    ;clear this BD byte
+         decfsz  reg0        ;count one less byte left to go
+         jump    loop_bdinit ;back to do the next byte
+;
+;   Init the buffer state for each endpoint.
+;
+ii       set     0           ;init endpoint number
+  while ii <= 15             ;loop once for each possible endpoint
+    if out#v(ii)sz
+         init_stout #v(ii)
+      endif
+    if in#v(ii)sz
+         init_stin #v(ii)
+      endif
+ii       set     ii + 1      ;advance to next endpoint number
+    endw                     ;back to set up next nedpoint
+;
+;   Init all the data buffers to zeros if the DEBUG_CLRUSBBUF build switch is
+;   enabled.  This is not necessary for normal operation, but can be useful in
+;   debugging to see what has been overwritten.
+;
+  if debug_clrusbbuf
+         lfsr    0, bufsstart ;init pointer to first byte
+         loadk16 reg0, bufslen - 1 ;init loop counter
+loop_binit                   ;back here to clear each new buffer byte
+         clrf    postinc0    ;clear this buffer byte
+         decf    reg0        ;decrement byte counter low byte
+         skip_nborr
+         decf    reg1        ;propagate borrow to high byte
+         skip_borr           ;done with all bytes ?
+         jump    loop_binit  ;no, go back and do next byte
+    endif
+;
+;   Start the reads on the OUT 0 buffers.  This only sets up the firmware
+;   endpoint state and the hardware buffer descriptors.  All endpoints are still
+;   disabled at this point.
+;
+         lfsr    0, cto0
+         mcall   usb_nextout
+         mcall   usb_nextout
+;
+;   Init the high level USB peripheral state and make sure the peripheral is
+;   enabled.
+;
+         dbankif uaddr
+         clrf    uaddr       ;init to our USB address not assigned yet
+
+         dbankif uir
+         clrf    uir         ;clear the hardware USB event flags
+         dbankif uie
+         clrf    uie         ;disable all USB interrupts
+
+         dbankif ucon
+         bsf     ucon, ppbrst ;reset all pingpong buffers to buffer 0
+         movlw   b'11101001'
+                 ; X------X  unused
+                 ; -X------  reset all pingpong buffers to buffer 0
+                 ; --X-----  read-only status bit
+                 ; ---0----  enable packet processing
+                 ; ----X---  enable the USB peripheral
+                 ; -----0--  do not signal a RESUME
+                 ; ------0-  do not enter suspend mode
+         andwf   ucon        ;clear the selected 0 control bits
+         bsf     ucon, usben ;make sure the USB peripheral is enabled
+         bcf     ucon, ppbrst ;stop resetting pingpong buffers to buffer 0
+;
+;   Make sure the USTAT FIFO is empty.
+;
+         dbankif uir
+custat_loop                  ;back here after read each USTAT entry
+         btfss   uir, trnif  ;at least one event in USTAT FIFO ?
+         jump    custat_done ;no, done clearing the FIFO
+         bcf     uir, trnif  ;clear one FIFO entry
+         jump    custat_loop ;back to check if need to clear more
+custat_done                  ;done clearing the USTAT FIFO
+;
+;   Enable endpoint 0.  Any remaining endpoints we will use in normal operation
+;   will be enabled by USB_CONFIG when the host sets the configuration.
+;
+         dbankif uep0
+         movlw   b'00010110'
+                 ; XXX-----  unused
+                 ; ---1----  enable endpoint handshaking (not isochronous)
+                 ; ----0---  enable control transfers
+                 ; -----1--  enable OUT direction
+                 ; ------1-  enable IN direction
+                 ; -------0  not stalled
+         movwf   uep0        ;enable endpoint 0
+
+         dbankif gbankadr
+         bsf     flag_usb0reset ;cause control request processing logic to reset
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine USB_CONFIG
+;
+;   Set up the final USB configuration.  After a reset only endpoint 0 is
+;   active.  Other endpoints are not enabled until the host explicitly enables
+;   our configuration.  This routine is called from the endpoint 0 control
+;   request processing logic.
+;
+         glbsub  usb_config, noregs
+;
+;   Init the buffer state for each endpoint 1-N according to our configuration.
+;   Endpoint 0 was previously configured when the bus reset was processed.  All
+;   other endpoint control registers have been set to zero.  We only write to
+;   the endpoints 1-15 that we use.
+;
+ii       set     1           ;init endpoint number
+  while ii <= 15             ;loop once for each possible endpoint
+    if out#v(ii)sz
+         init_stout #v(ii)
+      endif
+    if in#v(ii)sz
+         init_stin #v(ii)
+      endif
+ii       set     ii + 1      ;advance to next endpoint number
+    endw                     ;back to set up next nedpoint
+;
+;   Start the reads on the 1-N OUT buffers.  The endpoints are still disabled.
+;
+ii       set     1           ;init endpoint number
+  while ii <= 15             ;loop once for each possible endpoint
+    if out#v(ii)sz
+         lfsr    0, cto#v(ii)
+         mcall   usb_nextout
+         mcall   usb_nextout
+      endif
+ii       set     ii + 1      ;advance to next endpoint number
+    endw                     ;back to set up next endpoint
+;
+;   Enable all the endpoints we will use.  All endpoints are currently disabled,
+;   so only the endpoint control registers for the endpoints we will use will
+;   be written to here.
+;
+/loop
+  /var local ii integer = 0
+  ifdef uep[v ii]
+jj       set     0           ;init desired value to how bits are set now
+    if out[v ii]sz | in[v ii]sz ;at least one direction used for this endpoint ?
+      if out[v ii]type != iotype_isch ;not an isochronous endpoint ?
+jj       set     jj | b'00010000'
+                 ;      ---1---- enable handshaking (not isochronous)
+        endif
+      if out[v ii]type != iotype_ctrl ;not a control endpoint ?
+jj       set     jj | b'00001000'
+                 ;      ----1--- disable control transfers
+        endif
+      endif
+    if out[v ii]sz           ;OUT direction of this endpoint used ?
+jj       set     jj | b'00000100'
+                 ;      -----1-- enable OUT direction
+      endif
+    if in[v ii]sz            ;IN direction of this endpoint used ?
+jj       set     jj | b'00000010'
+                 ;      ------1- enable IN direction
+      endif
+    if jj
+         dbankif uep[v ii]
+         movlw   jj
+         movwf   uep[v ii]   ;configure this endpoint
+      endif
+    endif
+  /if [>= ii 15] then
+    /quit
+    /endif
+  /set ii [+ ii 1]
+  /endloop
+
+         dbankif gbankadr
+         bsf     flag_usbon  ;the USB is now ready for app use
+/if [exist "usb_is_on"] then
+         usb_is_on
+  /endif
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine USB_NEXTIN
+;
+;   Advance the buffers of an IN endpoint (we send to the host).  Nothing is
+;   done if there is nothing to send or the hardware is not done with the next
+;   buffer.  FSR0 points to the internal control state for the endpoint.
+;
+;   FSR1 is trashed.
+;
+         locsub  usb_nextin, regf0
+
+         btfss   indf0, fw1_bit ;hardware is done with the next buffer ?
+         jump    nxi_leave   ;no, nothing to do
+
+         btfsc   indf0, hold_bit ;buffer is not on deliberate hold ?
+         jump    nxi_leave   ;on hold, nothing more to do
+
+         movlw   cticn
+         movff   plusw0, reg0 ;get bytes in buffer low byte
+         movlw   cticn+1
+         movf    plusw0, w   ;get bytes in buffer high byte
+         iorwf   reg0        ;make merged number of bytes left this buffer
+         skip_z              ;the buffer is empty ?
+         jump    nxi_send    ;no, go send the data
+         ;
+         ;   There is no immediately available data to send.  If a packet is
+         ;   sent, it will be empty.
+         ;
+         movlw   ctis2       ;point to second status flags byte
+         btfsc   plusw0, lfull_bit
+         jump    nxi_send_empty ;send empty packet to indicate no immediate data
+
+         btfss   indf0, ctrl_bit ;send deliberate empty packet due to app request ?
+         jump    nxi_leave   ;no, nothing to do
+;
+;   Send the current buffer.
+;
+nxi_send_empty unbank        ;sending empty packet
+         bcf     indf0, ctrl_bit ;reset pending send empty packet flag
+
+nxi_send unbank
+         point_bdi 3         ;point FSR1 to last byte of HW buffer descriptor
+         ;
+         ;   Set the buffer start address.  FSR1 is currently pointing to
+         ;   where the high byte of the buffer address goes.
+         ;
+         rlcf    indf0, w    ;get 2x buffer number
+         andlw   b'110'
+         addlw   ctib0+1     ;make offset of this buffer address in FW buffer state
+         movff   plusw0, postdec1 ;transfer buffer address high byte
+         addlw   low -1      ;make offset of low byte
+         movff   plusw0, postdec1 ;transfer buffer address low byte
+         ;
+         ;   Set the buffer length in the hardware buffer descriptor.  This
+         ;   is the number of bytes to send.
+         ;
+         movlw   cticn       ;get offset of buffer count low byte
+         movff   plusw0, postdec1 ;transfer the buffer size low byte
+         ;
+         ;   Set the hardware buffer descriptor (BD) status byte.  FSR1 is
+         ;   pointing to this byte.
+         ;
+         movlw   cticn+1     ;get offset of buffer count high byte
+         movf    plusw0, w   ;get the high two count bits into W
+ii       set     b'00001000' ;control bits part of BD status byte
+                 ; 0-------  firmware owns the buffer descriptor, for now
+                 ; -0------  init 1/0 data packet toggle bit to 0
+                 ; --0-----  HW will release BD when transfer completed
+                 ; ---0----  increment address for each byte transferred
+                 ; ----1---  enable 1/0 packet toggle bit
+                 ; -----0--  buffer is not stalled
+                 ; ------NN  high two bits of buffer size, already in W
+  if ii
+         iorlw   ii          ;merge in control bits with high buffer count bits
+    endif
+         movwf   indf1       ;init the buffer descriptor status byte
+         movlw   ctis2
+         btfsc   plusw0, odd_bit ;this really is a DATA0 packet ?
+         bsf     indf1, 6    ;no, set toggle bit (DTS) for DATA1 packet
+         btg     plusw0, odd_bit ;update toggle bit for next time
+         bsf     indf1, uown ;transfer buffer ownership to the hardware
+;
+;   Update the firmware control state to make the next buffer current.
+;
+         ;
+         ;   Set the LFULL bit according to whether this is a full buffer.
+         ;   Since this only applies to tranfer types with maximum allowed
+         ;   buffer sizes of less than 256 bytes, only the low byte of the
+         ;   buffer length (CTILN) and the byte count (CTICN) are examined.
+         ;
+         movlw   ctis2       ;point to second status byte
+         btfss   plusw0, sende_bit ;type transfer type requires empty packets ?
+         jump    nxi_dlfull  ;no, LFULL bit is left 0 as initialized
+         bcf     plusw0, lfull_bit ;init to last buffer was not full
+
+         movlw   ctiln+0     ;get buffer size
+         movff   plusw0, reg0
+         movlw   cticn+0     ;get byte count
+         movf    plusw0, w
+         xorwf   reg0        ;compare the two
+         bnz     nxi_dlfull  ;buffer wasn't full ?
+
+         movlw   ctis2
+         bsf     plusw0, lfull_bit ;indicate just sent a full buffer
+nxi_dlfull                   ;LFULL is now set appropriately
+         ;
+         ;   Advance to the next 0,1,2 buffer number in circular fashion.
+         ;
+         movlw   b'01'       ;init XOR mask for incrementing FWBUF field 0 --> 1
+         btfsc   indf0, 0
+         movlw   b'11'       ;XOR mask for 1 --> 2
+         btfsc   indf0, 1
+         movlw   b'10'       ;XOR mask for 2 --> 0
+         xorwf   indf0       ;advance the FWBUF field to the next value
+         ;
+         ;   Update the control bits.
+         ;
+         bcf     indf0, fw1_bit ;copy FW1 bit from old FW2 bit
+         btfsc   indf0, fw2_bit
+         bsf     indf0, fw1_bit
+
+         bcf     indf0, fw2_bit ;HW owns the next next buffer
+         btg     indf0, nxo_bit ;toggle even/odd HW buffer descriptor for next buffer
+
+         bcf     indf0, full_bit ;init to allowed to write bytes into the buffer
+         btfsc   indf0, ctrl_bit ;no pending empty buffer to send ?
+         bsf     indf0, full_bit ;don't write bytes until empty buffer sent
+
+         movlw   cticn       ;reset the new firmware buffer to empty
+         clrf    plusw0
+         addlw   1
+         clrf    plusw0
+
+nxi_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Internal subroutine USB_GET
+;
+;   Read one byte from an OUT endpoint.  FSR0 must be pointing to the firmware
+;   control state for the OUT part of the endpoint, and is preserved.  This
+;   routine always returns without stalling or otherwise waiting on an external
+;   condition.  The data byte, if any, is returned in REG0.  The returned value
+;   of REG0 is undefined if no byte is returned.
+;
+;   Control and status bits are transferred in REG1.  The following control bits
+;   are acted upon:
+;
+;     USBC_NOXF  -  No byte will be returned even if one is available.  This can
+;       be useful to just inquire status.
+;
+;   The following status bits are returned as appropriate:
+;
+;     USBS_NOXF  -  No byte was returned.  This is always set if USBC_NOXF is
+;       set, but will also occur if there is no byte available to return.
+;
+;     USBS_NRDY  -  A new byte is not available.  At least one byte can be read
+;       immediately when this bit is 0.  This bit applies to the current byte,
+;       so is always 0 if a byte was returned this call.
+;
+;     USBS_SETU  -  At the start of a packet received with a SETUP as apposed to
+;       OUT token.  If a byte is returned, it is the first byte of the new SETUP
+;       packet.  If no byte is returned, then the next byte will be the first in
+;       the setup packet.
+;
+;   FSR1 is trashed.
+;
+         locsub  usb_get, noregs
+
+         movlw   h'F0'       ;clear all returned status bits
+         andwf   reg1
+         movlw   (1 << usbs_noxf) | (1 << usbs_nrdy) ;init returned status bits
+         iorwf   reg1
+
+         btfss   indf0, ctrl_bit ;this buffer received with SETUP token ?
+         jump    uget_noset  ;no
+         movlw   ctoin+0
+         movf    plusw0      ;set Z on low byte of index to read this byte from
+         skip_z              ;low byte is zero ?
+         jump    uget_noset  ;no, not at start of buffer
+         movf    ctoin+1
+         movf    plusw0      ;set Z on high byte of index
+         skip_nz             ;not at start of buffer ?
+         bsf     reg1, usbs_setu ;indicate at first byte of SETUP packet
+uget_noset unbank            ;done setting SETU status bit as appropriate
+
+         btfsc   indf0, full_bit ;a byte is available ?
+         jump    uget_leave  ;no, nothing more to do
+         bcf     reg1, usbs_nrdy ;indicate a byte is available
+         btfsc   reg1, usbc_noxf ;return a byte if one is available ?
+         jump    uget_leave  ;no, skip returning the byte
+         bcf     reg1, usbs_noxf ;indicate returning with a byte
+;
+;   Return the next data byte from the buffer into REG0.  The status bits in
+;   REG1 are all set.
+;
+         ;
+         ;   Point FSR1 to the start of the data buffer.
+         ;
+         rlcf    indf0, w    ;get 0-2 buffer number x2
+         andlw   b'110'
+         addlw   ctob0       ;make offset for start address of the data buffer
+         movff   plusw0, fsr1l ;set pointer low byte
+         addlw   1
+         movff   plusw0, fsr1h ;set pointer high byte
+         ;
+         ;   Add the buffer index into FSR1 to point it to the data byte.
+         ;
+         movlw   ctoin
+         movf    plusw0, w   ;get byte index low byte
+         addwf   fsr1l       ;add to buffer start low byte
+         movlw   ctoin+1
+         movf    plusw0, w   ;get byte index high byte
+         addwfc  fsr1h       ;add to buffer start high byte
+         ;
+         ;   Increment the buffer index for next time.
+         ;
+         movlw   ctoin
+         incf    plusw0      ;increment the buffer index low byte
+         movlw   ctoin+1
+         skip_ncarr          ;no carry to high byte ?
+         incf    plusw0      ;propagate the carry
+         ;
+         ;   Decrement the number of bytes left in the buffer and set the buffer
+         ;   FULL flag if the buffer is now exhausted.
+         ;
+         movlw   ctocn
+         decf    plusw0      ;decrement the byte count low byte
+         movff   plusw0, reg0 ;temp save new low byte in REG0
+         movlw   ctocn+1
+         skip_nborr          ;no borrow from high byte ?
+         decf    plusw0      ;propagate the borrow
+         movf    plusw0, w   ;get the new high byte
+         iorwf   reg0        ;merge the new high and low count bytes
+         movff   indf1, reg0 ;fetch the data byte and return it in REG0
+         skip_z              ;just emptied the last byte from this buffer
+         jump    uget_leave  ;no
+;
+;   The last byte was just emptied from the buffer.
+;
+         bsf     indf0, full_bit ;indicate no more bytes available from this buffer
+         mcall   usb_nextout ;advance to the next buffer if one is ready
+
+uget_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Internal subroutine USB_PUT
+;
+;   Write the byte in REG0 to an IN endpoint.  FSR0 must be pointing to the
+;   firmware control state for the IN part of the endpoint, and is preserved.
+;   This routine always returns without stalling or otherwise waiting on an
+;   external condition.
+;
+;   Control and status bits are transferred in REG1.  The following control bits
+;   are acted upon:
+;
+;     USBC_NOXF  -  Do not transfer a byte even if it were otherwise possible.
+;       This can be useful to just inquire status.  The REG0 value is irrelevent
+;       when this bit is set.
+;
+;     USBC_NFLU  -  Do not try to flush the buffer after the byte is written to
+;       it unless the buffer is full.  Normally the buffer is flushed (given to
+;       hardware to transmit, software advanced to filling the next buffer)
+;       after a byte is written and the hardware is available for sending a new
+;       buffer.
+;
+;   The following status bits are returned as appropriate:
+;
+;     USBS_NOXF  -  No byte was written.  This is always set if USBC_NOXF is
+;       set, but will also occur if there is no room in the output buffer.
+;
+;     USBS_NRDY  -  Not ready to accept a new byte.  At least one byte can be
+;       written immediately when this bit is 0.  This bit applies to the current
+;       byte, so is always 0 if a byte was written this call.
+;
+;   FSR1 is trashed.
+;
+         locsub  usb_put, regf2 | regf3
+
+         movlw   h'F0'       ;clear all returned status bits
+         andwf   reg1
+         movlw   (1 << usbs_noxf) | (1 << usbs_nrdy) ;init returned status bits
+         iorwf   reg1
+
+         btfsc   indf0, full_bit ;buffer has room for another byte ?
+         jump    uput_leave  ;no, nothing more to do
+         bcf     reg1, usbs_nrdy ;indicate a byte can be written
+
+         btfsc   reg1, usbc_nflu ;OK to send buffer contents ?
+         bsf     indf0, hold_bit ;init to don't send buffer after writing byte
+
+         btfsc   reg1, usbc_noxf ;allowed to transfer a byte ?
+         jump    uput_leave  ;no, nothing more to do
+         bcf     reg1, usbs_noxf ;indicate the byte was transferred
+;
+;   Write the data byte in REG0 as the next byte into the current firmware-owned
+;   buffer.
+;
+         btfss   reg1, usbc_nflu ;release buffer hold if this byte sent without hold
+         bcf     indf0, hold_bit
+         ;
+         ;   Point FSR1 to the start of the data buffer.
+         ;
+         rlcf    indf0, w    ;get 0-2 buffer number x2
+         andlw   b'110'
+         addlw   ctib0       ;make offset for start address of the data buffer
+         movff   plusw0, fsr1l ;set pointer low byte
+         addlw   1
+         movff   plusw0, fsr1h ;set pointer high byte
+         ;
+         ;   Add the offset to the next data byte to FSR1.
+         ;
+         movlw   cticn
+         movf    plusw0, w   ;get byte index low byte
+         addwf   fsr1l       ;add to buffer start low byte
+         movlw   cticn+1
+         movf    plusw0, w   ;get byte index high byte
+         addwfc  fsr1h       ;add to buffer start high byte
+         ;
+         ;   Write the byte in REG0 into the buffer.
+         ;
+         movff   reg0, indf1 ;write the byte into the buffer
+;
+;   Update the number of bytes in the buffer and check for buffer full.
+;
+         movlw   cticn+0
+         incf    plusw0      ;increment the buffer count low byte
+         movff   plusw0, reg2 ;save the new count low byte
+         movlw   cticn+1
+         skip_ncarr          ;no carry into high byte ?
+         incf    plusw0      ;propagate the carry
+         movff   plusw0, reg3 ;save the new count high byte
+         movlw   ctiln+0
+         movf    plusw0, w   ;get buffer size low byte
+         xorwf   reg2, w     ;compare to new buffer count low byte
+         skip_z              ;low bytes equal ?
+         jump    uput_nfull  ;the buffer did not just fill up
+         movlw   ctiln+1
+         movf    plusw0, w   ;get buffer size high byte
+         xorwf   reg3, w     ;compare to new buffer count high byte
+         skip_z              ;the buffer is now full ?
+         jump    uput_nfull
+         ;
+         ;   The buffer is now full.
+         ;
+         bsf     indf0, full_bit ;indicate this buffer is now full
+         bcf     indf0, hold_bit ;never hold a full buffer
+
+uput_nfull unbank            ;skip to here if buffer not just filled
+         mcall   usb_nextin  ;advance to the next buffer if appropriate
+
+uput_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Internal subroutine USB_PUTMT
+;
+;   Cause an empty packet to be sent.  FSR0 must be pointing to the firmware
+;   control state for the IN part of the endpoint, and is preserved.  This
+;   routine always returns without stalling or otherwise waiting on an external
+;   condition.
+;
+;   Control and status bits are transferred in REG1.  The following control bits
+;   are acted upon:
+;
+;     USBC_NOXF  -  Do not set up an empty packet to be sent or flush the buffer
+;       in case it is on hold.  This can be useful to just enquire status.
+;
+;     USBC_UNCD  -  Send an empty packet unconditionally regardless of how full
+;       the buffer is.  By default, an empty packet is only sent if the buffer
+;       is completely empty or completely full.  The default behavior is
+;       required when replying with data to the host as the result of a SETUP
+;       request.  Since the reply data is variable length, an empty packet is
+;       sent if the length is an exact multiple of the buffer size.  The host
+;       already knows the data has ended if a partial buffer is sent, so there
+;       is no need to send an empty packet afterwards.
+;
+;   The following status bits are returned as appropriate:
+;
+;     USBS_NOXF  -  No empty packet was written regardless of the reason.
+;
+;     USBS_NRDY  -  Not ready to accept an empty packet request currently.  When
+;       this bit is returned 0, an immediate call to USB_PUTMT is guaranteed to
+;       be able to accept an empty packet request.  This bit applies to the
+;       current request, so is always 0 when an empty packet request has been
+;       accepted or could have been accepted.  This bit is set regardless of
+;       USBC_UNCD.
+;
+;   Unless the USBC_NOXF flag is set, this call always allows the current data
+;   in the buffer to be sent.  In other words, any buffer hold is cancelled.
+;
+;   FSR1 is trashed.
+;
+         locsub  usb_putmt, noregs
+
+         movlw   h'F0'       ;clear all returned status bits
+         andwf   reg1
+         movlw   (1 << usbs_noxf) | (1 << usbs_nrdy) ;init returned status bits
+         iorwf   reg1
+
+         btfsc   indf0, ctrl_bit ;no empty packet already pending ?
+         jump    upmt_leave  ;previous empty packet is still pending
+         bcf     reg1, usbs_nrdy ;indicate ready to accept empty packet
+
+         btfsc   reg1, usbc_noxf ;allowed to send the empty packet ?
+         jump    upmt_leave  ;no
+         bcf     indf0, hold_bit ;release hold on this buffer, if any
+
+         btfsc   reg1, usbc_uncd ;send empty packet only on buffer full/empty ?
+         jump    upmt_sendmt ;no, send empty packet unconditionally
+
+         btfsc   indf0, full_bit ;buffer is not completely full ?
+         jump    upmt_sendmt ;buffer is full, send empty packet
+
+         movlw   cticn+0
+         movf    plusw0      ;set Z on low buffer byte index
+         skip_z
+         jump    upmt_send   ;buffer is not empty, send with no empty packet
+         movlw   cticn+1
+         movf    plusw0      ;set Z on high buffer byte index
+         skip_z
+         jump    upmt_send   ;buffer is not empty, send with no empty packet
+;
+;   Queue the empty packet to be sent.
+;
+upmt_sendmt unbank
+         bcf     reg1, usbs_noxf ;indicate empty packet request was accepted
+         bsf     indf0, ctrl_bit ;indicate pending empty packet to send
+         bsf     indf0, full_bit ;no more bytes allowed to be added to buffer
+
+upmt_send unbank             ;possibly send packet, some condition changed
+         mcall   usb_nextin  ;advance to the next buffer if hardware is ready
+
+upmt_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Internal subroutine USB_FLUSH
+;
+;   Causes the current buffer to be sent if it contains any data.  FSR0 must be
+;   pointing to the firmware control state for the IN part of the endpoint, and
+;   is preserved.  This routine always returns without stalling or otherwise
+;   waiting on an external condition.
+;
+;   Control and status bits are transferred in REG1.  The following control bits
+;   are acted upon:
+;
+;     USBC_NOXF  -  Do not flush the buffer even if there would have been
+;       something to do.  This can be useful to just enquire status.
+;
+;   The following status bits are returned as appropriate:
+;
+;     USBS_NOXF  -  Nothing was done, for whatever reason.
+;
+;     USBS_NRDY  -  Not ready to flush the buffer at this time.  This can be
+;       because there is nothing to flush or the hardware is not ready to
+;       accept the current buffer.  This bit is set regardless of the USBC_NOXF
+;       bit.  This bit is always reset if the buffer was flushed.
+;
+;     USBS_EMTY  -  The buffer is currently empty.
+;
+;     USBS_IDLE  -  This IN endpoint is completely idle.  The firmware buffer is
+;       empty and there are no pending hardware transactions.
+;
+;   FSR1 is trashed.
+;
+         locsub  usb_flush, regf2
+
+         movlw   h'F0'       ;clear all returned status bits
+         andwf   reg1
+         movlw   (1 << usbs_noxf) | (1 << usbs_nrdy) ;init returned status bits
+         iorwf   reg1
+;
+;   Determine the EMTY status.  The EMTY bit has been initialized to indicate
+;   the buffer is not empty.
+;
+         movlw   cticn+0
+         movff   plusw0, reg2 ;get number of bytes in buffer low byte
+         movlw   cticn+1
+         movf    plusw0, w   ;get number of bytes in buffer high byte
+         iorwf   reg2, w     ;set Z if the buffer is empty
+         skip_z              ;the buffer is empty ?
+         jump    flsh_nmty   ;the buffer is not empty
+         bsf     reg1, usbs_emty ;indicate the buffer is empty
+;
+;   The buffer is empty.  Check for idle.  The IDLE bit has been initialized to
+;   indicate not idle.
+;
+         movf    indf0, w    ;get the software buffer status bits
+         andlw   (1 << fw1_bit) | (1 << fw2_bit) ;make in only hardware ready bits
+         xorlw   (1 << fw1_bit) | (1 << fw2_bit) ;compare to both HW BDs done
+         skip_nz             ;hardware is not idle ?
+         bsf     reg1, usbs_idle ;indicate the endpoint is completely idle
+         jump    flsh_leave  ;nothing more to do
+;
+;   There is at least one byte in the buffer.
+;
+flsh_nmty unbank
+         btfss   indf0, fw1_bit ;hardware is ready to accept the new buffer ?
+         jump    flsh_leave  ;no, nothing more to do
+         bcf     reg1, usbs_nrdy ;everything is ready for a buffer flush
+         btfsc   reg1, usbc_noxf ;allowed to flush the buffer ?
+         jump    flsh_leave  ;;no, nothing more to do
+
+         bcf     reg1, usbs_noxf ;buffer will be flushed
+         bsf     reg1, usbs_emty ;buffer will be empty
+         bcf     indf0, hold_bit ;release buffer hold, if any
+         mcall   usb_nextin  ;flush the buffer
+
+flsh_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine template USB_STALL
+;
+;   There is no actual USB_STALL subroutine, but this documents the interface to
+;   each USB_STALLn subroutine created automatically for each OUT endpoint set
+;   up for control transfers.
+;
+;   This subroutine causes a STALL handshake to be returned on any attempt to
+;   communicate with the endpoint.  FSR0 must be pointing to the firmware
+;   direction/endpoint descriptor for the selected endpoint, and will be
+;   preserved.
+;
+;   STALL is the required response if an illegal or unimplemented control
+;   request was received.
+;
+;   The subroutine has no call parameters and returns no data.
+;
+;*******************************************************************************
+;
+;   Subroutine template USB_0DATn, USB_1DATn
+;
+;   Both these routines exist for each endpoint with IN direction enabled, where
+;   N is the 0-15 endpoint number.  Each routine sets the 1/0 toggle bit that
+;   the current buffer will be sent with.
+;
+;*******************************************************************************
+;
+;   Subroutines USB_GETn
+;   Subroutines USB_PUTn
+;   Subroutines USB_PUTMTn
+;   Subroutines USB_FLUSHn
+;   Subroutines USB_STALLn
+;   Subroutines USB_0DATn, USB_1DATn
+;
+;   Each of these global subroutines unique to a particular endpoint are created
+;   as appropriate for the endpoint.  All of these specific subroutines just
+;   point FSR0 to the firmware descriptor for that direction/endpoint and call
+;   the generic routine of the same name.  The N in the subroutine names is the
+;   endpoint number that subroutine is unique to.
+;
+;   USB_GETn subroutines are created for all OUT endpoints, USB_PUTn subroutines
+;   for all IN endpoints, USB_PUTMTn for all IN endpoints that use the CTRL data
+;   transfer type, and USB_STALLn for all OUT endpoints that use the CTRL data
+;   transfer type.
+;
+ii       set     0
+  while ii <= 15             ;once for each possible endpoint
+    if out#v(ii)sz
+         glbsub  usb_get#v(ii), noregs ;create USB_GETn subroutine
+         lfsr    0, cto#v(ii)
+         jump    usb_get
+      if out#v(ii)type == iotype_ctrl
+         glbsub  usb_stall#v(ii), noregs ;create USB_STALLn subroutine
+         dbankif uep#v(ii)
+         bsf     uep#v(ii), epstall
+         leaverest
+        endif
+      endif
+    if in#v(ii)sz
+         glbsub  usb_put#v(ii), noregs ;create USB_PUTn subroutine
+         lfsr    0, cti#v(ii)
+         jump    usb_put
+         glbsub  usb_0dat#v(ii), noregs ;create USB_0DATn subroutine
+         lfsr    0, cti#v(ii)s2
+         bcf     indf0, odd_bit
+         leaverest
+         glbsub  usb_1dat#v(ii), noregs ;create USB_1DATn subroutine
+         lfsr    0, cti#v(ii)s2
+         bsf     indf0, odd_bit
+         leaverest
+         glbsub  usb_flush#v(ii), noregs ;create USB_FLUSHn subroutine
+         lfsr    0, cti#v(ii)
+         jump    usb_flush
+      if in#v(ii)type == iotype_ctrl
+         glbsub  usb_putmt#v(ii), noregs ;create USB_PUTMTn subroutine
+         lfsr    0, cti#v(ii)
+         jump    usb_putmt
+        endif
+      endif
+ii       set     ii + 1
+    endw
+
+;*******************************************************************************
+;
+;   Subroutine USB_SETADR
+;
+;   This routine is called when a SET_ADDRESS setup request is received.  The
+;   new address is passed in REG0.  The setup request processing logic sends the
+;   empty IN packet to finish the setup request after calling this routine.
+;   Packet processing is still disabled during this call.
+;
+;   Setup requests are handled differently from all other requests in that the
+;   action specified by the request must be performed after the status phase of
+;   the request.  This means the new address must not be set until after the
+;   empty IN packet has been successfully sent.
+;
+         glbsub  usb_setadr, noregs
+
+         movff   reg0, usbadr ;save the new address
+         dbankif gbankadr
+         bsf     flag_usbsetadr ;indicate a SET_ADDRESS request is in progress
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine USB_RUN
+;
+;   This subroutine is called periodically to handle any USB hardware events
+;   that may have occurred since the last call, and to possibly cause new USB
+;   hardware events to happen.  It is called "often" from the USB task.  This
+;   routine returns after handling at most a single event.  The global flag
+;   USBEV is set iff a event was handled.
+;
+;   All general registers REG0 - REGn and pointers FSR0 - FSR1 may be trashed.
+;
+         locsub  usb_run, noregs
+
+         dbankif gbankadr
+         bcf     flag_usbev  ;init to no event handled
+
+;********************
+;
+;   Check for error condition.  All error conditions are "enabled" in UEIE, so
+;   any error will set the UERRIF bit in UIR.
+;
+         dbankif uir
+         btfss   uir, uerrif ;error condition ?
+         jump    urun_noerr  ;no
+         dbankif gbankadr
+         bsf     flag_usbev  ;indicate an event handled
+
+         dbankif ueir
+         clrf    ueir        ;clear all error conditions
+         return
+
+urun_noerr dbankis uir
+
+;********************
+;
+;   Check for USB reset detected.
+;
+         dbankif uir
+         btfss   uir, urstif ;USB hardware has detected a bus reset condition ?
+         jump    urun_noreset ;no
+         dbankif gbankadr
+         bsf     flag_usbev  ;indicate an event handled
+
+         mcall   usb_reset   ;set all USB hardware/firmware to reset state
+         return
+
+urun_noreset dbankis uir     ;skip to here on no reset event
+
+;********************
+;
+;   Handle one transfer complete event if any has occurred.
+;
+         dbankif uir
+         btfss   uir, trnif  ;a I/O transfer has completed ?
+         jump    urun_noxf   ;no
+         movff   ustat, reg0 ;get the status byte for this transfer into REG0
+         bcf     uir, trnif  ;clear the event condition
+;
+;   Read the TABLECT entry for this direction/endpoint and set FSR0 pointing to
+;   its control state.  REG0 contains the USTAT entry for the complete transfer.
+;
+         movlw   high tablect ;init high two address bytes to table start
+         movwf   tblptrh
+         movlw   upper tablect
+         movwf   tblptru
+         rrncf   reg0, w     ;make address offset for entry from start of table
+         andlw   b'00111110'
+         addlw   low tablect ;make table entry address low byte
+         movwf   tblptrl
+         movlw   0
+         addwfc  tblptrh     ;propagate carry
+         addwfc  tblptru
+
+         tblrd   *+          ;read low table entry byte into TABLAT
+         movff   tablat, fsr0l
+         tblrd   *           ;read high table entry byte into TABLAT
+         btfsc   tablat, 7   ;this is a valid table entry ?
+         jump    urun_noxf   ;no, skip processing this transfer
+         movff   tablat, fsr0h
+
+         dbankif gbankadr
+         bsf     flag_usbev  ;an event will be handled
+;
+;   Set the FW1 or FW2 bit in the firmware state, whichever corresponds to the
+;   buffer that just completed the transfer.
+;
+         ;
+         ;   Make shifted version of the firmware control state status byte so
+         ;   that the NXO bit ends up in the same bit position as the PPBI bit
+         ;   in the USTAT byte for this transfer.  The resulting shifted status
+         ;   byte will be in W.
+         ;
+ii       set     nxo_bit - ppbi ;number of bits to shift status byte right
+  if ii == 0
+         movf    indf0, w    ;no shift required, just grab the byte
+    endif
+  if ii > 0
+         rrcf    indf0, w    ;shift first bit right
+    while ii > 1
+         rrcf    wreg, w
+ii       set     ii - 1
+      endw
+    else
+ii       set     -ii         ;make number of bits to shift left
+         rlcf    indf0, w    ;shift first bit left
+    while ii > 1
+         rlcf    wreg, w
+ii       set     ii - 1
+      endw
+    endif
+         ;
+         ;   Set the FW1 bit in the firmware status byte if the XOR of the NXO
+         ;   bit and the PPBI bit are 0, else set the FW2 bit.
+         ;
+         xorwf   reg0, w     ;make XOR of firmware NXO bit and hardware PPBI bits
+         andlw   1 << ppbi   ;mask in only the result bit
+         movlw   1 << fw1_bit ;init mask for FW1 bit
+         skip_z              ;XOR was 0, supposed to set FW1 bit ?
+         movlw   1 << fw2_bit ;no, need to set FW2 bit
+         iorwf   indf0       ;set the selected FWx bit
+;
+;   Call USB_NEXTOUT or USB_NEXTIN depending on whether this was a OUT or IN
+;   transfer.
+;
+         btfsc   reg0, dir   ;OUT transfer ?
+         jump    urun_in     ;IN transfer
+;
+;   This was a OUT transfer (host sent to us).
+;
+         mcall   usb_nextout
+         return              ;done handling this event
+;
+;   This was a IN transfer (we sent to host).
+;
+urun_in  unbank              ;IN transfer
+         mcall   usb_nextin
+         return
+
+urun_noxf unbank             ;no transfer done event
+
+;********************
+;
+;   Check for strart of frame.  We don't care about start of frames so we just
+;   clear the event bit.
+;
+         dbankif uir
+         btfss   uir, sofif  ;start of frame ?
+         jump    urun_nosof  ;no
+
+         bcf     uir, sofif  ;clear the event condition
+         dbankif gbankadr
+         bsf     flag_usbev  ;indicate an event handled
+         return
+
+urun_nosof dbankis uir
+
+;********************
+;
+;   Check for STALL condition.  We don't care, so just reset the bit.
+;
+         dbankif uir
+         btfss   uir, stallif ;stall was sent by the hardware ?
+         jump    urun_nostall ;no
+
+         bcf     uir, stallif ;clear the event condition
+         dbankif gbankadr
+         bsf     flag_usbev  ;indicate an event handled
+         return
+
+urun_nostall dbankis uir
+
+;********************
+;
+;   Check for IDLE condition.  Handling of this is not implemented yet, so the
+;   bit is just reset.
+;
+         dbankif uir
+         btfss   uir, idleif ;bus idle condition detected ?
+         jump    urun_noidle ;no
+
+         bcf     uir, idleif ;clear the event condition
+         dbankif gbankadr
+         bsf     flag_usbev  ;indicate an event handled
+         return
+
+urun_noidle dbankis uir
+
+;********************
+;
+;   Check for bus activity detected.  This is only relevant if in the IDLE
+;   state.  IDLE handling has not been implemented yet, so the event bit is just
+;   reset.
+;
+         dbankif uir
+         btfss   uir, actvif ;resumption of bus activity detected ?
+         jump    urun_noactv ;no
+
+         bcf     uir, actvif ;clear the event condition
+         dbankif gbankadr
+         bsf     flag_usbev  ;indicate an event handled
+         return
+
+urun_noactv dbankis uir
+
+         leaverest
+
+         end

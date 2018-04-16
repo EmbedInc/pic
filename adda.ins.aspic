@@ -1,0 +1,11 @@
+;   Subroutine ADDA
+;
+;   Add REGB into REGA.
+;
+.adda    code
+         glbsub  adda, regf8
+
+         dbankif reg8
+         add32   rega, regb, reg8 ;add REGB into REGA, use REG8 as temp
+
+         leaverest

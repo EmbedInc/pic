@@ -1,0 +1,53 @@
+;   Subroutine MULU
+;
+;   Perform unsigned multiply of the the accumulator (REGA) times the operand
+;   (REGB).  The result is written to the accumulator.
+;
+;   Algorithm:
+;
+;     The original REGA value is copied to REGC and REGA is cleared.
+;     If the low bit of REGC is 1, then REGB is added to REGA.  REGC
+;     is then shifted right one bit and REGB is shifted left one bit.
+;     The low bit of REGC is tested again and the process is repeated
+;     until REGC becomes zero.
+;
+         extern  adda
+
+.mulu    code
+         glbsub  mulu, regfb | regfc
+         dbankif reg11
+
+         getf    rega+0      ;copy REGA into REGC
+         movwf   regc+0
+         getf    rega+1
+         movwf   regc+1
+         getf    rega+2
+         movwf   regc+2
+         getf    rega+3
+         movwf   regc+3
+
+         clrf    rega+0      ;clear the accumulator
+         clrf    rega+1
+         clrf    rega+2
+         clrf    rega+3
+
+mulu_loop                    ;back here each original accumulator bit
+         getf    regc+0      ;make OR of all shifter bits
+         iorwf   regc+1, w
+         iorwf   regc+2, w
+         iorwf   regc+3, w
+         skip_nz             ;shifter not all 0, more work left to do ?
+         goto    mulu_leave  ;all done
+
+         btfss   regc+0, 0   ;add operand into accumulator this time around ?
+         goto    done_add    ;don't add this time
+         gcall   adda        ;add operand into accumulator
+         dbankif reg11
+done_add
+
+         shift32rl1 regc     ;advance shifter to next bit
+         shift32l1 regb      ;update operand for next time
+         goto    mulu_loop   ;back to do this new bit position
+
+mulu_leave                   ;common exit code
+         leaverest

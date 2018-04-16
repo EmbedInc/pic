@@ -1,0 +1,143 @@
+;   ***************************************************************
+;   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   ****************************************************************
+;   *                    ------ WARNING ------                     *
+;   * THIS TEMPLATE IS FOR THE ENHANCED PIC 16 FAMILY.  USE        *
+;   * QQQ_INTR.ASPIC for regular PIC 16 and QQQ_INTR18.ASPIC for   *
+;   * PIC 18.                                                      *
+;   ****************************************************************
+;
+;   Interrupt service and related routines.
+;
+/include "qq2.ins.aspic"
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+niregs   equ     0           ;num of IREGn private interrupt routine registers
+
+;**********
+;
+;   Derived constants.
+;
+
+
+;*******************************************************************************
+;
+;   Global state.
+;
+;   The following global state is in the normal register bank for global
+;   state.  The bank is GBANK, and GBANKADR is an address guaranteed to
+;   be within this bank.
+;
+         defram  gbankadr
+
+;*******************************************************************************
+;
+;   Local state.  This is always in the same register bank as the global
+;   state.
+;
+
+;
+;   Define the IREGn general register for use during an interrupt.  The
+;   general registers REGn must not be altered during an interrupt without
+;   being explicitly saved/restored, which usually makes them unusable.
+;   The IREGn registers are used instead, although these are in bank 0
+;   instead of global memory.  The number of IREGn registers is defined
+;   by the constant NIREGS above.  The first is IREG0, then IREG1, etc.
+;
+ii       set     0
+  while ii < niregs          ;once for each IREG register to define
+ireg#v(ii) res   1           ;define this IREGn register
+         global  ireg#v(ii)  ;make is global for interrupt code in other modules
+ii       set     ii + 1      ;advance to next IREG number
+    endw                     ;back to define next IREG
+
+
+.intr    code
+;*******************************************************************************
+;
+;   Subroutine INTR_INIT
+;
+;   Initialize the interrupt system and other state managed by this module.
+;
+         glbsub  intr_init, noregs
+;
+;   Initialize global state.
+;
+
+;
+;   Initialize local state.
+;
+
+;
+;   Enable interrupts.  Any interrupts used have already been enabled
+;   individually, but interrupts are still disabled globally.
+;
+  ifdef pir1
+         dbankif pir1
+         clrf    pir1        ;clear any existing peripheral 1 intr condition
+    endif
+  ifdef pir2
+         dbankif pir2
+         clrf    pir2        ;clear any existing peripheral 2 intr condition
+    endif
+
+  ifdef peie
+         bsf     intcon, peie ;enable peripheral interrupts
+    endif
+         bsf     intcon, gie ;globally enable interrupts
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Interrupt service routine.
+;
+;   The processor executes a call to location 4 on an interrupt, and globally
+;   disables interrupts by clearing the INTCON,GIE bit.  Interrupts are
+;   re-enabled at the end of the interrupt routine with the RETFIE instruction.
+;
+;   The processor automatically saves the following registers to shadow copies:
+;
+;     W
+;     STATUS
+;     BSR
+;     FSR0, FSR1
+;     PCLATH
+;
+;   These will be restored from their shadow copies by the RETFIE instruction.
+;
+.intr_svc code   4           ;start at interrupt vector location
+         unbank              ;the current bank setting is unknown
+         clrf    pclath      ;set PCLATH for this code page
+
+
+         reset               ;unexpected interrupt, should never happen
+
+;********************
+;
+;   Restore state to when the interrupt occurred and return from interrupt.
+;
+         glbent  intr_ret    ;common interrupt exit point
+
+         retfie              ;return from interrupt, re-enable interrupts
+
+         end

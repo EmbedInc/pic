@@ -1,0 +1,19 @@
+//   Linker control file for the PIC 16F630 processor.
+//
+CODEPAGE NAME=config START=0x2007 END=0x2007 PROTECTED //configuration word
+CODEPAGE NAME=idlocs START=0x2000 END=0X2003 PROTECTED //ID words
+CODEPAGE NAME=eedata START=0x2100 END=0x217F PROTECTED //Initial EEPROM data
+
+CODEPAGE NAME=code0      START=0  END=0x3FE //code page 0
+
+SECTION NAME=.config ROM=config
+SECTION NAME=.IDLOCS ROM=idlocs
+SECTION NAME=.EEDATA ROM=eedata
+
+SHAREBANK NAME=globalram  START=0x20  END=0x2F PROTECTED //UDATA_SHR area of bank 0
+SHAREBANK NAME=globalram  START=0xA0  END=0xAF PROTECTED //aliased from bank 1
+
+DATABANK NAME=bank0  START=0x30  END=0x5F //register bank 0
+
+SECTION NAME=.udata_shr RAM=globalram  //global memory mapped to all pages
+SECTION NAME=.BANK0 RAM=bank0          //for registers explicitly in bank 0

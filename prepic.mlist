@@ -1,0 +1,6 @@
+prepic_err.obj
+prepic_func.obj
+prepic_icmd_flag.obj
+prepic_icmd_inbit.obj
+prepic_icmd_outbit.obj
+prepic_ifun.obj

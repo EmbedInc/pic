@@ -1,0 +1,457 @@
+;   ***************************************************************
+;   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Subroutine PORT_INIT
+;
+;   Initialize the I/O ports as used by the rest of the system.
+;
+.port    code
+
+         glbsub  port_init, noregs
+;
+;   Disable the A/D inputs so that they become digital I/O lines if this
+;   processor has an A/D.  If the A/D is used, it will be set up by a
+;   module for that purpose later.
+;
+  ifdef adcon0
+         dbankif adcon0
+         clrf    adcon0      ;make sure the A/D module is off
+    endif
+
+  ifdef adcon1
+         dbankif adcon1
+    ifdef adcon2             ;enhanced A/D with separate in config bits ?
+      ifdef vcfg0
+         movlw   b'00001111' ;set just the PCFGx bits
+        else
+         movlw   b'11111111' ;set all possible channels to digital I/O
+        endif
+      else                   ;normal 16 family type A/D
+         movlw   b'00000110'
+                 ; XXXX----  don't matter if disabling the A/D
+                 ; ----0110  no A/D inputs, all become digital I/O
+      endif
+         movwf   adcon1
+    endif
+
+  ifdef ancon0
+         dbankif ancon0
+         loadk8  ancon0, b'11111111'
+    endif
+  ifdef ancon1
+         dbankif ancon1
+         loadk8  ancon1, b'00111111'
+    endif
+
+  ifdef ansel
+         dbankif ansel
+         clrf    ansel       ;all analog input lines become digital I/O
+    endif
+  ifdef ansela
+         dbankif ansela
+         clrf    ansela
+    endif
+  ifdef anselb
+         dbankif anselb
+         clrf    anselb
+    endif
+  ifdef anselc
+         dbankif anselc
+         clrf    anselc
+    endif
+  ifdef anseld
+         dbankif anseld
+         clrf    anseld
+    endif
+  ifdef ansele
+         dbankif ansele
+         clrf    ansele
+    endif
+  ifdef anself
+         dbankif anself
+         clrf    anself
+    endif
+  ifdef anselg
+         dbankif anselg
+         clrf    anselg
+    endif
+  ifdef anselh
+         dbankif anselh
+         clrf    anselh
+    endif
+;
+;   Disable the comparator inputs so that they become digital I/O lines if
+;   this processor has comparators.  If the comparators are used, they
+;   will be set up by a module for that purpose later.
+;
+  ifdef cmcon
+         dbankif cmcon
+         movlw   b'00000111'
+                 ; XXXXX---  irrelevant when comparators off
+                 ; -----111  disable the comparators
+         movwf   cmcon
+    endif
+
+  ifdef cmcon0
+         dbankif cmcon0
+         movlw   b'00000111'
+                 ; XXXXX---  irrelevant when comparators off
+                 ; -----111  disable the comparators
+         movwf   cmcon0
+    endif
+;
+;   Globally enable the internal weak pullups if any were requested with
+;   /INBIT directives.  The pullups will be individually enabled in the
+;   per-port section later as apporpriate.
+;
+  ifdef portbpullups
+         error   "PORTBPULLUPS symbol no longer used.  Use PUP option of /INBIT."
+    endif
+
+pullups_all set  0           ;init to no pullups requested for any ports
+  ifdef val_pullupa
+pullups_all set  pullups_all | val_pullupa
+    endif
+  ifdef val_pullupb
+pullups_all set  pullups_all | val_pullupb
+    endif
+  ifdef val_pullupc
+pullups_all set  pullups_all | val_pullupc
+    endif
+  ifdef val_pullupd
+pullups_all set  pullups_all | val_pullupd
+    endif
+  ifdef val_pullupe
+pullups_all set  pullups_all | val_pullupe
+    endif
+  ifdef val_pullupf
+pullups_all set  pullups_all | val_pullupf
+    endif
+  ifdef val_pullupg
+pullups_all set  pullups_all | val_pullupg
+    endif
+  ifdef val_pulluph
+pullups_all set  pullups_all | val_pulluph
+    endif
+  ifdef val_pullupj
+pullups_all set  pullups_all | val_pullupj
+    endif
+
+  if fam_16 | fam_16b        ;16 family PIC ?
+    if pullups_all
+         setreg  b'00011111', option_reg
+                 ; 0-------  globally enable passive pullups
+                 ; -0------  interrupt on falling edge of RB0
+                 ; --0-----  timer 0 driven from instruction clock
+                 ; ---1----  falling RA4 edge for timer 0 inc (not used)
+                 ; ----1---  assign prescaler to watchdog timer
+                 ; -----111  select maximum watchdog presacler (128)
+      else
+         setreg  b'10011111', option_reg
+                 ; 1-------  globally disable passive pullups
+                 ; -0------  interrupt on falling edge of RB0
+                 ; --0-----  timer 0 driven from instruction clock
+                 ; ---1----  falling RA4 edge for timer 0 inc (not used)
+                 ; ----1---  assign prescaler to watchdog timer
+                 ; -----111  select maximum watchdog presacler (128)
+      endif
+    endif                    ;end of 16 family PIC case
+
+  if fam_18                  ;18 family PIC ?
+    if val_pullupb
+      ifdef rbpu
+         bcf     intcon2, rbpu ;enable the passive pullups
+        endif
+      ifdef rabpu
+         bcf     intcon2, rabpu ;enable the passive pullups
+        endif
+      else
+      ifdef rbpu
+         bsf     intcon2, rbpu ;disable the passive pullups
+        endif
+      ifdef rabpu
+         bsf     intcon2, rabpu ;disable the passive pullups
+        endif
+      endif
+    endif                    ;end of 18 family PIC case
+;
+;   Initialize the I/O ports according to how each of the bits was declared
+;   with the /INBIT and /OUTBIT preprocessor directives.
+;
+         ;
+         ;   Initialize port A if it exists.
+         ;
+  ifdef porta
+    if val_pullupa & ~val_trisa
+         error   "Pullup requested on a port A output bit."
+      endif
+    if val_pullupa & ~pullups_porta
+         error   "Port A pullup requested that is not available."
+      endif
+    if (val_pullupa != 0) && ((pullups_porta & h'80000000') != 0)
+      if pullups_porta & h'7FFFFFFF' & (~val_pullupa) & val_trisa
+         error   "Only some port A pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpu
+         setreg  val_pullupa, wpu
+      endif
+    ifdef wpua
+         setreg  val_pullupa, wpua
+      endif
+    ifdef wpuda
+         setreg  val_pullupa, wpuda
+      endif
+    ifdef lata
+         setreg  val_porta, lata
+      else
+         setreg  val_porta, porta
+      endif
+    endif
+  ifdef trisa
+         setreg  val_trisa, trisa
+    endif
+         ;
+         ;   Initialize port B if it exists.
+         ;
+  ifdef portb
+    if val_pullupb & ~val_trisb
+         error   "Pullup requested on a port B output bit."
+      endif
+    if val_pullupb & ~pullups_portb
+         error   "Port B pullup requested that is not available."
+      endif
+    if (val_pullupb != 0) && ((pullups_portb & h'80000000') != 0)
+      if pullups_portb & h'7FFFFFFF' & (~val_pullupb) & val_trisb
+         error   "Only some port B pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpub
+         setreg  val_pullupb, wpub
+      endif
+    ifdef latb
+         setreg  val_portb, latb
+      else
+         setreg  val_portb, portb
+      endif
+    endif
+  ifdef trisb
+         setreg  val_trisb, trisb
+    endif
+         ;
+         ;   Initialize port C if it exists.
+         ;
+  ifdef portc
+    if val_pullupc & ~val_trisc
+         error   "Pullup requested on a port C output bit."
+      endif
+    if val_pullupc & ~pullups_portc
+         error   "Port C pullup requested that is not available."
+      endif
+    if (val_pullupc != 0) && ((pullups_portc & h'80000000') != 0)
+      if pullups_portc & h'7FFFFFFF' & (~val_pullupc) & val_trisc
+         error   "Only some port C pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpuc
+         setreg  val_pullupc, wpuc
+      endif
+    ifdef latc
+         setreg  val_portc, latc
+      else
+         setreg  val_portc, portc
+      endif
+    endif
+  ifdef trisc
+         setreg  val_trisc, trisc
+    endif
+         ;
+         ;   Initialize port D if it exists.
+         ;
+  ifdef portd
+    if val_pullupd & ~val_trisd
+         error   "Pullup requested on a port D output bit."
+      endif
+    if val_pullupd & ~pullups_portd
+         error   "Port D pullup requested that is not available."
+      endif
+    if (val_pullupd != 0) && ((pullups_portd & h'80000000') != 0)
+      if pullups_portd & h'7FFFFFFF' & (~val_pullupd) & val_trisd
+         error   "Only some port D pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef rdpu
+      ifdef porte
+         dbankif porte
+         bsf     porte, rdpu
+val_porte set    val_porte | (1 << rdpu)
+        endif
+      ifdef repu
+         dbankif lata
+         bsf     lata, rdpu
+        endif
+      endif
+    ifdef wpud
+         setreg  val_pullupd, wpud
+      endif
+    ifdef latd
+         setreg  val_portd, latd
+      else
+         setreg  val_portd, portd
+      endif
+    endif
+  ifdef trisd
+         setreg  val_trisd, trisd
+    endif
+         ;
+         ;   Initialize port E if it exists.
+         ;
+  ifdef porte
+    if val_pullupe & ~val_trise
+         error   "Pullup requested on a port E output bit."
+      endif
+    if val_pullupe & ~pullups_porte
+         error   "Port E pullup requested that is not available."
+      endif
+    if (val_pullupe != 0) && ((pullups_porte & h'80000000') != 0)
+      if pullups_porte & h'7FFFFFFF' & (~val_pullupe) & val_trise
+         error   "Only some port E pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpue
+         setreg  val_pullupe, wpue
+      endif
+    ifdef late
+         setreg  val_porte, late
+      else
+         setreg  val_porte, porte
+      endif
+    endif
+  ifdef trise
+         setreg  val_trise, trise
+    endif
+         ;
+         ;   Initialize port F if it exists.
+         ;
+  ifdef portf
+    if val_pullupf & ~val_trisf
+         error   "Pullup requested on a port F output bit."
+      endif
+    if val_pullupf & ~pullups_portf
+         error   "Port F pullup requested that is not available."
+      endif
+    if (val_pullupf != 0) && ((pullups_portf & h'80000000') != 0)
+      if pullups_portf & h'7FFFFFFF' & (~val_pullupf) & val_trisf
+         error   "Only some port F pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpuf
+         setreg  val_pullupf, wpuf
+      endif
+    ifdef latf
+         setreg  val_portf, latf
+      else
+         setreg  val_portf, portf
+      endif
+    endif
+  ifdef trisf
+         setreg  val_trisf, trisf
+    endif
+         ;
+         ;   Initialize port G if it exists.
+         ;
+  ifdef portg
+    if val_pullupg & ~val_trisg
+         error   "Pullup requested on a port G output bit."
+      endif
+    if val_pullupg & ~pullups_portg
+         error   "Port G pullup requested that is not available."
+      endif
+    if (val_pullupg != 0) && ((pullups_portg & h'80000000') != 0)
+      if pullups_portg & h'7FFFFFFF' & (~val_pullupg) & val_trisg
+         error   "Only some port G pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpug
+         setreg  val_pullupg, wpug
+      endif
+    ifdef latg
+         setreg  val_portg, latg
+      else
+         setreg  val_portg, portg
+      endif
+    endif
+  ifdef trisg
+         setreg  val_trisg, trisg
+    endif
+         ;
+         ;   Initialize port H if it exists.
+         ;
+  ifdef porth
+    if val_pulluph & ~val_trish
+         error   "Pullup requested on a port H output bit."
+      endif
+    if val_pulluph & ~pullups_porth
+         error   "Port H pullup requested that is not available."
+      endif
+    if (val_pulluph != 0) && ((pullups_porth & h'80000000') != 0)
+      if pullups_porth & h'7FFFFFFF' & (~val_pulluph) & val_trish
+         error   "Only some port H pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpuh
+         setreg  val_pulluph, wpuh
+      endif
+    ifdef lath
+         setreg  val_porth, lath
+      else
+         setreg  val_porth, porth
+      endif
+    endif
+  ifdef trish
+         setreg  val_trish, trish
+    endif
+         ;
+         ;   Initialize port J if it exists.
+         ;
+  ifdef portj
+    if val_pullupj & ~val_trisj
+         error   "Pullup requested on a port J output bit."
+      endif
+    if val_pullupj & ~pullups_portj
+         error   "Port J pullup requested that is not available."
+      endif
+    if (val_pullupj != 0) && ((pullups_portj & h'80000000') != 0)
+      if pullups_portj & h'7FFFFFFF' & (~val_pullupj) & val_trisj
+         error   "Only some port J pullups enabled, must be all or none."
+        endif
+      endif
+    ifdef wpuj
+         setreg  val_pullupj, wpuj
+      endif
+    ifdef latj
+         setreg  val_portj, latj
+      else
+         setreg  val_portj, portj
+      endif
+    endif
+  ifdef trisj
+         setreg  val_trisj, trisj
+    endif
+;
+;   Initialize other state managed by this module.
+;
+         leaverest

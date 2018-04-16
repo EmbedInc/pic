@@ -1,0 +1,993 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module services the control requests from the host on USB endpoint
+;   0.  It is layered on the low level USB module, which provides a byte
+;   stream interface to the USB endpoints via the USB_GETn and USB_PUTn
+;   subroutines and a procedural interface to all other USB functions that
+;   can be accessed by the rest of the system.  The code in this module
+;   is strictly layered on the interface presented by the USB module.
+;
+;   The endpoint 0 command processing logic is implemented as a separate
+;   thread.  The subroutine USB0_RUN must be called periodically, which
+;   runs this thread for a short period of time each call.
+;
+;   The host controller generally does not send control requests once the
+;   device has been set up and is in normal operation.  The routines in
+;   this module are therefore not speed-critical since they generally
+;   perform real work only at system initialization.
+;
+;   The PREPIC contants FWNAME and SRCDIR must be defined for this file to work
+;   unmodified.
+;
+         extern_flags        ;declare global flag bits EXTERN
+
+  ifndef debug_echoenum
+debug_echoenum equ 0
+    endif
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+maxstack equ     4           ;max thread nesting supported on YIELD
+;
+;   Set MSKSAVE.  This is the bit mask of all the registers that are to
+;   be saved accross YIELD.  The remaining registers will be trashed.
+;
+msksave  equ     regf0 | regf1 | regf2 | regf3 | regf4 | regf5 | regf6
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+;
+;   Save area for the general registers while the thread is swapped out.
+;   The specific registers to be saved are indicated my MSKSAVE.
+;
+ii       set     0           ;init register number
+  while ii < numregs
+    if (1 << ii) & msksave   ;save/restore this register accross YIELD ?
+savereg#v(ii) res 1          ;make save area for this register
+      endif
+ii       set     ii + 1      ;advance to next register number
+    endw
+;
+;   Save area for the thread-specific part of its call stack while
+;   it is swapped out.
+;
+usb0_nstk res    1           ;1-MAXSTACK number of entries in saved stack
+usb0_stack res   maxstack * 3 ;save area for thread part of call stack
+;
+;   Last request received from the host.  These all have a uniform format
+;   and are all 8 bytes long as defined in the USB specification.
+;
+rbuf                         ;start of request buffer
+reqtype  res     1           ;request type
+reqid    res     1           ;ID of the specific request
+reqval   res     2           ;value, meaning depends on request
+reqind   res     2           ;index, meaning depends on request
+reqlen   res     2           ;maximum size of response or data bytes
+;
+;   Other local state.
+;
+uconf    res     1           ;current configuration ID
+uiface   res     1           ;current interface ID
+nsent    res     2           ;number of bytes sent in response to SETUP request
+
+;*******************************************************************************
+;
+;   Macro LOADPADR var, adr
+;
+;   Load the program memory address ADR into the three byte variable
+;   starting at VAR.
+;
+;   W is trashed.
+;
+loadpadr macro   var, adr
+         movlw   low (adr)
+         movwf   var+0
+         movlw   high (adr)
+         movwf   var+1
+         movlw   upper (adr)
+         movwf   var+2
+         endm
+
+;*******************************************************************************
+;
+;   Macro WORD val
+;
+;   Define two successive bytes from a 16 bit word value.  VAL must be a
+;   constant known at assembly time.  The word is defined as two independent
+;   bytes using DB directives, in order of low byte then high byte.
+;
+;   This macro can define 16 bit words in a CODE_PACK section without regard
+;   to the byte alignment.
+;
+word     macro   val
+         db      low (val)   ;define low byte
+         db      high (val)  ;define high byte
+         endm
+
+;*******************************************************************************
+;
+;   Macro STRING n, str
+;
+;   Define a USB string descriptor.  A label will be created for the first byte
+;   of the descriptor named STRINGn, where N is the first macro parameter.  The
+;   second parameter is intended to be a quoted string.  A correct USB string
+;   descriptor will only be created if this macro is envoked in a CODE_PACK
+;   section.
+;
+;   String 1 is handled differently from all other strings.  This is the unit's
+;   unique name string that is meant to distinguish a specific unit from others
+;   on the same USB.  Since the name of each unit must be different and possibly
+;   user assigned, this name can not be set at build time.  This name is
+;   retrieved by calling NAME_xxx application routines at run time.  The
+;   requirements of these routines is described later in this module.  This
+;   macro can not be used to define string 1, and an error will be generated if
+;   this is attempted.
+;
+;   USB strings are transmitted as UNICODE, although stored by this macro as
+;   regular 8 bit characters.  The descriptor length byte that is automatically
+;   generated by this macro is the correct value for the UNICODE representation
+;   of the string, and can therefore be transmitted over the USB without
+;   alteration.  The string characters must however be converted to UNICODE
+;   before transmitting over the USB.  This requires simply sending a 0 byte
+;   after each string byte stored by this macro.
+;
+string   macro   n, str
+  if n == 1
+         error   STRING macro not allowed for string 1.
+         exitm
+    endif
+
+string#v(n)                  ;label for start of descriptor
+         db      2 + ((strafter#v(n)-strstart#v(n)) * 2) ;bytes desc size as sent
+         db      3           ;descriptor type is STRING
+strstart#v(n) db str         ;define the string bytes
+strafter#v(n)                ;marks address immediately after string
+
+  if n > string_max
+string_max set   n           ;update highest string number defined so far
+    endif
+         endm
+
+;*******************************************************************************
+;
+;   USB descriptors for this device.
+;
+.usbdesc code_pack
+
+string_max set   0           ;init to only string 0 defined
+
+/include [str "(cog)src/" srcdir "/" fwname "_usb0.ins.aspic"]
+;
+;   String addresses table.  There is one table entry for each string 0-N
+;   defined above.  Each table entry is a 16 bit unsigned integer indicating
+;   the program memory address offset of the start of that string descriptor
+;   from string descriptor 0.  The first entry is for string descriptor 0
+;   and is always 0.  The last entry is for string descriptor STRING_MAX.
+;   Entry 1 is skipped because string 1 is handled in a different way in
+;   the code.
+;
+tbl_str                      ;start of string descriptor addresses table
+ii       set     0
+  while ii <= string_max
+    if ii != 1
+         word    string#v(ii) - string0
+      endif
+ii       set     ii + 1
+    endw
+
+
+.usb0    code
+
+;*******************************************************************************
+;
+;   Subroutine USB0_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  usb0_init, noregs
+;
+;   Initialize local state.
+;
+         dbankif lbankadr
+         movlw   low thread_start ;put thread start address on saved stack
+         movwf   usb0_stack+0
+         movlw   high thread_start
+         movwf   usb0_stack+1
+         movlw   upper thread_start
+         movwf   usb0_stack+2
+         movlw   1           ;indicate saved stack has one entry
+         movwf   usb0_nstk
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine WAIT_IDLE
+;
+;   Wait for endpoint 0 IN to be completely idle.
+;
+;   REG1 is trashed.
+;
+         locsub  wait_idle, noregs
+
+idl_loop unbank
+         clrf    reg1
+         gcall   usb_flush0  ;flush buffer if not empty, get status
+         btfsc   reg1, usbs_idle ;endpoint not idle yet ?
+         jump    idl_leave   ;is idle
+         mcall   yield       ;give other tasks a chance to run
+         jump    idl_loop    ;back to check for idle again
+
+idl_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine FLUSH
+;
+;   Send anything in the software output buffer, if necessary, to ensure
+;   it is empty.  Packet processing is re-enabled by this routine and the
+;   data toggle bit value initialized to 1 for the next outgoing packet.
+;
+;   REG1 is trashed.
+;
+         locsub  flush, noregs
+
+         dbankif ucon
+         bcf     ucon, pktdis ;re-enable packet processing
+
+flush_loop unbank            ;back here until software output buffer is empty
+         clrf    reg1
+         gcall   usb_flush0  ;flush buffer if not empty, get status
+         btfsc   reg1, usbs_emty ;buffer not empty yet ?
+         jump    flush_done  ;buffer is empty
+         mcall   yield       ;give other tasks a chance to run
+         jump    flush_loop  ;back to try and flush buffer again
+
+flush_done unbank            ;done flushing the buffer
+         gcall   usb_1dat0   ;set toggle bit for DATA1 next packet
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine PUT0
+;
+;   Write the byte in REG0 as the next data byte to be sent to the host.
+;   Data is saved in the output buffer until it is full or explicitly flushed.
+;   This routine will call YIELD repeatedly until the data byte is written
+;   to the buffer.  NSENT is updated to the number of bytes sent.
+;
+;   REG1 is trashed.
+;
+         locsub  put0, noregs
+
+p0loop   unbank              ;back here to retry sending the byte
+         movlw   (1 << usbc_nflu) ;don't flush buffer until full
+         movwf   reg1
+         gcall   usb_put0    ;try to send the byte
+         btfss   reg1, usbs_noxf ;the byte was not written ?
+         jump    p0_leave    ;the byte was written, all done
+         mcall   yield       ;let other tasks run for a while
+         jump    p0loop      ;no, back and try again
+
+p0_leave unbank              ;common exit point
+         dbankif lbankadr
+         infsnz  nsent+0     ;count one more byte sent this setup request
+         incf    nsent+1
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine YIELD
+;
+;   Release the processor for use by other foreground tasks.  Only the
+;   registers indicated by MSKSAVE are preserved by this subroutine.
+;
+;   The thread may be up to MAXSTACK-1 levels in subroutines below the
+;   initial thread start point.  However, nothing additional may be left
+;   on the software data stack.  Neither of these restrictions are
+;   enforced or verified, but all manner of strange behaviour can result
+;   in their violation.
+;
+         locsub  yield, noregs
+;
+;   Save the general registers indicated by MSKSAVE.
+;
+ii       set     0           ;init register number
+  while ii < numregs
+    if (1 << ii) & msksave   ;save/restore this register accross YIELD call ?
+         movff   reg#v(ii), savereg#v(ii) ;save this register
+      endif
+ii       set     ii + 1      ;advance to next register number
+    endw
+;
+;   It is now OK to trash any of the general registers.
+;
+;   Save the call stack to USB0_STACK.
+;
+;   The call stack has at least two entries right now.  The top of stack
+;   is the return address from YIELD, which is effectively the thread
+;   restart address.  The bottom stack entry is the return address from
+;   USB0_RUN, and will be used here to exit the thread.
+;
+;   Register useage:
+;
+;     REG1  -  Number of stack levels left to save.
+;
+;     FSR0  -  Points to where to store next byte in stack save area.
+;
+         dbankif stkptr
+         decf    stkptr, w   ;get number of stack levels to save
+         andlw   b'00011111' ;mask in only the stack depth field
+         movwf   reg1        ;init loop counter
+         dbankif lbankadr
+         movwf   usb0_nstk   ;indicate number of entries in stack save area
+         lfsr    0, usb0_stack ;init pointer to where to write first saved byte
+yl_loop                      ;back here each new stack level to save
+         movff   tosl, postinc0 ;save this stack entry
+         movff   tosh, postinc0
+         movff   tosu, postinc0
+         pop                 ;remove saved entry from the stack
+         decfsz  reg1        ;count one less entry left to save
+         jump    yl_loop     ;back to save next stack entry
+
+         return              ;return from USB0_RUN
+
+;*******************************************************************************
+;
+;   Subroutine USB0_RUN
+;
+;   Run the command handling thread for a short time.
+;
+;   This subroutine is intended to be called from the main event loop.
+;   It **MUST** be called from top level code that is not nested in
+;   any subroutine.  In other words, the call stack must be empty at
+;   the time of the call.
+;
+;   WARNING: All general registers may be trashed by this subroutine.
+;
+         glbsub  usb0_run, noregs
+;
+;   Restart the thread at THREAD_RESET if FLAG_USB0RESET is set.  This flag
+;   indicates a USB reset was detected.
+;
+         dbankif gbankadr
+         btfss   flag_usb0reset ;a USB reset was received ?
+         jump    no_reset    ;no
+         bcf     flag_usb0reset ;clear the flag to not reset next time
+         jump    thread_reset ;restart the thread from the reset point
+
+no_reset unbank              ;skip to here on no USB reset detected
+;
+;   Push the contents of the saved thread stack onto the call stack
+;   to restore the thread's call context inside YIELD before it returned
+;   to the event loop.  The last (top of stack) saved address is not
+;   restored to the stack because it is the thread restart address.
+;   This will be loaded directly into the PC later to restart the thread.
+;
+         dbankif lbankadr
+         lfsr    0, usb0_stack-1 ;init end of saved stack pointer for 0 levels
+         movf    usb0_nstk, w ;get number of stack levels to restore
+         movwf   reg1        ;init loop counter
+         mullw   3           ;make number of bytes to restore
+         movf    prodl, w    ;get the number of saved stack bytes
+         addwf   fsr0l       ;update pointer to last saved stack byte
+loop_run                     ;back here each new stack level to restore
+         dcfsnz  reg1        ;count one less address to restore to call stack
+         jump    done_run    ;done restoring all but last call stack entry ?
+         push                ;create a new call stack entry
+         movf    postdec0, w ;copy saved address to new top of call stack
+         movwf   tosu
+         movf    postdec0, w
+         movwf   tosh
+         movf    postdec0, w
+         movwf   tosl
+         jump    loop_run    ;back to do next call stack entry
+done_run                     ;done restoring the call stack
+;
+;   Restore the registers indicated by MSKSAVE.
+;
+ii       set     0           ;init register number
+  while ii < numregs
+    if (1 << ii) & msksave   ;save/restore this register accross YIELD call ?
+         movff   savereg#v(ii), reg#v(ii) ;restore this register
+      endif
+ii       set     ii + 1      ;advance to next register number
+    endw
+;
+;   Restart the thread right after where it called YIELD.  The restart
+;   address is at the beginning of the thread stack save area.
+;
+         dbankif lbankadr
+         movf    usb0_stack+2, w ;jump to the restart address
+         movwf   pclatu
+         movf    usb0_stack+1, w
+         movwf   pclath
+         movf    usb0_stack+0, w
+         movwf   pcl
+
+;*******************************************************************************
+;
+;   Thread to process received commands.
+;
+;   The main event loop calls USB0_RUN to start a time slice for this
+;   thread.  The time slice is ended when the thread calls YIELD.
+;   YIELD may be called up to MAXSTACK-1 levels in subroutines below the
+;   main thread level.
+;
+thread_start unbank          ;the thread will start here the first time
+
+thread_reset unbank          ;thread will restart here after USB reset
+         dbankif lbankadr
+         clrf    uconf       ;reset to no configuration selected
+         clrf    uiface      ;reset to no interface selected
+
+         dbankif gbankadr
+         btfss   flag_nameusb0 ;this thread has name get routines locked ?
+         jump    th_dprom    ;no, skip rest of this section
+         gcall   name_get_end ;release the lock on the name get routines
+         dbankif gbankadr
+         bcf     flag_nameusb0 ;indicate name get routines not locked by this thread
+th_dprom                     ;this thread now definitely not name get locked
+
+req_done unbank              ;done processing a request
+;
+;   Read the next request into the request buffer RBUF.  All requests
+;   have exactly 8 bytes according to the USB specification.
+;
+;   Register usage:
+;
+;     REG0  -  Data byte.
+;
+;     REG1  -  Control and status bits for USB_GET0.
+;
+;     REG2  -  Number of bytes left to read in the request.
+;
+;   During normal operation after enumeration and setup is complete, this thread
+;   will spend most of its time right here waiting for a new request.  The code
+;   to wait for the next byte therefore should be as efficient as possible.
+;
+         movlw   8
+         movwf   reg2        ;init number of bytes left to read
+
+req_loop unbank              ;back here to read each new byte into the buffer
+         clrf    reg1        ;indicate to transfer a byte if possible
+         gcall   usb_get0    ;try to get the next byte
+         btfss   reg1, usbs_noxf ;no byte received ?
+         jump    req_byte    ;received new byte
+         mcall   yield       ;give other tasks a chance to run
+         jump    req_loop    ;back and try to get the next byte again
+req_byte unbank              ;the next input byte is in REG0
+         ;
+         ;   The input byte is in REG0 and the associated status flags in REG1.
+         ;
+         btfss   reg1, usbs_setu ;this byte is not start of new setup request ?
+         jump    setup_nnew  ;not new setup request
+         ;
+         ;   The current byte is the first byte of a new setup request.
+         ;   Reset the setup request processing logic accordingly.
+         ;
+setup_byte1 unbank           ;can come here from any code that receives bytes
+         movlw   8           ;reset number of bytes left to stuff in RBUF
+         movwf   reg2
+
+setup_nnew unbank            ;skip to here on not first byte of a setup request
+         lfsr    0, rbuf     ;init pointer to start of request buffer
+         movf    reg2, w     ;get number of bytes left to write into buffer
+         sublw   8           ;make offset into buffer for this byte
+         addwf   fsr0l       ;point to the byte to write in the buffer
+         movff   reg0, indf0 ;stuff the byte into the buffer
+         decfsz  reg2        ;count one less byte left to read this setup request
+         jump    req_loop    ;back to read the next byte
+
+         dbankif lbankadr
+         clrf    nsent+0     ;init number of response bytes sent this setup request
+         clrf    nsent+1
+;
+;   If the DEBUG_ECHOENUM debugging switch is enabled, echo the enumeration
+;   request bytes to the serial port.
+;
+  if debug_echoenum
+         movlw   8
+         movwf   reg2        ;init number of bytes left to send
+dbg1_loop unbank             ;back here to send each new byte
+         lfsr    0, rbuf     ;init pointer to start of request buffer
+         movf    reg2, w     ;get number of bytes left to write into buffer
+         sublw   8           ;make offset into buffer for this byte
+         addwf   fsr0l       ;point to the byte to write in the buffer
+         movff   indf0, reg0 ;fetch the byte from the buffer
+         gcall   uart_put    ;send it out the UART
+         decfsz  reg2        ;count one less byte left to do
+         jump    dbg1_loop   ;back to do the next byte
+    endif
+;
+;   Branch to the handling routine for the specific request type.
+;
+         movlw   upper tbl_reqid ;init high two bytes of jump address
+         movwf   pclatu
+         movlw   high tbl_reqid
+         movwf   pclath
+         dbankif lbankadr
+         movf    reqid, w    ;get the high level request ID
+         sublw   tbl_reqid_n - 1 ;compare to last valid request ID
+         skip_wle            ;request ID is within range of the table ?
+         jump    rq_none     ;no, handle as unimplemented request
+         rlcf    reqid, w    ;make table byte offset for this request ID
+         rlcf    wreg, w
+         andlw   b'11111100'
+         addlw   low tbl_reqid ;make low byte of jump address
+         skip_ncarr          ;propagate the carry to the upper bytes
+         incf    pclath
+         skip_ncarr
+         incf    pclatu
+         movwf   pcl         ;jump to the selected table entry
+
+tbl_reqid                    ;start of dispatch table for high level request ID
+         goto    rq_get_status ;0
+         goto    rq_clear_feature ;1
+         goto    rq_none     ;2
+         goto    rq_set_feature ;3
+         goto    rq_none     ;4
+         goto    rq_set_address ;5
+         goto    rq_get_desc ;6
+         goto    rq_set_desc ;7
+         goto    rq_get_config ;8
+         goto    rq_set_config ;9
+         goto    rq_get_iface ;10
+         goto    rq_set_iface ;11
+         goto    rq_synch_frame ;12
+tbl_reqid_n equ  ($ - tbl_reqid) >> 2 ;number of entries in the table
+
+;********************
+;
+;   Handler for unimplmented request.
+;
+rq_none  unbank              ;unimplemented requests are dispatched to here
+
+rq_get_status
+rq_clear_feature
+rq_set_feature
+rq_set_desc
+rq_synch_frame
+
+rq_error unbank              ;jump here on error detected in request
+         dbankif ucon
+         bcf     ucon, pktdis ;re-enable packet processing
+         gcall   usb_stall0  ;cause STALL to be sent for future handshakes
+         jump    req_done    ;done handling this request
+
+;********************
+;
+;   Routine to return descriptor data.  REG6:REG5:REG4 is pointing to the first
+;   byte of the descriptor, and REG3:REG2 contains the byte length of the
+;   descriptor.  The number of actual bytes returned will be the lesser of
+;   the number available and the number requested in REQLEN.
+;
+send_desc unbank             ;common code to send descriptor data
+         mcall   flush       ;make sure output buffer is empty
+;
+;   Set REG3:REG2 to the actual number of bytes to return.
+;
+         dbankif lbankadr
+         movf    reg3, w     ;get num available high byte
+         subwf   reqlen+1, w ;compare to num requested high byte
+         skip_wle
+         jump    send_rlen   ;use requested length
+         skip_z
+         jump    send_hlen   ;length is all set in REG3:REG2
+
+         movf    reg2, w     ;get num available low byte
+         subwf   reqlen+0, w ;compare to num requested low byte
+         skip_wgt            ;available > requested ?
+         jump    send_hlen   ;no, length all set in REG3:REG2
+send_rlen                    ;use the requested length
+         movff   reqlen+0, reg2
+         movff   reqlen+1, reg3
+send_hlen                    ;number of bytes to send all set in REG3:REG2
+;
+;   Send the descriptor data bytes.
+;
+send_loop unbank             ;back here to send each new byte
+         movf    reg2, w
+         iorwf   reg3, w     ;set Z on byte remaining count
+         skip_nz             ;not done yet ?
+         jump    send_dbytes ;done sending the data bytes
+         movff   reg4, tblptrl ;point to program memory location to read this byte from
+         movff   reg5, tblptrh
+         movff   reg6, tblptru
+         tblrd   *           ;read the byte into TABLAT
+         movff   tablat, reg0 ;pass the data byte to send
+         mcall   put0        ;send the byte
+         incf    reg4        ;increment the address to read the next byte from
+         movlw   0
+         addwfc  reg5
+         addwfc  reg6
+         decf    reg2        ;decrement the number of bytes left to send
+         skip_nborr
+         decf    reg3
+         jump    send_loop   ;back to send the next byte
+
+send_dbytes unbank           ;done sending the data bytes of the descriptor
+
+;
+;   Fall thru to SEND_MTIF.
+;
+;********************
+;
+;   Routine to send an empty packet to indicate the end of the transmission
+;   if the number of bytes sent were a multiple of the packet size, then end
+;   processing this request.
+;
+send_mtif unbank             ;send empty packet if length was packet size multiple
+
+;
+;   Don't send a zero length packet if a multiple of 8 bytes was requested and
+;   we sent exactly the requested number of bytes.  Apparently Windows doesn't
+;   attempt to read a following zero length packet in that case.
+;
+         dbankif lbankadr
+         movf    reqlen+0, w ;get requested length low byte
+         andlw   7
+         skip_z              ;request length was multiple of 8 ?
+         jump    nsupp0      ;no, don't try to suppress zero length packet
+         movf    reqlen+0, w ;get requested length low byte
+         xorwf   nsent+0, w  ;compare to sent length
+         skip_z              ;low sent and requested lengths match ?
+         jump    nsupp0      ;no, possibly send zero length packet
+         movf    reqlen+1, w ;get requested length high byte
+         xorwf   nsent+1, w  ;compare to sent length
+         skip_nz             ;not sent exactly requested number of bytes ?
+         jump    req_done    ;did send requested length, all done
+
+nsupp0   dbankis lbankadr    ;don't suppress zero length packet if sent 8x multiple
+;
+;   If a multiple of 8 bytes was sent, then send a zero length packet to indicate
+;   end of data.  If other than a multiple of 8 bytes was sent, then a packet is
+;   ended early and the host therefore knows the end of data was reached.
+;
+mtif_loop unbank             ;back here on hardware not ready to send packet
+         clrf    reg1
+         gcall   usb_putmt0  ;try to send empty packet in case needed
+         btfss   reg1, usbs_nrdy ;empty packet not sent if appropriate ?
+         jump    req_done    ;was sent, all done
+         mcall   yield       ;give rest of system a chance to run
+         jump    mtif_loop   ;go back and try again
+
+;********************
+;
+;   Routine to return a zero length packet and go on to the next setup request.
+;   This routine is jumped to from request handlers of requests that have no
+;   data phase, or the data phase is in the OUT direction (host to device).
+;   In both these cases the setup transaction is ended with a empty IN packet.
+;
+send_empty unbank
+         mcall   flush       ;make sure output buffer is empty
+
+empty_loop unbank            ;back here until empty packet successfully queued
+         movlw   (1 << usbc_uncd) ;indicate to send empty packet unconditionally
+         movwf   reg1
+         gcall   usb_putmt0  ;cause the empty packet to be sent
+         btfss   reg1, usbs_noxf ;empty packet not queued ?
+         jump    req_done    ;empty packet queued, all done with this request
+         mcall   yield       ;give other tasks a chance to run
+         jump    empty_loop  ;back and try to send empty packet again
+
+;********************
+;
+;   Handler for GET_DESCRIPTOR requests.
+;
+rq_get_desc unbank
+         dbankif lbankadr
+         movf    reqval+1, w ;get descriptor type ID
+         addlw   low -1
+         skip_z              ;DEVICE descriptor ?
+         jump    gdesc_ndev
+;
+;   Device descriptor.
+;
+         dbankif lbankadr
+         movf    reqval+0    ;check descriptor index
+         skip_z
+         jump    rq_error    ;there is only device descriptor 0
+
+         loadpadr reg4, desc_dev
+         loadk16 reg2, desc_dev_len
+         jump    send_desc
+
+gdesc_ndev dbankis lbankadr  ;not device descriptor
+         addlw   low -1
+         skip_z              ;CONFIG descriptor ?
+         jump    gdesc_ncfg
+;
+;   Configuration descriptor.
+;
+         dbankif lbankadr
+         movf    reqval+0    ;check descriptor index
+         skip_z
+         jump    rq_error    ;we only have configuration 0
+
+         loadpadr reg4, desc_config1
+         loadk16 reg2, config1_all_len
+         jump    send_desc
+
+gdesc_ncfg dbankis lbankadr  ;not configuration descriptor
+         addlw   low -1
+         skip_z              ;STRING descriptor ?
+         jump    rq_error    ;not string descriptor either
+;
+;   String descriptor.
+;
+         ;
+         ;   Check for string 1 special case.
+         ;
+         dbankif lbankadr
+         decf    reqval+0, w ;get the requested string index - 1
+         skip_nz             ;not string index 1 ?
+         jump    string1     ;is string index 1
+         ;
+         ;   Range check the string index.  We have strings from 0 to STRING_MAX
+         ;   but excluding 1.  The special case check for string 1 has already
+         ;   been performed.
+         ;
+         dbankif lbankadr
+         movf    reqval+0, w ;get the requested string index
+         sublw   string_max  ;compare to the maximum valid index
+         skip_wle            ;requested string index is valid ?
+         jump    rq_error    ;no
+         ;
+         ;   Set TBLPTR to the TBL_STR table entry address for the requested string.
+         ;
+         dbankif lbankadr
+         movf    reqval+0, w ;get the descriptor index
+         skip_z              ;descriptor 0 ?
+         addlw   -1          ;no, skip over string 1
+         addwf   wreg, w     ;make table entry offset for this string index
+         addlw   low tbl_str ;set TBLPTR to the table entry address for this string
+         movwf   tblptrl
+         movlw   high tbl_str
+         skip_ncarr
+         addlw   1
+         movwf   tblptrh
+         movlw   upper tbl_str
+         skip_ncarr
+         addlw   1
+         movwf   tblptru
+         ;
+         ;   Read the TBL_STR table entry for the addressed string to get the
+         ;   string start address offset from STRING0.
+         ;
+         tblrd   *+          ;get offset low byte
+         movff   tablat, reg4
+         tblrd   *           ;get offset high byte
+         movff   tablat, reg5
+         ;
+         ;   Add the STRING0 address to the offset in REG5:REG4 to make the final
+         ;   string address in REG6:REG5:REG4.
+         ;
+         movlw   low string0
+         addwf   reg4
+         movlw   high string0
+         addwfc  reg5
+         movlw   upper string0
+         movwf   reg6
+         movlw   0
+         addwfc  reg6
+         ;
+         ;   Read the first byte of the string to get the descriptor length
+         ;   and determine the total number of bytes to send in REG3.
+         ;
+         ;   String 0 is handled like all other descriptors (not string
+         ;   descriptors) because it does not contain a ASCII string in memory
+         ;   that needs to be converted to UNICODE.  The normal descriptor send
+         ;   routine at SEND_DESC is used for string 0.
+         ;
+         movff   reg4, tblptrl
+         movff   reg5, tblptrh
+         movff   reg6, tblptru
+         tblrd   *           ;get the descriptor length in TABLAT
+         movff   tablat, reg2 ;init number of bytes to send
+         clrf    reg3        ;set descriptor length in REG3:REG2 for SEND_DESC
+         dbankif lbankadr
+         movf    reqval+0, w ;check requested string number
+         skip_nz             ;this is not string 0 special case ?
+         jump    send_desc   ;handle string 0 like any other non-string descriptor
+
+         dbankif lbankadr
+         movf    reqlen+1    ;check high byte of requested length
+         skip_z              ;requested length could still be smaller ?
+         jump    str_havelen ;no, N bytes to return all set in REG2
+         movf    reg2, w     ;get max bytes we have to return
+         subwf   reqlen+0, w ;compare to max requested bytes
+         skip_wle            ;descriptor size not exceed requested length ?
+         movff   reqlen+0, reg2 ;clip to requested length
+str_havelen                  ;REG2 contains total bytes to return
+         ;
+         ;   Send the first two descriptor bytes, which are the bytes before
+         ;   the string data.  The first is the total descriptor length, which
+         ;   is in TABLAT, and the second is the descriptor type, which is always
+         ;   3 since this is a string descriptor.
+         ;
+         mcall   flush       ;make sure output buffer is empty
+         movf    reg2, w
+         skip_nz             ;returning at least 1 byte ?
+         jump    send_dbytes ;done sending descriptor data
+
+         movff   tablat, reg0 ;get the first descriptor byte
+         mcall   put0        ;send it
+         dcfsnz  reg2        ;still more bytes left to send ?
+         jump    send_dbytes ;no, done sending descriptor data
+
+         movlw   3           ;send the descriptor type (STRING)
+         movwf   reg0
+         mcall   put0        ;send it
+         dcfsnz  reg2        ;still more bytes left to send ?
+         jump    send_dbytes ;no, done sending descriptor data
+
+         movlw   2           ;amount to add to address for first string byte
+         addwf   reg4        ;make address of first string byte in REG6:REG5:REG4
+         movlw   0
+         addwfc  reg5
+         addwfc  reg6
+         ;
+         ;   Send the string data bytes.  REG6:REG5:REG4 contains the address
+         ;   of the first string byte, and REG3 contains the total number of
+         ;   bytes left to send.  A 0 byte is sent after each stored string
+         ;   byte to convert to UNICODE.
+         ;
+str_lsend unbank             ;back here to send each new string character
+         movff   reg4, tblptrl ;point to program memory location to read char from
+         movff   reg5, tblptrh
+         movff   reg6, tblptru
+         tblrd   *           ;read the character into TABLAT
+         movff   tablat, reg0
+         mcall   put0        ;send the byte first byte, which is 8 bit character
+         dcfsnz  reg2        ;still more bytes left to send ?
+         jump    send_dbytes ;no, done sending descriptor data
+         clrf    reg0
+         mcall   put0        ;send second byte of UNICODE character
+         dcfsnz  reg2        ;still more bytes left to send ?
+         jump    send_dbytes ;no, done sending descriptor data
+         incf    reg4        ;increment the address to read the next byte from
+         movlw   0
+         addwfc  reg5
+         addwfc  reg6
+         jump    str_lsend   ;back to send next string character
+;
+;   String 1.  This string is handled differently from all the others.  The name
+;   string is accessed thru the NAME_xxx routines in the NAME module.  The
+;   following facilities must be available outside this module:
+;
+;     Subroutine NAME_GET_START
+;
+;       Setup for getting name string characters.  The number of name characters
+;       is returned in REG0.
+;
+;     Subroutine NAME_GET_CHAR
+;
+;       Get the next name character into REG0.  A zero byte is returned if the
+;       character is past the end of the name.
+;
+;     Subroutine NAME_GET_END
+;
+;       Ends getting name characters.  This may release system resources that
+;       were allocated by NAME_GET_START.
+;
+string1  unbank              ;special case for returning string 1
+         mcall   flush       ;make sure output buffer is empty
+;
+;   Acquire exclusive access to getting the name.
+;
+str1acq  unbank
+         gcall   name_get_start ;set up for getting name, length into REG0
+         dbankif gbankadr
+         bsf     flag_nameusb0 ;remember we have name get routines locked
+
+         movf    reg0, w     ;get the string length
+         movwf   reg2        ;save it
+         addlw   2           ;make returned USB packet length
+         movwf   reg0
+         mcall   put0        ;send packet length byte
+
+         movlw   3           ;send descriptor type, 3 = string
+         movwf   reg0
+         mcall   put0
+;
+;   Send the string characters.  The total number of characters is in REG2.
+;
+str1char unbank              ;back here to send each new character
+         movf    reg2
+         bz      str1dchr    ;no more string bytes left to send ?
+         decf    reg2        ;count one less string byte left to do
+         gcall   name_get_char ;get this name string character into REG0
+         mcall   put0        ;send it
+         jump    str1char    ;back to do next character
+str1dchr unbank              ;done sending all the name string characters
+
+         gcall   name_get_end ;release lock on getting name string
+         dbankif gbankadr
+         bcf     flag_nameusb0 ;indicate we don't have name get routines locked
+
+         jump    send_mtif   ;finish the response
+
+;********************
+;
+;   Handler for SET_ADDRESS requests.
+;
+rq_set_address unbank
+         mcall   flush       ;make sure output buffer is empty
+         movlw   (1 << usbc_uncd) ;send empty packet to end the setup transaction
+         gcall   usb_putmt0
+         mcall   wait_idle   ;wait for everything completely sent
+         movff   reqval+0, uaddr ;set the hardware to the new address
+         jump    req_done    ;done handling this control request
+
+;********************
+;
+;   Handler for SET_CONFIGURATION requests.
+;
+rq_set_config unbank
+         dbankif lbankadr
+         movf    reqval+0, w ;get the new configuration ID
+         movwf   uconf       ;save it
+         movwf   reg0        ;pass new configuration ID
+         gcall   usb_config  ;set new configuration active
+         jump    send_empty  ;send empty packet, done processing this request
+
+;********************
+;
+;   Handler for GET_CONFIGURATION requests.
+;
+rq_get_config unbank
+         movff   uconf, reg0
+         mcall   put0
+         mcall   flush
+         jump    send_mtif   ;send the data and on to next request
+
+;********************
+;
+;   Handler for SET_INTERFACE requests.
+;
+rq_set_iface unbank
+         movff   reqval+0, uiface ;save new interface ID
+         jump    send_empty  ;send empty packet, done processing this request
+
+;********************
+;
+;   Handler for GET_INTERFACE requests.
+;
+rq_get_iface unbank
+         movff   uiface, reg0
+         mcall   put0
+         mcall   flush
+         jump    send_mtif   ;send the data and on to next request

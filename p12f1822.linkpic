@@ -1,0 +1,24 @@
+// File: 12f1822_g.lkr
+// Generic linker script for the PIC12F1822 processor
+
+LIBPATH .
+
+CODEPAGE   NAME=page0      START=0x0               END=0x7FF                    
+
+CODEPAGE   NAME=.idlocs    START=0x8000            END=0x8003         PROTECTED 
+CODEPAGE   NAME=.devid     START=0x8006            END=0x8006         PROTECTED 
+CODEPAGE   NAME=.config    START=0x8007            END=0x8008         PROTECTED 
+CODEPAGE   NAME=eedata     START=0xF000            END=0xF0FF         PROTECTED 
+
+LINEARMEM  NAME=linear0    START=0x2000            END=0x206F         PROTECTED
+
+
+DATABANK   NAME=gpr0       START=0x20              END=0x6F           SHADOW=linear0:0x2000
+
+DATABANK   NAME=gpr1       START=0xA0              END=0xBF           SHADOW=linear0:0x2050
+
+SECTION    NAME=PROG0      ROM=page0           // ROM code space - page0
+SECTION    NAME=IDLOCS     ROM=.idlocs         // ID locations
+SECTION    NAME=DEEPROM    ROM=eedata          // Data EEPROM
+SECTION    NAME=LINEAR0    RAM=linear0         // Linear Memory
+SECTION    NAME=.intr_svc  ROM=.config

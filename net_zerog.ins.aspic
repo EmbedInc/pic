@@ -1,0 +1,797 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Low level interface routines for the ZeroG ZG2100 module.  The routines in
+;   this file handle the mechanics of communicating with the module, and provide
+;   layered access to registers and the like.  This file encapsulates the
+;   details of how the SPI hardware is used to communicate with the ZeroG
+;   module, and how SPI transfers are used to access module registers and FIFO
+;   data.
+;
+;   It is assumed that the ZeroG module is connected to this processor via SPI,
+;   driven by the MSSP hardware.  Other devices may also be connected to the
+;   same SPI bus, each with its own chip select line.  FLAG_SPI is used as a
+;   mutex so that only one task can acquire the SPI hardware at a time.  The pin
+;   driving the ZeroG SPI chip select input must be called CS_ZEROG, and must be
+;   declared to have negative polarity.
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;       MSSP module.  Will be used in SPI master mode.
+;
+;     I/O pins:
+;
+;       CS_ZEROG  -  SPI slave select line to the ZeroG module.  Defined with
+;         negative polarity.
+;
+;     Global flags:
+;
+;       FLAG_MACLOCK  -  MAC/PHY locked for exclusive use by a task
+;
+;       FLAG_SPI  -  The SPI hardware is locked for exclusive use by a task.
+;
+/if [= mactype "ZeroG"] then
+
+         extern  currtask    ;ID of the currently running task
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     [v lbank_zerog] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+mac_locktsk res  1           ;ID of task that has the MAC/PHY locked
+
+         global  mac_locktsk
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+fiforlen res     2           ;bytes left in current FIFO read
+
+
+.zerog   code
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+;   This routine is assumed to be called during module initialization before
+;   system startup.
+;
+         glbsub  zerog_init, noregs
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_LOCK
+;
+;   Lock the MAC/PHY for exclusive access.  If it is already locked, then this
+;   routine will stall until it is available.  The routines in this module do
+;   not lock and unlock the MAC themselves.  That is the responsibility of the
+;   caller.  The lock/unlock mechanism is provided in this module as a service
+;   to higher level subsystems.
+;
+;   Since the ZeroG module is external and is connected via SPI, this routine
+;   also locks the SPI hardware.
+;
+         glbsub  zerog_lock, noregs
+
+lck_loop unbank
+         dbankif gbankadr
+         btfsc   flag_maclock ;MAC not locked ?
+         jump    lck_wait    ;is locked, wait
+         btfss   flag_spi    ;SPI bus is locked ?
+         jump    lck_ready   ;no, all reasources are available
+lck_wait
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    lck_loop    ;back and check again
+lck_ready dbankis gbankadr   ;the MAC and the SPI bus are available
+
+         bsf     flag_maclock ;lock the MAC
+         bsf     flag_spi    ;lock the SPI hardware
+
+         setreg  0, ssp1con1 ;make sure MSSP is disabled while changing config
+
+         setreg  b'01000000', ssp1stat
+                 ; 0-------  sample input in middle of clock cycle
+                 ; -1------  change output on active to idle clock
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00100000', ssp1con1
+                 ; 0-------  reset any collision status
+                 ; -0------  reset any overflow status
+                 ; --1-----  enable the MSSP
+                 ; ---0----  clock idle state is low
+                 ; ----0000  SPI master mode, clock is Fosc/4
+
+         dbankif pir1
+         bsf     pir1, ssp1if ;init to no SPI transaction in progress
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro WAIT_SPI
+;
+;   Wait for the previous SPI transaction to finish.  Each SPI transaction
+;   completes quickly, so this macro does a busy wait until the previous
+;   transaction finishes.
+;
+wait_spi macro
+         local   wdloop
+
+         dbankif pir1
+wdloop
+         btfss   pir1, ssp1if ;previous transaction has completed ?
+         jump    wdloop      ;no, go back and check again
+         endm
+
+;*******************************************************************************
+;
+;   Macro SPI_START
+;
+;   Start a new SPI sequence to the ZeroG module.  No transfer must be in
+;   progress when this macro is invoked.
+;
+spi_start macro
+         set_cs_zerog_on     ;assert the SPI chip select
+         nop                 ;leave a little time before anything else is done
+         endm
+
+;*******************************************************************************
+;
+;   Macro SPI_END
+;
+;   End the current SPI sequence to the ZeroG module, if any.  The chip select
+;   line will be deasserted on exit.
+;
+spi_end  macro
+         wait_spi            ;wait for any SPI byte transfer to finish
+         set_cs_zerog_off    ;deassert the ZeroG chip select line
+         nop                 ;leave a little time before anything else is done
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine SETUP_SEND
+;
+;   Set up for sending a byte to the ZeroG module over the SPI bus.  After this
+;   call, the data byte must be written to SSP1BUF to actually send it.  Note
+;   that SSP1BUF is in the access bank, so can be written to regardless of the
+;   current bank setting.
+;
+         locsub  setup_send, noregs
+
+         wait_spi            ;wait for any previous SPI byte transfer to finish
+
+         dbankif pir1
+         bcf     pir1, ssp1if ;init to this transaction not complete yet
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine RECV
+;
+;   Receive a byte from the SPI bus into SSP1BUF.  Bytes are always transferred
+;   in both directions simultaneously on a SPI bus.  This routine transmits a
+;   zero byte value.  Note that SSP1BUF is in the access bank, so can be read
+;   regardless of the current bank setting.
+;
+         locsub  recv, noregs
+
+         wait_spi            ;wait for any previous SPI byte transfer to finish
+
+         dbankif pir1
+         bcf     pir1, ssp1if ;init to this transaction not complete yet
+         dbankif ssp1buf
+         clrf    ssp1buf     ;start a new transaction, send 0
+
+         wait_spi            ;wait for this transaction to complete
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_UNLOCK
+;
+;   Release the lock on the MAC/PHY acquired by ZEROG_LOCK.
+;
+         glbsub  zerog_unlock, noregs
+
+         wait_spi            ;wait for any SPI byte transfer to finish
+         set_cs_zerog_off    ;end any SPI sequence that may be in progress
+
+         dbankif gbankadr
+         bcf     flag_spi    ;release lock on the SPI hardware
+         bcf     flag_maclock ;release lock on the MAC
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RESET
+;
+;   Reset the ZeroG module and leave it ready for operations via the SPI bus.
+;
+         glbsub  zerog_reset, regf0 | regf1 | regf2
+
+         set_wreset_on       ;assert reset
+         set_wenab_off       ;disable the module
+         waitms  10          ;hold in this state for a while
+
+         set_wenab_on        ;enable the module
+         waitms  500         ;wait for module to boot up
+         set_wreset_off      ;release the module from reset
+         waitms  500
+
+         loadk8  reg2, h'2D' ;HOST_INTR2 register address
+         loadk16 reg0, h'FFFF' ;all 1s to clear all bits
+         mcall   zerog_put16 ;try to clear all HOST_INTR2 conditions
+
+         loadk8  reg2, h'01' ;HOST_INTR register address
+         loadk8  reg0, h'FF' ;all 1s to clear all bits
+         mcall   zerog_put8  ;try to clear all HOST_INTR conditions
+;
+;   Init the RAW 1 window mapped to the scratch memory.  Some versions of the
+;   ZeroG firmware initialize one or the other RAW window mapped to this memory.
+;   We therefore unmap it from both windows first, then map it to RAW 1.
+;
+         loadk16 reg0, h'3000' ;command to unmount the scratch memory
+         mcall   zerog_raw0cmd ;unmount scratch from RAW 0 window
+         mcall   zerog_raw1cmd ;unmount scratch from RAW 1 window
+
+         loadk16 reg0, h'B000' ;command to mount scratch memory
+         mcall   zerog_raw1cmd
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_GET8
+;
+;   Read a 8 bit register in the ZeroG module.  The register address is
+;   specified in REG2, and the register contents is returned in REG0.
+;
+         glbsub  zerog_get8, noregs
+
+         spi_start           ;start the SPI transaction
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movf    reg2, w     ;get the register address
+         andlw   b'00111111' ;mask in only the valid address bits
+         iorlw   b'01000000' ;indicate register read, not write
+         movwf   ssp1buf     ;write the SPI header byte
+
+         mcall   recv        ;read SPI byte into REG0
+         movff   ssp1buf, reg0
+
+         spi_end             ;end the SPI transaction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_PUT8
+;
+;   Write to a 8 bit register in the ZeroG module.  The register address is
+;   passed in REG2, and the value to write in REG0.
+;
+         glbsub  zerog_put8, noregs
+
+         spi_start           ;start the SPI transaction
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movf    reg2, w     ;get the register address
+         andlw   b'00111111' ;mask in only the valid address bits
+         movwf   ssp1buf     ;write the SPI header byte
+
+         mcall   setup_send  ;send the data byte
+         movff   reg0, ssp1buf
+
+         spi_end             ;end the SPI transaction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_GET16
+;
+;   Read a 16 bit register in the ZeroG module.  The register address is
+;   specified in REG2, and the register contents is returned in REG1:REG0.
+;
+         glbsub  zerog_get16, noregs
+
+         spi_start           ;start the SPI transaction
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movf    reg2, w     ;get the register address
+         andlw   b'00111111' ;mask in only the valid address bits
+         iorlw   b'01000000' ;indicate register read, not write
+         movwf   ssp1buf     ;write the SPI header byte
+
+         mcall   recv        ;read register high byte
+         movff   ssp1buf, reg1
+         mcall   recv        ;read register low byte
+         movff   ssp1buf, reg0
+
+         spi_end             ;end the SPI transaction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_PUT16
+;
+;   Write to a 16 bit register in the ZeroG module.  The register address is
+;   passed in REG2, and the value to write in REG1:REG0.
+;
+         glbsub  zerog_put16, noregs
+
+         spi_start           ;start the SPI transaction
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movf    reg2, w     ;get the register address
+         andlw   b'00111111' ;mask in only the valid address bits
+         movwf   ssp1buf     ;write the SPI header byte
+
+         mcall   setup_send  ;send the high byte
+         movff   reg1, ssp1buf
+         mcall   setup_send  ;send the low byte
+         movff   reg0, ssp1buf
+
+         spi_end             ;end the SPI transaction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_WRITE_MGMT
+;
+;   Start writing a management message.  This will leave a SPI transfer in
+;   progress.
+;
+         glbsub  zerog_write_mgmt, noregs
+
+         spi_start           ;start the SPI transfer
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'30' ;FIFO operation, start managment message write
+         movwf   ssp1buf     ;write the communication header byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_WRITE_DATA
+;
+;   Start writing a data message.  This will leave a SPI transfer in progress.
+;
+         glbsub  zerog_write_data, noregs
+
+         spi_start           ;start the SPI transfer
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'20' ;FIFO operation, start data message write
+         movwf   ssp1buf     ;write the communication header byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_WRITE
+;
+;   Write the next sequential byte to the message currently open for writing.
+;   The value is passed in REG0.
+;
+         glbsub  zerog_write, noregs
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movff   reg0, ssp1buf ;send the byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_WRITE16
+;
+;   Write the 16 bit value in REG1:REG0 to the message currently open for
+;   writing.  The word is written in high to low byte order, which is how the
+;   ZeroG module expects multi-byte fields.
+;
+         glbsub  zerog_write16, noregs
+
+         pushreg reg0        ;save low byte on stack
+         movff   reg1, reg0
+         mcall   zerog_write ;write the high byte
+         popreg  reg0        ;restore low byte from stack
+         mcall   zerog_write ;write the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_WRITE_END
+;
+;   End the current message, which must have been started with ZEROG_WRITE_MGMT
+;   or ZEROG_WRITE_DATA.  This call may be made whether the message is suspended
+;   or not.  No SPI transfer will be in progress on return.
+;
+         glbsub  zerog_write_end, noregs
+
+         spi_end             ;make sure to start a new SPI transfer
+         spi_start
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'40' ;FIFO operation, end write
+         movwf   ssp1buf     ;write the communication byte header
+
+         spi_end             ;end the SPI transaction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_READ_MGMT
+;
+;   Start reading the current received management FIFO message.  The number of
+;   bytes in the message is returned in REG4:REG3, which is always 0 to 4095.
+;   If the number of bytes is non-zero, then the message is opened and can be
+;   read with subsequent calls to ZEROG_READ followed by ZEROG_READ_END.  If the
+;   number of bytes is 0, then no message is opened and no SPI transfer started.
+;
+         glbsub  zerog_read_mgmt, regf0 | regf1 | regf2
+
+         loadk8  reg2, h'35' ;read HOST_MGMT_MESSAGE_READY_BCNT register
+         mcall   zerog_get16
+         dbankif lbankadr
+         movf    reg0, w     ;get byte count low byte
+         movwf   reg3        ;pass it back
+         movwf   fiforlen+0  ;save it locally
+         movf    reg1, w     ;get register value high byte
+         andlw   b'00001111' ;mask in only the byte count bits
+         movwf   reg4        ;pass back byte count high byte
+         movwf   fiforlen+1  ;save it locally
+
+         iorwf   reg0, w
+         bz      rmgmt_leave ;byte count 0, nothing to read ?
+
+         spi_start           ;start the SPI transfer
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'00' ;FIFO operation, start FIFO read
+         movwf   ssp1buf     ;write the communication header byte
+
+rmgmt_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_READ_DATA
+;
+;   Start reading the current received data FIFO message.  The number of bytes
+;   in the message is returned in REG4:REG3, which is always 0 to 4095.  If the
+;   number of bytes is non-zero, then the message is opened and can be read with
+;   subsequent calls to ZEROG_READ followed by ZEROG_READ_END.  If the number of
+;   bytes is 0, then no message is opened and no SPI transfer started.
+;
+         glbsub  zerog_read_data, regf0 | regf1 | regf2
+
+         loadk8  reg2, h'33' ;read HOST_DATA_MESSAGE_READY_BCNT register
+         mcall   zerog_get16
+         dbankif lbankadr
+         movf    reg0, w     ;get byte count low byte
+         movwf   reg3        ;pass it back
+         movwf   fiforlen+0  ;save it locally
+         movf    reg1, w     ;get register value high byte
+         andlw   b'00001111' ;mask in only the byte count bits
+         movwf   reg4        ;pass back byte count high byte
+         movwf   fiforlen+1  ;save it locally
+
+         iorwf   reg0, w
+         bz      rdata_leave ;byte count 0, nothing to read ?
+
+         spi_start           ;start the SPI transfer
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'00' ;FIFO operation, start FIFO read
+         movwf   ssp1buf     ;write the communication header byte
+
+rdata_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_READ
+;
+;   Read the next sequential byte from the message currently open for reading.
+;   The byte value is returned in REG0.  C is returned set when returning with
+;   a message byte, and cleared when the message has been exhausted.  Zero is
+;   always returned after all message bytes have been read.
+;
+         glbsub  zerog_read, noregs
+
+         clrf    reg0        ;init returned byte for no data bytes left
+         dbankif lbankadr
+         movf    fiforlen+0, w
+         iorwf   fiforlen+1, w
+         bz      rfifo_leave ;no more data bytes left to read ?
+         decf    fiforlen+0  ;one less byte left after this one
+         movlw   0
+         subwfb  fiforlen+1
+
+         mcall   recv        ;read the next SPI byte into SSP1BUF
+         movff   ssp1buf, reg0 ;return it
+
+rfifo_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_READ_END
+;
+;   End reading of the current FIFO message.  This call may be made whether the
+;   message is suspended or not.  No SPI transfer will be in progress on return.
+;   This message will be cleared from the system.  After this call, the data
+;   message or management message ready bits in the host interrupt register will
+;   indicate new messages.
+;
+         glbsub  zerog_read_end, regf0 | regf2
+
+         spi_end             ;make sure to start a new SPI transfer
+         spi_start
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'50' ;FIFO operation, end read
+         movwf   ssp1buf     ;write the communication byte header
+         spi_end             ;end the SPI transaction
+
+         loadk8  reg2, 1     ;address the host interrupt flags register
+         loadk8  reg0, b'11000000' ;clear data and mgmt message ready flags
+         mcall   zerog_put8
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_SUSPEND
+;
+;   Temporarily suspend the current read or write operation.  The SPI transfer
+;   is ended, which allows other SPI transfers to be made, such as reading and
+;   writing registers.  The read or write operation may be continued or ended at
+;   a later time.  However, only a single read or write operation may be in
+;   progress at any time, whether suspended or not.
+;
+         glbsub  zerog_suspend, noregs
+
+         spi_end             ;end the current SPI transfer
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RESUME
+;
+;   Resume the previously suspended read or write operation.
+;
+         glbsub  zerog_resume, noregs
+
+         spi_end             ;make sure to start a new SPI transfer
+         spi_start
+
+         mcall   setup_send  ;set up for sending SPI byte
+         movlw   h'80' | h'10' ;FIFO operation, continue read or write
+         movwf   ssp1buf     ;write the communication byte header
+
+         spi_end             ;end the SPI transfer
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW0CMD
+;
+;   Performs a command on the RAW 0 window.  The 16 bit command is passed in
+;   REG1:REG0.  This routine does not return until the command is complete.  The
+;   caller can therefore read result registers and the like immediately after
+;   this call returns.
+;
+;   The ZeroG module must be previously acquired by the calling task.
+;
+         glbsub  zerog_raw0cmd, regf2
+;
+;   Make sure the RAW 0 done event is cleared.
+;
+         pushreg reg0        ;temp save command low byte
+         loadk8  reg2, h'01' ;HOST_INTR register address
+         loadk8  reg0, 2     ;bit mask for RAW 0 command complete
+         mcall   zerog_put8
+         popreg  reg0        ;restore command low byte
+;
+;   Send the command.
+;
+         loadk8  reg2, h'25' ;RAW0 command register address
+         mcall   zerog_put16 ;write the command to the command register
+;
+;   Wait for the command to complete.  Some commands complete very quickly.
+;   These will be done by the time we execute the SPI sequence to check the bit.
+;   For those cases, it would be a significant hit to call TASK_YIELD even once.
+;   For this reason, we check the command completed bit before calling
+;   TASK_YIELD.
+;
+         pushreg reg0        ;save REG0 so it can be trashed
+         loadk8  reg2, h'01' ;HOST_INTR register address
+raw0_chkd unbank             ;back here to check for command done
+         mcall   zerog_get8  ;read the host interrupt register into REG0
+         btfsc   reg0, 1     ;command not done yet ?
+         jump    raw0_done   ;the command is done
+         gcall   task_yield_save ;let other tasks run a bit
+         jump    raw0_chkd   ;back to check for command done again
+
+raw0_done unbank             ;the command has completed
+         popreg  reg0        ;restore original REG0
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW0OFS
+;
+;   Set the offset of the next transfer into the memory region mapped to RAW 0.
+;   The offset is passed in REG1:REG0.
+;
+         glbsub  zerog_raw0ofs, regf2
+
+         loadk8  reg2, h'27' ;address of RAW 0 offset register
+         mcall   zerog_put16 ;set the offset register to the new value
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW0PUT
+;
+;   Write the byte in REG0 at the current index into the RAW 0 window.  The index
+;   will be advanced by 1.
+;
+         glbsub  zerog_raw0put, regf2
+
+         loadk8  reg2, h'20' ;address of RAW 0 data register
+         mcall   zerog_put8  ;do the write, advances index by 1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW0GET
+;
+;   Read the byte in the RAW 0 window at its current index, then advance the
+;   index by 1.  The byte is returned in REG0.
+;
+         glbsub  zerog_raw0get, regf2
+
+         loadk8  reg2, h'20' ;address of RAW 0 data register
+         mcall   zerog_get8  ;do the read, advances index by 1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW1CMD
+;
+;   Performs a command on the RAW 1 window.  The 16 bit command is passed in
+;   REG1:REG0.  This routine does not return until the command is complete.  The
+;   caller can therefore read result registers and the like immediately after
+;   this call returns.
+;
+;   The ZeroG module must be previously acquired by the calling task.
+;
+         glbsub  zerog_raw1cmd, regf2
+;
+;   Make sure the RAW 0 done event is cleared.
+;
+         pushreg reg0        ;temp save command low byte
+         loadk8  reg2, h'01' ;HOST_INTR register address
+         loadk8  reg0, 4     ;bit mask for RAW 1 command complete
+         mcall   zerog_put8
+         popreg  reg0        ;restore command low byte
+;
+;   Send the command.
+;
+         loadk8  reg2, h'29' ;RAW1 command register address
+         mcall   zerog_put16 ;write the command to the command register
+;
+;   Wait for the command to complete.  Some commands complete very quickly.
+;   These will be done by the time we execute the SPI sequence to check the bit.
+;   For those cases, it would be a significant hit to call TASK_YIELD even once.
+;   For this reason, we check the command completed bit before calling
+;   TASK_YIELD.
+;
+         pushreg reg0        ;save REG0 so it can be trashed
+         loadk8  reg2, h'01' ;HOST_INTR register address
+raw1_chkd unbank             ;back here to check for command done
+         mcall   zerog_get8  ;read the host interrupt register into REG0
+         btfsc   reg0, 2     ;command not done yet ?
+         jump    raw1_done   ;the command is done
+         gcall   task_yield_save ;let other tasks run a bit
+         jump    raw1_chkd   ;back to check for command done again
+
+raw1_done unbank             ;the command has completed
+         popreg  reg0        ;restore original REG0
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW1OFS
+;
+;   Set the offset of the next transfer into the memory region mapped to RAW 1.
+;   The offset is passed in REG1:REG0.
+;
+         glbsub  zerog_raw1ofs, regf2
+
+         loadk8  reg2, h'2B' ;address of RAW 1 offset register
+         mcall   zerog_put16 ;set the offset register to the new value
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW1PUT
+;
+;   Write the byte in REG0 at the current index into the RAW 1 window.  The index
+;   will be advanced by 1.
+;
+         glbsub  zerog_raw1put, regf2
+
+         loadk8  reg2, h'21' ;address of RAW 1 data register
+         mcall   zerog_put8  ;do the write, advances index by 1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ZEROG_RAW1GET
+;
+;   Read the byte in the RAW 1 window at its current index, then advance the
+;   index by 1.  The byte is returned in REG0.
+;
+         glbsub  zerog_raw1get, regf2
+
+         loadk8  reg2, h'21' ;address of RAW 1 data register
+         mcall   zerog_get8  ;do the read, advances index by 1
+
+         leaverest
+
+  /endif                     ;end of MACTYPE = ZeroG

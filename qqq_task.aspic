@@ -1,0 +1,28 @@
+;   Cooperative multi-tasking system.
+;
+;   The following constants are assumed to be defined in the project include
+;   file:
+;
+;     TSKSAVE  -  Or of the REGFn flags to indicate which REGn general registers
+;       are to be preserved per task accross a call to TASK_YIELD.
+;
+;     TSKNSAVE  -  Or of all the REGFn flags for the variables not saved accross
+;       a call to TASK_YIELD.
+;
+;     NTSKSAVE  -  Number of bytes indicated by TSKSAVE that must be saved and
+;       restored by TASK_YIELD.
+;
+;   The standard include file TASK_SETUP.INS.ASPIC can be used to default
+;   TSKSAVE to REG0-REG7 if not defined, then define TSKNSAVE and NTSKSAVE from
+;   TSKSAVE.
+;
+/include "qq2.ins.aspic"
+;
+;   Configuration constants.
+;
+ntasks   equ     4           ;maximum number of tasks supported
+cslev    equ     31          ;maximum possible number of call stack levels
+lbank    equ     1           ;bank for local state
+
+/include "(cog)src/pic/task.ins.aspic"
+         end

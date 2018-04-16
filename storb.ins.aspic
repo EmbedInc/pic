@@ -1,0 +1,26 @@
+;   Subroutine STORB
+;
+;   Store the operand register into a 32 bit value.
+;
+;   FSR is points to the destination value.  The current indirect register bank
+;   must be set for access to the value.  FSR is trashed.
+;
+.storb   code
+         glbsub  storb, noregs
+
+         movf    reg4, w
+         movwf   indf
+
+         incf    fsr
+         movf    reg5, w
+         movwf   indf
+
+         incf    fsr
+         movf    reg6, w
+         movwf   indf
+
+         incf    fsr
+         movf    reg7, w
+         movwf   indf
+
+         leave   noregs

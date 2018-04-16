@@ -1,0 +1,9 @@
+;   USB pipe 0 processing module.  Most of the pipe 0 communication is for
+;   enumeration.
+;
+/include "qq2.ins.aspic"
+
+lbank    equ     1           ;register bank for the local state of this module
+
+/include "(cog)src/pic/usb0.ins.aspic"
+         end

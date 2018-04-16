@@ -1,0 +1,387 @@
+;   ***************************************************************
+;   * Copyright (C) 2015, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Procedural byte read/write interface to the program memory of a PIC 18.
+;
+
+;*******************************************************************************
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+/block
+  /var local ii integer
+
+  /set ii [rnd [log2 prog_erasesz]]
+  /if [<> [exp 2 ii] prog_erasesz] then
+    /show "  Erase block size not a power of 2"
+         error   PROG_ERASESZ
+         end
+    /stop
+    /endif
+  /set ii [shiftl [~ 0] ii]
+  /const ermask integer = ii ;mask for whole erase block address bits
+
+  /set ii [div prog_erasesz prog_writesz]
+  /if [<> [* prog_writesz ii] prog_erasesz] then
+    /show "  Erase block size not multiple of write block size."
+         error   PROG_WRITESZ
+         end
+    /stop
+    /endif
+  /const nwblock integer = ii ;number of write blocks per erase block
+  /endblock
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  0
+
+pgmflags res     1           ;local 1-bit flags
+
+         defram  lbankadr
+
+cadr     res     3           ;prog mem address cache is mapped to
+cache    res     [v prog_erasesz] ;one erase block cached in RAM
+
+#define flg_cache pgmflags, 0 ;data is in the cache, CADR is valid
+#define flg_dirty pgmflags, 1 ;cache data changed from program memory copy
+
+/if debug then
+         global  pgmflags, cadr, cache
+  /endif
+
+
+.pgmem   code
+;*******************************************************************************
+;
+;   Subroutine PGMEM_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+pgmem_init glbsub
+
+         clrf    pgmflags    ;init all local flags to 0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro INTR_OFF_SAVE reg
+;
+;   Turn off interrupts and save the original interrupt state in the register
+;   REG.
+;
+intr_off_save macro reg
+         movff   intcon, reg ;save the current interrupt enable/disable state
+         movlw   h'3F'       ;disable all interrupts
+         andwf   intcon
+         endm
+
+;*******************************************************************************
+;
+;   Macro INTR_REST reg
+;
+;   Restore the interrupt enable/disable state to what it was when the macro
+;   INTR_OFF_SAVE was invoked.  REG is the register the interrupt state was
+;   saved in by INTR_OFF_SAVE.  The current bank must be set for access to REG,
+;   or it must be in the access bank.
+;
+intr_rest macro  reg
+         movf    reg, w      ;get old INTCON contents
+         andlw   h'C0'       ;mask in only the enable bits
+         iorwf   intcon      ;restore original interrupt enable/disable
+         endm
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro ANDWITH val
+//
+//   And W with the low byte of VAL.  VAL must be resolvable by the
+//   preprocesor.  This macro either emits the ANDLW instruction or none at all
+//   when the low byte of VAL is all 1s (FFh).
+//
+/macro andwith
+  /var local ii integer = [and [arg 1] 16#FF]
+  /if [<> ii 16#FF] then
+         andlw   [chars [str "h'" [int ii "fw 2 lz base 16 usin"] "'"]]
+    /endif
+  /endmac
+
+;*******************************************************************************
+;
+;   Subroutine PGMEM_WRITE
+;
+;   Write the byte in REG0 to the program memory address in REG3:REG2:REG1.  The
+;   byte may be cached and is not guaranteed to be physically written to program
+;   memory until PGMEM_FLUSH is called.  Writes that don't change the value of a
+;   byte won't force a physical write, whether PGMEM_FLUSH is called or not.
+;
+;   The address in REG3:REG2:REG1 is incremented by 1.
+;
+pgmem_write glbsub regf4
+;
+;   Determine whether the addressed byte is currently in the cache or not.
+;
+         btfss   flg_cache   ;there is data in the cache ?
+         jump    wr_rdcache  ;no, go read it into the cache
+         ;
+         ;   Check for cache data is for the same erase block the requested byte
+         ;   is in.
+         ;
+         dbankif lbankadr
+         movf    cadr+0, w   ;check low address byte
+         xorwf   reg1, w
+         andwith [v ermask]
+         movwf   reg4
+         movf    cadr+1, w   ;check high address byte
+         xorwf   reg2, w
+         andwith [shiftr ermask 8]
+         iorwf   reg4
+         movf    cadr+2, w   ;check upper address byte
+         xorwf   reg3, w
+         andwith [shiftr ermask 16]
+         iorwf   reg4
+         bz      wr_write    ;addressed byte is already in the cache ?
+
+wr_ncache unbank             ;the cache has data, but not the addressed byte
+         btfss   flg_dirty   ;the cached data has been altered ?
+         jump    wr_rdcache  ;no, OK to overwrite the cache
+
+         mcall   pgmem_flush ;write the cache data back to non-volatile memory
+;
+;   Read the block of non-volatile memory containing the addressed byte into the
+;   cache.
+;
+wr_rdcache unbank
+         ;
+         ;   Set TBLPTR to point to the first program memory byte to read into
+         ;   the cache, and save the cache starting address in CADR.
+         ;
+         dbankif lbankadr
+         movf    reg1, w     ;set low byte
+         andwith [shiftr ermask 0]
+         movwf   cadr+0
+         movwf   tblptrl
+
+         movf    reg2, w     ;set high byte
+         andwith [shiftr ermask 8]
+         movwf   cadr+1
+         movwf   tblptrh
+
+         movf    reg3, w     ;set upper byte
+         andwith [shiftr ermask 16]
+         movwf   cadr+2
+         movwf   tblptru
+
+         lfsr    0, cache    ;init pointer where to write the next byte
+         loadk8  reg4, [v prog_erasesz] ;init number of bytes left to copy
+wr_rdbyte unbank             ;back here to read each new byte into the cache
+         tblrd*+             ;get this byte into TABLAT, advance source pointer
+         movff   tablat, postinc0 ;write the byte into the cache, advance write pointer
+         decfsz  reg4        ;count one less byte left to do
+         jump    wr_rdbyte   ;back to read the next byte into the cache
+
+         bsf     flg_cache   ;indicate there is now valid data in the cache
+;
+;   Write the byte into the cache, but don't set the dirty flag unless the byte
+;   is actually being changed.
+;
+wr_write unbank
+         lfsr    0, cache    ;point to first byte of the cache
+         movf    reg1, w     ;get low byte of address
+         andlw   [~ ermask]  ;make offset into cache
+         addwf   fsr0l       ;point to the byte being addressed
+
+         movf    reg0, w     ;get the new byte value
+         xorwf   indf0, w    ;compare to the existing byte value
+         bz      wr_leave    ;not being changed, nothing more to do ?
+         ;
+         ;   The byte value is being changed.
+         ;
+         movff   reg0, indf0 ;write the new byte value into the cache
+         bsf     flg_dirty   ;cache has been changed from prog mem copy
+
+wr_leave unbank              ;common exit point
+         incf    reg1        ;increment the address
+         movlw   0
+         addwfc  reg2
+         addwfc  reg3
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine PGMEM_READ
+;
+;   Read the byte at program memory address REG3:REG2:REG1 into REG0.  This
+;   reads the latest data written by PGMEM_WRITE, whether it has been physically
+;   written to program memory or not.
+;
+;   The address in REG3:REG2:REG1 is incremented by 1.
+;
+pgmem_read glbsub
+;
+;   Check for whether the requested byte is in the cache or not.
+;
+         btfss   flg_cache   ;there is data in the cache ?
+         jump    rd_ncache   ;no
+         ;
+         ;   Check for cache data is for the same erase block the requested byte
+         ;   is in.
+         ;
+         dbankif lbankadr
+         movf    cadr+0, w   ;check low address byte
+         xorwf   reg1, w
+         andwith [shiftr ermask 0]
+         movwf   reg0
+         movf    cadr+1, w   ;check high address byte
+         xorwf   reg2, w
+         andwith [shiftr ermask 8]
+         iorwf   reg0
+         movf    cadr+2, w   ;check upper address byte
+         xorwf   reg3, w
+         andwith [shiftr ermask 16]
+         iorwf   reg0
+         bnz     rd_ncache   ;the cache is not covering the addressed byte ?
+;
+;   Read the requested byte from the cache.
+;
+         lfsr    0, cache    ;set pointer to the start of the cache
+         movf    reg1, w     ;make the offset into the cache
+         andlw   low [~ ermask]
+         movff   plusw0, reg0 ;fetch the byte and return it in REG0
+         jump    rd_leave
+;
+;   The requested byte is not in our cache.  Go read it directly from the
+;   program memory.
+;
+rd_ncache unbank
+         movff   reg1, tblptrl ;set pointer to the addressed byte
+         movff   reg2, tblptrh
+         movff   reg3, tblptru
+         tblrd*              ;read the addressed byte into TABLAT
+         movff   tablat, reg0 ;return the byte in REG0
+
+rd_leave unbank              ;common exit point
+         incf    reg1        ;increment the address
+         movlw   0
+         addwfc  reg2
+         addwfc  reg3
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine PGMEM_FLUSH
+;
+;   Force any cached data to be physically written to program memory.
+;
+pgmem_flush glbsub regf0 | regf1 | regf2
+         btfss   flg_cache   ;there is valid data in the cache ?
+         jump    fl_leave    ;no, nothing to do
+         btfss   flg_dirty   ;changes have been made to that data ?
+         jump    fl_leave    ;no, nothing do to
+;
+;   Erase the block of program memory covered by the cache.
+;
+         movff   cadr+0, tblptrl ;point TBLPTR to the start of the block
+         movff   cadr+1, tblptrh
+         movff   cadr+2, tblptru
+
+         setreg  b'10010100', eecon1
+                 ; 1-------  select flash memory, not data EEPROM
+                 ; -0------  normal address space, not configuration space
+                 ; --X-----  unused
+                 ; ---1----  select flash erase function
+                 ; ----0---  clear any previous write error condition
+                 ; -----1--  enable writing and erasing
+                 ; ------0-  don't try to start write now
+                 ; -------0  don't start read now
+
+         intr_off_save reg0  ;temp disable interrupts
+         movlw   h'55'       ;perform the unlock sequence
+         movwf   eecon2
+         movlw   h'AA'
+         movwf   eecon2
+         bsf     eecon1, wr  ;start the erase
+         nop
+         nop
+         intr_rest reg0      ;restore original interrupt on/off state
+;
+;   Write the cache data to the newly erased program memory block.  TBLPTR is
+;   pointing to where to write the first byte.
+;
+;   Register usage in this section:
+;
+;     REG0  -  Saved interrupt enable/disable state.
+;
+;     REG1  -  Number of write blocks left to do.
+;
+;     REG2  -  Number of bytes left in the current write block.
+;
+         tblrd*-             ;init destination pointer to last byte written
+         lfsr    0, cache    ;init source pointer to the first byte
+         loadk8  reg1, [v nwblock] ;init number of write blocks left to do
+fl_wblock unbank             ;back here each new write block
+
+         loadk8  reg2, [v prog_writesz] ;init number of bytes left in this write block
+fl_wbyte unbank              ;back here each new byte to write
+         movff   postinc0, tablat ;fetch the data byte, update source pointer
+         tblwt+*             ;advance write pointer, write the data byte
+         decfsz  reg2        ;count one less byte left in this write block
+         jump    fl_wbyte    ;back to write next byte
+         ;
+         ;   Do the write for this write block.  TBLPTR is pointing to the last
+         ;   byte of the block.
+         ;
+         setreg  b'10000100', eecon1
+                 ; 1-------  select flash memory, not data EEPROM
+                 ; -0------  normal address space, not configuration space
+                 ; --X-----  unused
+                 ; ---0----  select write, not erase
+                 ; ----0---  clear any previous write error condition
+                 ; -----1--  enable writing and erasing
+                 ; ------0-  don't try to start write now
+                 ; -------0  don't start read now
+
+         intr_off_save reg0  ;temp disable interrupts
+         movlw   h'55'       ;perform the unlock sequence
+         movwf   eecon2
+         movlw   h'AA'
+         movwf   eecon2
+         bsf     eecon1, wr  ;start the write
+         nop
+         nop
+         intr_rest reg0      ;restore original interrupt on/off state
+
+         decfsz  reg1        ;count one less write block left to do
+         jump    fl_wblock   ;back to do the next write block
+
+         bcf     flg_dirty   ;indicate no pending changes in the cache
+
+fl_leave unbank              ;common exit point
+         leaverest
+
+         end

@@ -1,0 +1,47 @@
+;   Subroutine DIVSQA
+;
+;   Perform an signed integer divide.  REGA is divided by REGB, and the
+;   quotient written to REGA.
+;
+         extern  divu        ;low level unsigned integer divide
+         extern  nega        ;negate REGA
+         extern  negb        ;negate REGB
+
+.divsqa  code
+         glbsub  divsqa, regfb | regf8 | regff
+;
+;   Save the sign of the result in the high bit of REG8.
+;
+         movf    rega+3, w   ;get byte with sign bit of numerator
+         xorwf   regb+3, w   ;make quotient sign in high bit
+         movwf   reg8
+;
+;   Set REGA to its absolute value.
+;
+         btfss   rega+3, 7   ;REGA is negative ?
+         goto    rega_pos    ;REGA is already positive or zero
+         gcall   nega        ;negate REGA to make it positive
+rega_pos
+;
+;   Set REGB to its absolute value.
+;
+         btfss   regb+3, 7   ;REGB is negative ?
+         goto    regb_pos    ;REGB is already positive or zero
+         gcall   negb        ;negate REGB to make it positive
+regb_pos
+;
+;   Do the divide.  The control flags are set so that the quotient is
+;   returned in REGA.
+;
+         clrf    flags       ;init all flags to OFF
+         bsf     flags, flagb_quoa ;indicate to return quotient in REGA
+         gcall   divu        ;call low level unsigned divide routine
+;
+;   Flip the sign of the result if it is supposed to be negative.
+;
+         btfss   reg8, 7     ;need to negate the result ?
+         goto    res_pos     ;no, leave it as is
+         gcall   nega        ;negate REGA to make result with final sign
+res_pos
+
+         leaverest

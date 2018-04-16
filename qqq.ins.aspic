@@ -1,0 +1,73 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Include file for the QQ2 PIC application.
+;
+;   *** INSERT DESCRIPTION OF THE APPLICATION HERE ***
+;
+/const   debug_icd bool = false
+/const   debug   bool = false
+/include "qq2lib.ins.aspic"
+;
+;   Application configuration parameters
+;
+gbank    equ     0           ;direct register bank for global variables
+; gbankadr equ     0           ;adr within globals bank (access bank on PIC18)
+
+tsksave  set     0           ;build the mask of registers for TASK_YIELD to save
+tsksave  set     tsksave | regf0
+tsksave  set     tsksave | regf1
+tsksave  set     tsksave | regf2
+tsksave  set     tsksave | regf3
+tsksave  set     tsksave | regf4
+tsksave  set     tsksave | regf5
+tsksave  set     tsksave | regf6
+tsksave  set     tsksave | regf7
+;
+;   Response opcodes.  These are the opcodes of packets sent to the main control
+;   processor.
+;
+rsp_nop  equ     0           ;NOP
+rsp_pong equ     1           ;PONG - sent in response to PING command
+rsp_fwinfo equ   2           ;FWINFO - firmware type, version, sequence
+;
+;   Derived constants.
+;
+/include "(cog)src/pic/task_setup.ins.aspic" ;derive additional tasking setup
+
+gbankadr equ     bankadr(gbank) ;adr within globals bank
+
+;**********
+;
+;   Global flag bits.
+;
+/flag    sin                 ;a serial line input byte is available
+/flag    sout                ;serial output can accept another byte
+/flag    uartcmd             ;command processor has UART output locked
+
+;**********
+;
+;   I/O pin declarations.
+;
+;   The ports are initialized in the PORT module according to the I/O
+;   bit definitions here.
+;
+/inbit   ex1     porta 0     ;example input bit, port A bit 0
+/outbit  ex2     porta 1 0   ;example output bit, port A bit 1, initial value = 0
+
+/inbit   button  portb 0 pup ;user button example, internal pullup enabled
+/inbit   tx      portc 6     ;UART output, must be declared as input
+/inbit   rx      portc 7     ;UART input, must be declared as input

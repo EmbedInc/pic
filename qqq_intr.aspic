@@ -1,0 +1,221 @@
+;   ***************************************************************
+;   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   ****************************************************************
+;   *                    ------ WARNING ------                     *
+;   * THIS TEMPLATE IS FOR THE ORIGINAL PIC16 FAMILY.  USE         *
+;   * QQQ_INTR16E.ASPIC AS A TEMPLATE FOR THE ENHANCED 16F1xxx     *
+;   * PICs, and QQQ_INTR18.ASPIC FOR THE PIC18 FAMILY.             *
+;   ****************************************************************
+;
+;   Interrupt service and related routines.
+;
+/include "qq2.ins.aspic"
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+save_fsr equ     true        ;indicate whether ISR must save/restore FSR
+niregs   equ     0           ;num of IREGn private interrupt routine registers
+
+;**********
+;
+;   Derived constants.
+;
+
+
+;*******************************************************************************
+;
+;   Global state.
+;
+;   The following global state is in the normal register bank for global
+;   state.  The bank is GBANK, and GBANKADR is an address guaranteed to
+;   be within this bank.
+;
+         defram  gbankadr
+
+;*******************************************************************************
+;
+;   Local state.  This is always in the same register bank as the global
+;   state.
+;
+
+;
+;   The following state is private to the interrupt service routine, and
+;   must always be in bank 0.
+;
+         defram  0
+
+status_save res  1           ;saved copy of STATUS, nibbles swapped
+  if save_fsr
+fsr_save res     1           ;saved copy of FSR (if FSR save enabled)
+    endif
+  if ncodepages > 1
+pclath_save res  1           ;saved copy of PCLATH (if multiple code pages)
+    endif
+;
+;   Define the IREGn general register for use during an interrupt.  The
+;   general registers REGn must not be altered during an interrupt without
+;   being explicitly saved/restored, which usually makes them unusable.
+;   The IREGn registers are used instead, although these are in bank 0
+;   instead of global memory.  The number of IREGn registers is defined
+;   by the constant NIREGS above.  The first is IREG0, then IREG1, etc.
+;
+ii       set     0
+  while ii < niregs          ;once for each IREG register to define
+ireg#v(ii) res   1           ;define this IREGn register
+         global  ireg#v(ii)  ;make is global for interrupt code in other modules
+ii       set     ii + 1      ;advance to next IREG number
+    endw                     ;back to define next IREG
+;
+;   This state is private to the interrupt service routine and must always
+;   be accessible regardless of the current direct register bank setting.
+;
+         udata_shr
+w_save   res     1           ;saved W during interrupt, mapped to all banks
+
+
+.intr    code
+;*******************************************************************************
+;
+;   Subroutine INTR_INIT
+;
+;   Initialize the interrupt system and other state managed by this module.
+;
+         glbsub  intr_init, noregs
+;
+;   Initialize global state.
+;
+
+;
+;   Initialize local state.
+;
+
+;
+;   Enable interrupts.  Any interrupts used have already been enabled
+;   individually, but interrupts are still disabled globally.
+;
+  ifdef pir1
+         dbankif pir1
+         clrf    pir1        ;clear any existing peripheral 1 intr condition
+    endif
+  ifdef pir2
+         dbankif pir2
+         clrf    pir2        ;clear any existing peripheral 2 intr condition
+    endif
+
+  ifdef peie
+         bsf     intcon, peie ;enable peripheral interrupts
+    endif
+         bsf     intcon, gie ;globally enable interrupts
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Interrupt service routine.
+;
+;   The processor executes a call to location 4 on an interrupt, and in
+;   addition globally disables interrupts.  These are re-enabled at the end
+;   of the ISR by the RETFIE instruction.
+;
+;   Note that subroutine calls must be minimized or avoided in the ISR.
+;   Since an interrupt can come at any time in the main code, any additional
+;   call stack locations used here are not available anywhere else.
+;
+.intr_svc code   4           ;start at interrupt vector location
+         movwf   w_save      ;save W
+         swapf   status, w   ;make copy of status with nibbles swapped
+         clrf    status      ;select direct and indirect register banks 0
+         dbankis 0
+         ibankis 0
+         movwf   status_save ;save old STATUS value with nibbles swapped
+
+  if save_fsr                ;FSR needs to be saved ?
+         movf    fsr, w      ;save FSR
+         movwf   fsr_save
+    endif
+
+  if ncodepages > 1          ;multiple code pages may be in use ?
+         movf    pclath, w   ;save PCLATH
+         movwf   pclath_save
+         clrf    pclath      ;now definitely on code page 0
+    endif
+;
+;   W, STATUS, FSR (if SAVE_FSR set), and PCLATH (if multiple code pages)
+;   have been saved.  Direct and indirect register banks 0 are selected, and
+;   the bank assumptions have been set accordingly.  Program memory page 0
+;   is selected.
+;
+
+;
+;   Check for UART receive interrupt.
+;
+         extern  uart_intr_recv ;receive interrupt routine in UART module
+
+         dbankif pir1
+         dbankif rcif_reg
+         btfss   rcif_flag   ;interrupt condition asserted ?
+         jump    no_uart_recv ;no
+         gjump   uart_intr_recv ;handle interrupt, will go to INTR_RET_UART on done
+no_uart_recv dbankis rcif_reg
+;
+;   Check for UART transmitter ready interrupt.
+;
+         extern  uart_intr_xmit ;transmit interrupt routine in UART module
+
+         dbankif txie_reg
+         btfss   txie_flag   ;this interrupt enabled ?
+         jump    no_uart_xmit ;no
+         dbankif txif_reg
+         btfss   txif_flag   ;interrupt condition asserted ?
+         jump    no_uart_xmit ;no
+         gjump   uart_intr_xmit ;handle interrupt, will go to INTR_RET_UART on done
+no_uart_xmit unbank
+
+         gjump   0           ;unexpected interrupt, should never happen
+
+;********************
+;
+;   Restore state to when the interrupt occurred and return from interrupt.
+;
+         glbent  intr_ret    ;common interrupt exit point
+         glbent  intr_ret_uart ;UART interrupts return here when done
+
+         clrf    status      ;register bank settings are now 0
+         dbankis 0
+         ibankis 0
+  if ncodepages > 1          ;multiple code pages may be in use ?
+         movf    pclath_save, w ;restore PCLATH
+         movwf   pclath
+    endif
+
+  if save_fsr                ;FSR needs to be restored ?
+         movf    fsr_save, w ;restore FSR
+         movwf   fsr
+    endif
+
+         swapf   status_save, w ;get old STATUS without changing status bits
+         movwf   status      ;restore STATUS, register banks now unknown
+         swapf   w_save      ;swap nibbles in saved copy of W
+         swapf   w_save, w   ;restore original W
+
+         retfie              ;return from interrupt, re-enable interrupts
+
+         end

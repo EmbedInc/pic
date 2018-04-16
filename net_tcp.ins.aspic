@@ -1,0 +1,2745 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Transmission Control Protocol (TCP) layer of the network stack.  TCP is
+;   defined by RFC 793, and is layered onto IP.  The IP protocol ID for TCP is
+;   6.
+;
+;   Below is a overview of externally exported subroutines from this module
+;   intended for normal use by applications.  This section is only meant to give
+;   a quick idea of what is available.  The details are described in the
+;   comments at the beginning of each subroutine.
+;
+;     TCP_OPEN_SERVER
+;
+;       Set up TCP port as a server awating a connection from a client.
+;
+;     TCP_OPEN_CLIENT
+;
+;       Establish TCP connection to remote server.
+;
+;     TCP_OPEN_CLIENT_WAIT
+;
+;       Try to connect to remote server.  Returns when connection established,
+;       server specifically rejected it, or on a hard error.
+;
+;     TCP_STATE
+;
+;       Get information about the current state of a TCP connection.
+;
+;     TCP_OUTSIZE
+;
+;       Set the maximum bytes payload size of future output packets.
+;
+;     TCP_PUT
+;
+;       Send a data byte.
+;
+;     TCP_PUT_WAIT
+;
+;       Send data byte, waits until connection ready to accept it.
+;
+;     TCP_FLUSH
+;
+;       Transmit any buffered data now.
+;
+;     TCP_GET
+;
+;       Get the next input byte if one is available.
+;
+;     TCP_GET_WAIT
+;
+;       Get the next input byte when it is available.
+;
+;     TCP_CLOSE
+;
+;       Close a TCP connection.
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;     I/O pins:
+;
+;     Global flags:
+;
+;     Preprocessor symbols not defined in the NETWORK.INS.ASPIC include file:
+;
+         extern  our_ip      ;our IP address, high to low byte order
+         extern_flags        ;declare global flag bits EXTERN
+
+/var new ii integer          ;scratch preprocessor integer
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   nunits  integer = n_tcpunits ;max simultaneous TCP connections
+/const   tretry  real = 2.0  ;seconds before first resend attempt
+/const   dretry  real = 1.0  ;additional seconds each new resend attempt
+/const   nretry  integer = 3 ;number of resend attempts before giving up
+/const   ticksec real = 0.100 ;tick period, seconds
+life_def equ     [v tcp_inactive_sec] ;default inactivity lifetime, seconds
+dmax_def equ     [v tcp_xmitsize] ;default number of data bytes in data transmit packet
+tcp_hsize equ    20          ;TCP header size in packets we send
+tcp_prot equ     6           ;IP protocol ID for TCP
+lbank    equ     [v lbank_tcp] ;register bank for the local state of this module
+;
+;   Constants that indicate external values that are not choices in this module.
+;
+         ;
+         ;   TCP packet flag bits.  The constants here are the bit numbers of
+         ;   each flag within the flags byte of the TCP header.  The LSB is 0
+         ;   and the MSB 7.
+         ;
+tflg_fin equ     0           ;FIN flag bit number
+tflg_syn equ     1           ;SYN flag bit number
+tflg_rst equ     2           ;RST flag bit number
+tflg_psh equ     3           ;PSH flag bit number
+tflg_ack equ     4           ;ACK flag bit number
+tflg_urg equ     5           ;URG flag bit number
+;
+;   Derived constants.
+;
+nunits   equ     [v nunits]
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+tktry    equ     [rnd [/ tretry ticksec]] ;ticks timeout for first send try
+tkretry  equ     [rnd [/ dretry ticksec]] ;additional ticks each retry
+
+/if [< nunits 1] then
+  /show "  No TCP I/O units defined, at least one required."
+         error   NUNITS
+         end
+  /stop
+  /endif
+/if [> tcp_inactive_sec 255] then
+  /show "  Default TCP connection inactivity timeout too long, must be 255"
+  /show "    seconds or less, is " tcp_inactive_sec " seconds.  This value"
+  /show "    is set with constant TCP_INACTIVE_SEC in the NETWORK include file."
+         error   TCP_INACTIVE_SEC
+         end
+  /stop
+  /endif
+
+/show "  Configured for " nunits " simultaneous TCP connections."
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+lastport res     2           ;last local port number assigned
+cnt1s    res     1           ;100mS ticks until next 1 second tick
+;
+;   Received packet TCP header information.
+;
+h_portr  res     2           ;remote port number
+h_portl  res     2           ;local port number
+h_seq    res     4           ;sequence number
+h_ack    res     4           ;ACK value
+h_hlen   res     1           ;header length in bytes, always multiple of 4
+h_ndat   res     2           ;number of TCP data bytes
+h_flags  res     1           ;flag bits from byte at offset 13
+h_window res     2           ;window value
+
+/if debug then
+         global  h_portr, h_portl, h_seq, h_ack
+         global  h_hlen, h_ndat, h_flags, h_window
+  /endif
+;
+;   TCP connection descriptors.  Each descriptor keeps the current state of one
+;   TCP connection.  The number of descriptors is set by the constant NUNITS
+;   earlier in this module.  This is the maximum number of TCP connections that
+;   can be open at a time.  The descriptors are sequentially stored in a array,
+;   and the 0-N array indexes are the TCP unit numbers exported to clients of
+;   this module.
+;
+;   The TCP connection descriptors are always accessed via pointers, so their
+;   bank does not need to be known at assembly time.  They are put in their own
+;   section so the linker can place them anywhere it sees fit.
+;
+;   Each individual field is named TUn_xxx, where N is the 0-N TCP unit number
+;   and XXX the specific name of the field.  The constants TU_xxx are the
+;   offsets of the fields from the start of the descriptor.
+;
+.tcpunits udata              ;separate section for the TCP connection descriptors
+tcpunits res     0           ;start address of the array of TCP conn descriptors
+
+/set ii 0
+/block
+
+tu[v ii]_flags res 1         ;individual flags, use TUF_xxx constants below
+tu[v ii]_portl res 2         ;local port number
+tu[v ii]_portr res 2         ;remote port number
+tu[v ii]_ipr res 4           ;remote IP address
+tu[v ii]_rbuf res 2          ;address of receive buffer
+tu[v ii]_rbsz res 1          ;number of data bytes recv buffer can hold
+tu[v ii]_bput res 1          ;RBUF index to write next byte to
+tu[v ii]_bget res 1          ;RBUF index to get next byte from
+tu[v ii]_ack res 4           ;next sequence expected to receive (ACK value)
+tu[v ii]_dmax res 2          ;max data bytes transmit data packets configured for
+tu[v ii]_seqst res 4         ;sequence number of current packet start
+tu[v ii]_seqnx res 4         ;sequence number for next packet start
+tu[v ii]_ipx res 1           ;IP transmit packet ID
+tu[v ii]_xsz res 2           ;data transmit packet TCP payload size
+tu[v ii]_len res 2           ;number of TCP data bytes in current xmit packet
+tu[v ii]_ntry res 1          ;number of times transmit packet has been sent
+tu[v ii]_cksum res 2         ;TCP checksum except for header words
+tu[v ii]_rtick res 1         ;100mS ticks until retry current transmit packet
+tu[v ii]_mlife res 1         ;maximum inactivity lifetime
+tu[v ii]_life res 1          ;TCP unit lifetime remaining, seconds
+
+  /if debug then
+         global  tu[v ii]_flags, tu[v ii]_portl, tu[v ii]_portr
+         global  tu[v ii]_ipr, tu[v ii]_rbuf, tu[v ii]_rbsz
+         global  tu[v ii]_bput, tu[v ii]_bget, tu[v ii]_ack
+         global  tu[v ii]_dmax, tu[v ii]_seqst, tu[v ii]_seqnx
+         global  tu[v ii]_ipx, tu[v ii]_xsz, tu[v ii]_len
+         global  tu[v ii]_ntry, tu[v ii]_cksum, tu[v ii]_rtick
+         global  tu[v ii]_mlife, tu[v ii]_life
+    /endif
+
+
+  /if [= ii 0] then
+sz_tunit equ     $-tcpunits  ;make size of one TCP connection descriptor
+    /endif
+  /set ii [+ ii 1]
+  /if [< ii nunits] then
+    /repeat
+    /endif
+  /endblock
+
+;        messg   SZ_TUNIT = #v(sz_tunit)
+  if (nunits * sz_tunit) > 256
+         error   NUNITS too big
+    endif
+         ;
+         ;   Flag bits in the TU_FLAGS field.  Each TUFn_xxx symbol is the bit
+         ;   number for flag XXX within byte N of TU_FLAGS.  Therefore the
+         ;   TUF_xxx symbols are bit numbers within TU_FLAGS+0 and TUF1_xxx
+         ;   within TU_FLAGS+1.
+         ;
+tuf_inuse equ    0           ;descriptor is in use
+tuf_listen equ   1           ;server waiting for connection request
+tuf_syn  equ     2           ;SYN sent, awaiting SYN ACK
+tuf_xmit equ     3           ;a transmit packet is open, may contain payload bytes
+tuf_uclos equ    4           ;user has closed the connection
+tuf_fin  equ     5           ;FIN sent
+tuf_cclos equ    6           ;the connection is closed, user doesn't know yet
+tuf_sending equ  7           ;in process of sending packet
+         ;
+         ;   Symbols for the offsets of each field from the start of the
+         ;   descriptor.
+         ;
+tu_flags equ     tu0_flags - tcpunits
+tu_portl equ     tu0_portl - tcpunits
+tu_portr equ     tu0_portr - tcpunits
+tu_ipr   equ     tu0_ipr - tcpunits
+tu_rbuf  equ     tu0_rbuf - tcpunits
+tu_rbsz  equ     tu0_rbsz - tcpunits
+tu_bput  equ     tu0_bput - tcpunits
+tu_bget  equ     tu0_bget - tcpunits
+tu_ack   equ     tu0_ack - tcpunits
+tu_dmax  equ     tu0_dmax - tcpunits
+tu_seqst equ     tu0_seqst - tcpunits
+tu_seqnx equ     tu0_seqnx - tcpunits
+tu_ipx   equ     tu0_ipx - tcpunits
+tu_xsz   equ     tu0_xsz - tcpunits
+tu_len   equ     tu0_len - tcpunits
+tu_ntry  equ     tu0_ntry - tcpunits
+tu_cksum equ     tu0_cksum - tcpunits
+tu_rtick equ     tu0_rtick - tcpunits
+tu_mlife equ     tu0_mlife - tcpunits
+tu_life  equ     tu0_life - tcpunits
+
+
+.tcp     code
+
+;*******************************************************************************
+;
+;   Subroutine NET_TCP_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  net_tcp_init, regf0
+
+         lfsr    0, tcpunits ;init pointer to first byte to clear
+         loadk8  reg0, nunits * sz_tunit ;number of bytes to clear
+ini_loop unbank
+         clrf    postinc0    ;clear this TCP connection descriptor byte
+         decfsz  reg0
+         jump    ini_loop
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro POINT0 unitvar, ofs
+;
+;   Point FSR0 to offset OFS into the TCP unit indicated by the variable
+;   UNITVAR.  No checking is done.  Results are undefined when UNITVAR does not
+;   contain a valid TCP unit number.  UNITVAR must be directly accessible with
+;   the current bank settings, which are not altered.
+;
+point0   macro   unitvar, ofs
+         lfsr    0, tcpunits + (ofs) ;point to selected field in unit 0
+         movf    unitvar, w  ;get the 0-N unit number
+         mullw   sz_tunit    ;make offset for selected unit in PRODH:PRODL
+         movf    prodl, w    ;add the offset into the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine CKSUM
+;
+;   Update the TCP checksum in the CKSUM field to the word in REG1:REG0.  REG7
+;   must contain the TCP unit number.
+;
+;   FSR0 is preserved.
+;
+         locsub  cksum, noregs
+         pushreg fsr0l       ;save original FSR0 value
+         pushreg fsr0h
+
+         point0  reg7, tu_cksum ;point FSR0 to the CKSUM field of the TCP unit
+
+         movf    reg0, w     ;add the new 16 bit word into the checksum
+         addwf   postinc0
+         movf    reg1, w
+         addwfc  postdec0
+         movlw   0           ;wrap the carry back into the LSB
+         addwfc  postinc0
+         addwfc  postdec0
+
+         popreg  fsr0h       ;restore the original FSR0 value
+         popreg  fsr0l
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine CKSUM_LOCAL
+;
+;   Update the local checksum in REG3:REG2 with the word in REG1:REG0.
+;
+         locsub  cksum_local, noregs
+
+         movf    reg0, w     ;add the new word into the checksum
+         addwf   reg2
+         movf    reg1, w
+         addwfc  reg3
+         movlw   0           ;wrap the carry back into the low end
+         addwfc  reg2
+         addwfc  reg3
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine WRITE_WORD
+;
+;   Write the 16 bit word in REG1:REG0 to the IP transmit packet identified by
+;   REG8.  The checksum in REG3:REG2 is updated to include the new word.
+;
+;   FSR0 is preserved.
+;
+         locsub  write_word, noregs
+
+         mcall   cksum_local ;update the checksum in REG3:REG2
+
+         pushreg fsr0l       ;temp save FSR0
+         pushreg fsr0h
+
+         pushreg reg0        ;temp save low byte on the stack
+         movff   reg1, reg0
+         gcall   ip_xmit_write ;write the high byte
+         popreg  reg0        ;restore low data byte into REG0
+         gcall   ip_xmit_write ;write the low byte
+
+         popreg  fsr0h       ;restore FSR0
+         popreg  fsr0l
+         leavecheck          ;let other tasks run if needed, return to caller
+
+;*******************************************************************************
+;
+;   Local subroutine XMIT_CLOSE
+;
+;   Close the IP transmit packet associated with a TCP unit, if any.  REG8
+;   contains the TCP unit number.   FSR0 is preserved.
+;
+         locsub  xmit_close, regf8
+         pushreg fsr0l       ;save FSR0
+         pushreg fsr0h
+
+         point0  reg8, tu_flags ;point to the FLAGS field in the TCP unit
+         btfss   indf0, tuf_xmit ;IP transmit packet is open ?
+         jump    xmc_leave   ;no, nothing to do
+
+         bcf     indf0, tuf_xmit ;indicate no packet open anymore
+         addfsr0 tu_ipx - tu_flags ;point to IPX field
+         movff   indf0, reg8 ;get IP transmit packet ID
+         gcall   ip_xmit_close ;close the IP transmit packet
+
+xmc_leave unbank             ;common exit point
+         popreg  fsr0h       ;restore FSR0
+         popreg  fsr0l
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine SEND_PACKET
+;
+;   Send a packet to the other end of the TCP connection.  REG8 indicates the
+;   TCP unit number.  REG0 contains the TCP flags to assert.  If the packet
+;   contains data bytes, then the PSH flag is always asserted whether it is
+;   passed in REG0 or not.
+;
+;   If the TCP unit XMIT flag is set:
+;
+;      This means a IP transmit packet is already open, and may contain TCP
+;      data bytes.  LEN must be set to the number of TCP data bytes in the
+;      packet, and CKSUM their checksum.  NTRY must be the number of times the
+;      packet has already been sent, and will be incremented by 1.
+;
+;   If the TCP unit XMIT flag is not set:
+;
+;      A new IP transmit packet will be opened and sent.
+;
+;   If the sent packet requires a different ACK value from the other end
+;   (contains data bytes, SYN flag, or FIN flag), then the IP transmit packet
+;   will be left open and the associated open packet state in the TCP unit will
+;   either be initialized or updated.
+;
+;   If the packet does not change the expected ACK value, then the IP transmit
+;   buffer is released and there will be no open transmit packet for this TCP
+;   unit (XMIT flag not set).
+;
+;   The TCP header is always recomputed and rewritten since some values in it
+;   can change between retransmissions.
+;
+;   The FLAGB_ERR bit in FLAGS will be cleared on success and set on failure.
+;
+         locsub  send_packet, regf0 | regf1 | regf2 | regf3 | regf6 | regf7
+
+         movff   reg0, reg6  ;save TCP flag bits in REG6
+         movff   reg8, reg7  ;save TCP unit number in REG7
+         mcall   send_lock   ;lock sending from this unit, point to FLAGS field
+
+         btfsc   indf0, tuf_xmit ;no IP transmit packet already open ?
+         jump    sp_open     ;IP transmit packet is already open
+;
+;   Open a new IP transmit packet and initialize the TCP unit state accordingly.
+;
+         loadk16 reg0, 0     ;TCP data bytes size required in new packet
+         mcall   open_out    ;open a new IP transmit packet for this unit
+         point0  reg7, tu_flags
+         btfss   indf0, tuf_xmit ;packet was opened successfully ?
+         jump    sp_abort    ;no, abort
+;
+;   The IP packet is open, whether it was already open or just opened.  FSR0 is
+;   pointing to the start of the FLAGS field in the TCP unit.
+;
+sp_open  unbank
+;
+;   Set up for writing the TCP header, which is the first 20 data bytes of the
+;   IP packet.  REG3:REG2 will be set to the TCP checksum of the data bytes and
+;   the pseudo-header.  The CKSUM field contains the checksum of the data bytes
+;   and the pseudo-header except the TCP length field.
+;
+         addfsr0 tu_ipx - tu_flags ;point to IPX field in TCP unit
+         movff   postinc0, reg8 ;get IP packet ID, required by the IP calls
+
+         addfsr0 tu_len - (tu_ipx + 1) ;point to LEN field
+         movf    postinc0, w
+         iorwf   postdec0, w
+         skip_z              ;this packet has no data bytes ?
+         bsf     reg6, tflg_psh ;has data bytes, force the PSH flag on
+         movlw   low tcp_hsize ;make the full TCP length (header + data) in REG1:REG0
+         addwf   postinc0, w
+         movwf   reg0
+         movlw   high tcp_hsize
+         addwfc  postinc0, w
+         movwf   reg1
+
+         addfsr0 tu_cksum - (tu_len + 2) ;point to CKSUM field
+         movff   postinc0, reg2 ;set REG3:REG2 to TCP data bytes checksum
+         movff   postinc0, reg3
+         mcall   cksum_local ;add TCP length word of pseudo-header into REG3:REG2 checksum
+
+         loadk16 reg0, 0     ;set write offset to start of IP packet payload
+         gcall   ip_xmit_ofs
+;
+;   Write the TCP header.  Register usage:
+;
+;     REG0  -  Available.
+;
+;     REG1  -  Available.
+;
+;     REG3:REG2  -  TCP checksum.  Currently is the checksum of all the data
+;       bytes and the pseudo header.
+;
+;     REG6  -  TCP flags, from caller.
+;
+;     REG7  -  TCP unit number.
+;
+;     REG8  -  IP transmit packet ID.
+;
+;   The IP transmit packet write index is set to the start of the TCP header.
+;
+         point0  reg7, tu_portl ;source port number
+         movff   postinc0, reg0
+         movff   postinc0, reg1
+         mcall   write_word
+
+         addfsr0 tu_portr - (tu_portl + 2) ;destination port number
+         movff   postinc0, reg0
+         movff   postinc0, reg1
+         mcall   write_word
+
+         addfsr0 (tu_seqst + 3) - (tu_portr + 2) ;sequence number at start of this packet
+         movff   postdec0, reg1
+         movff   postdec0, reg0
+         mcall   write_word  ;write high word
+         movff   postdec0, reg1
+         movff   postdec0, reg0
+         mcall   write_word  ;write low word
+
+         addfsr0 (tu_ack + 3) - (tu_seqst - 1) ;ACK value
+         movff   postdec0, reg1
+         movff   postdec0, reg0
+         mcall   write_word  ;write high word
+         movff   postdec0, reg1
+         movff   postdec0, reg0
+         mcall   write_word  ;write low word
+
+         loadk8  reg1, 5 << 4 ;data offset field
+         movff   reg6, reg0  ;flag bits
+         mcall   write_word
+
+         addfsr0 tu_rbsz - (tu_ack - 1) ;point to RBSZ field
+         movff   indf0, reg0 ;get receive buffer capacity into REG1:REG0
+         clrf    reg1
+         mcall   write_word  ;write window size
+
+         comf    reg3, w
+         movwf   reg0
+         gcall   ip_xmit_write ;checksum high byte
+         comf    reg2, w
+         movwf   reg0
+         gcall   ip_xmit_write ;checksum low byte
+
+         clrf    reg0, 0
+         gcall   ip_xmit_write ;urgent pointer, not used
+         gcall   ip_xmit_write
+;
+;   Send the packet.
+;
+         gcall   ip_xmit_send ;transmit the IP packet
+
+         point0  reg7, tu_mlife ;point to MLIFE field
+         movff   postinc0, reg3 ;get maximum inactivity lifetime
+
+         addfsr0 tu_life - (tu_mlife + 1) ;point to LIFE field
+         movff   reg3, indf0 ;reset remaining inactivity lifetime to maximum
+;
+;   Determine whether to close this IP packet or not.  The packet is closed if
+;   we won't need to retransmit it depending on whether the appropriate ACK from
+;   the other side is received.  The other side only needs to send a ACK if this
+;   packet incremented our sequence number, which is the other side's ACK
+;   number.  Our sequence number is incremented by one for each data byte, and
+;   for the SYN and FIN flags.
+;
+;   Current register contents:
+;
+;     REG0  -  Available.
+;
+;     REG1  -  Available.
+;
+;     REG2  -  Available.
+;
+;     REG3  -  Available.
+;
+;     REG6  -  TCP flags, from caller.
+;
+;     REG7  -  TCP unit number.
+;
+;     REG8  -  IP transmit packet ID.
+;
+         addfsr0 tu_len+1 - tu_life ;point to last byte of LEN field
+         movff   postdec0, reg1 ;get number of data bytes into REG1:REG0
+         movff   postdec0, reg0
+         addfsr0 tu_xsz + 1 - (tu_len - 1) ;point to end of XSZ field
+         movff   reg1, postdec0 ;set max size to curr size, no room for new bytes
+         movff   reg0, postinc0
+
+         movlw   0           ;init sequence increment due to flags
+         btfsc   reg6, tflg_syn
+         addlw   1           ;count one more for SYN flag
+         btfsc   reg6, tflg_fin
+         addlw   1           ;count one more for FIN flag
+         addwf   reg0        ;make total sequence advance this packet in REG1:REG0
+         movlw   0
+         addwfc  reg1
+
+         movf    reg0, w
+         iorwf   reg1, w
+         bnz     sp_keep     ;sequence advanced, need to keep packet
+;
+;   This packet did not advance the sequence number.
+;
+         gcall   ip_xmit_close ;close the IP packet
+
+         point0  reg7, tu_flags ;point to start of FLAGS field
+         bcf     indf0, tuf_xmit ;indicate no transmit packet open
+         jump    sp_succ     ;return with success indication
+;
+;   This packet advanced the sequence number by the amount in REG1:REG0, which
+;   is not zero.
+;
+sp_keep  unbank
+         clrf    reg2        ;expand sequence number increment to 32 bits
+         clrf    reg3
+
+         point0  reg7, tu_seqst ;add to starting sequence number to make next seq
+         movf    postinc0, w
+         addwf   reg0
+         movf    postinc0, w
+         addwfc  reg1
+         movf    postinc0, w
+         addwfc  reg2
+         movf    postinc0, w
+         addwfc  reg3
+
+         addfsr0 tu_seqnx - (tu_seqst + 4) ;point to SEQNX field
+         movff   reg0, postinc0 ;update starting sequence number for next packet
+         movff   reg1, postinc0
+         movff   reg2, postinc0
+         movff   reg3, postinc0
+
+         addfsr0 tu_ntry - (tu_seqnx + 4) ;point to NTRY field
+         incf    postinc0    ;update number of times this packet sent
+
+         addfsr0 tu_rtick - (tu_ntry + 1) ;point to RTICK field
+         movlw   tktry       ;init tick timeout for first transmit attempt
+         movwf   indf0
+
+sp_succ  unbank              ;common return point to indicate success
+         bcf     flags, flagb_err ;indicate success
+
+sp_leave unbank              ;common exit point, FLAGB_ERR all set
+         movff   reg7, reg8  ;restore the TCP unit number into REG8
+         mcall   send_unlock ;release exclusive lock on sending from this unit
+         leavecheck
+
+sp_abort unbank              ;common return point to indicate failure
+         bsf     flags, flagb_err ;indicate failure
+         jump    sp_leave
+
+;*******************************************************************************
+;
+;   Local subroutine SEND_LOCK
+;
+;   Acquire the exclusive lock on sending a packet for the TCP unit identified
+;   in REG8.  This routine waits as necessary for another task to finish
+;   sending.  FSR0 is returned pointing to the FLAGS field of the TCP unit.
+;
+         locsub  send_lock, noregs
+
+slck_wait unbank
+         point0  reg8, tu_flags ;point to FLAGS field of the TCP unit
+         btfss   indf0, tuf_sending ;another task is currently sending ?
+         jump    slck_dwait  ;no
+         gcall   task_yield_save ;let all other tasks run once
+         jump    slck_wait   ;back to check lock again
+
+slck_dwait unbank            ;no task is currently sending on this unit
+         bsf     indf0, tuf_sending ;we are now sending
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine SEND_UNLOCK
+;
+;   Release the lock on sending a packet for the TCP unit identified in REG8.
+;   This routine undoes what SEND_LOCK does.  FSR0 is returned pointing to the
+;   FLAGS field of the TCP unit.
+;
+         locsub  send_unlock, noregs
+
+         point0  reg8, tu_flags ;point to the FLAGS field
+         bcf     indf0, tuf_sending ;clear the sending lock flag
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine OPEN_OUT
+;
+;   Open a new IP transmit packet.  There must not be a current IP transmit
+;   packet already open, although this is not checked.  REG8 contains the TCP
+;   unit number, which must be in use.  REG1:REG0 contains the number of TCP
+;   data bytes the new packet must be able to hold.  This routine can fail.
+;   Success is indicated by the XMIT flag in the flags word being set.
+;
+         locsub  open_out, regf0 | regf1 | regf2 | regf3 | regf7 | regf8
+
+         movff   reg8, reg7  ;save TCP unit number in REG7
+         movff   reg0, reg2  ;save required payload size in REG3:REG2
+         movff   reg1, reg3
+
+         movlw   low tcp_hsize ;add TCP header size to make IP payload size in REG1:REG0
+         addwf   reg0
+         movlw   high tcp_hsize
+         addwfc  reg1
+
+opo_optry unbank             ;back here to retry opening IP packet
+         gcall   task_yield_save ;give other tasks a chance to run
+         gcall   ip_xmit_open ;open new IP transmit packet
+         btfsc   reg8, 7     ;packet opened successfully ?
+         jump    opo_optry   ;no, go back and try again
+;
+;   The IP packet has been opened, REG8 contains the IP transmit packet ID.
+;
+         point0  reg7, tu_ipx ;point to IPX field
+         movff   reg8, postinc0 ;save IP transmit packet ID
+
+         addfsr0 tu_xsz - (tu_ipx + 1) ;set max TCP data bytes packet can hold
+         movff   reg2, postinc0
+         movff   reg3, postinc0
+
+         addfsr0 tu_len - (tu_xsz + 2) ;set number of data bytes currently in packet
+         clrf    postinc0
+         clrf    postinc0
+
+         addfsr0 tu_ntry - (tu_len + 2) ;init number of transmit attempts
+         clrf    postinc0
+
+         addfsr0 tu_cksum - (tu_ntry + 1) ;init data bytes checksum
+         clrf    postinc0
+         clrf    postinc0
+
+         addfsr0 tu_seqnx+3 - (tu_cksum + 2) ;point to SEQNX field
+         movff   postdec0, reg3 ;get sequence number for the next packet
+         movff   postdec0, reg2
+         movff   postdec0, reg1
+         movff   postdec0, reg0
+
+         addfsr0 tu_seqst+3 - (tu_seqnx - 1) ;point to SEQST field
+         movff   reg3, postdec0 ;set starting sequence number for this packet
+         movff   reg2, postdec0
+         movff   reg1, postdec0
+         movff   reg0, postdec0
+         ;
+         ;   Add the pseudo header contents to the checksum except for the
+         ;   TCP length field.  The TCP length is not known yet, and will be
+         ;   added on the fly when the packet is transmitted.
+         ;
+         ;   The IP packet destination address and protocol ID will also be set.
+         ;
+         dbankif gbankadr
+         movff   our_ip+0, reg1
+         movff   our_ip+1, reg0
+         mcall   cksum       ;update checksum with source IP high word
+         dbankif gbankadr
+         movff   our_ip+2, reg1
+         movff   our_ip+3, reg0
+         mcall   cksum       ;update checksum with source IP low word
+
+         loadk8  reg1, 0
+         loadk8  reg0, tcp_prot
+         mcall   cksum       ;word with 0 and the protocol ID
+
+         loadk8  reg0, tcp_prot ;set protocol ID in IP packet
+         gcall   ip_xmit_prot
+
+         point0  reg7, tu_ipr+3 ;point to remote IP address high byte
+         movf    postdec0, w
+         movwf   reg1
+         movwf   reg3
+         movf    postdec0, w
+         movwf   reg0
+         movwf   reg2
+         mcall   cksum       ;add dest adr high word to checksum
+         movff   postdec0, reg1
+         movff   postdec0, reg0
+         mcall   cksum       ;add dest adr low word to checksum
+         gcall   ip_xmit_dest ;set IP packet destination address
+         btfss   status, c   ;routine succeeded ?
+         jump    opo_abort   ;unable to resolve MAC for destination IP
+         point0  reg7, tu_flags
+         bsf     indf0, tuf_xmit ;indicate IP transmit packet is open on this TCP unit
+
+opo_leave unbank             ;common exit point
+         leaverest
+
+opo_abort unbank             ;IP transmit packet opened, but unable to transmit it
+         gcall   ip_xmit_close ;close the IP transmit packet
+         jump    opo_leave   ;return indicating failure (XMIT bit in TCP unit not set)
+
+;*******************************************************************************
+;
+;   Local subroutine FIND_UNUSED_UNIT
+;
+;   Find a unused TCP unit.  If a unused unit is found, REG8 is returned the
+;   0-N TCP unit number and FSR0 will be pointing to the FLAGS field of the
+;   unit.  If no unused unit was found, then the high bit of REG8 will be 1 and
+;   the value in FSR0 is undefined.
+;
+         locsub  find_unused_unit, regf1
+
+         lfsr    0, tu0_flags ;point to flags field of first unit
+         clrf    reg8        ;init current unit number
+         loadk8  reg1, nunits ;init number of units left to examine
+fuu_loop unbank              ;back here to check each new unit
+         btfss   indf0, tuf_inuse ;this unit is in use ?
+         jump    fuu_leave   ;found unused unit
+         incf    reg8        ;make number of next unit
+         addfsr0 sz_tunit    ;point to next unit
+         decfsz  reg1        ;count one less unit left to check
+         jump    fuu_loop    ;back to check this new unit
+
+         setf    reg8        ;indicate no unused unit found
+
+fuu_leave unbank             ;common exit point, REG8 all set
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TCP_OPEN_SERVER
+;
+;   Open a new TCP socket to accept incoming connection requests.  The port
+;   number the server will accept a connection request on is in REG1:REG0.  FSR0
+;   contains the start address of the receive buffer and REG2 its length.  The
+;   receive buffer is used implicitly by the TCP routines to store data bytes
+;   from received packets before the user reads them.  The receive buffer length
+;   must be from 1 to 256 bytes.  A REG2 value of 0 indicates 256 bytes.
+;
+;   If the TCP server was successfully created, then REG8 is returned the TCP
+;   unit number.  Valid unit numbers are in the range of 0 to 127, meaning the
+;   high bit of REG8 will be 0.  If the TCP server could not be established,
+;   then the high bit of REG8 is returned 1.
+;
+         glbsub  tcp_open_server, regf10 | regf11
+
+         movff   fsr0l, reg10 ;save pointer to receive buffer in REG11:REG10
+         movff   fsr0h, reg11
+
+         mcall   find_unused_unit ;get unused unit num in REG8, adr in FSR0
+         btfsc   reg8, 7     ;found a unused unit
+         jump    ops_leave   ;no, return with error
+
+         movlw   (1 << tuf_inuse) | (1 << tuf_listen) ;set FLAGS
+         movwf   postinc0
+
+         addfsr0 tu_portl - (tu_flags + 1) ;point to PORTL field
+         movff   reg0, postinc0 ;set local port number
+         movff   reg1, postinc0
+
+         addfsr0 tu_rbuf - (tu_portl + 2) ;point to RBUF field
+         movff   reg10, postinc0 ;set start address of the receive buffer
+         movff   reg11, postinc0
+
+         addfsr0 tu_rbsz - (tu_rbuf + 2) ;point to RBSZ field
+         decf    reg2, w     ;make receive buffer capacity
+         movwf   postinc0    ;save it in the TCP unit
+
+         addfsr0 tu_bput - (tu_rbsz + 1) ;point to BPUT field
+         clrf    postinc0    ;init receive buffer put index
+
+         addfsr0 tu_bget - (tu_bput + 1) ;point to BGET field
+         clrf    postinc0    ;init receive buffer get index
+
+         addfsr0 tu_dmax - (tu_bget + 1) ;point to DMAX field
+         movlw   low dmax_def ;set number of data bytes in data transmit packets
+         movwf   postinc0
+         movlw   high dmax_def
+         movwf   postinc0
+
+         addfsr0 tu_seqnx - (tu_dmax + 2) ;point to SEQNX field
+         clrf    postinc0    ;init sequence number for next packet to send
+         clrf    postinc0
+         clrf    postinc0
+         clrf    postinc0
+
+         addfsr0 tu_mlife - (tu_seqnx + 4) ;point to MLIFE field
+         movlw   life_def    ;set default inactivity lifetime before close
+         movwf   postinc0
+         addfsr0 tu_life - (tu_mlife + 1) ;point to LIFE field
+         movlw   life_def    ;init remaining lifetime
+         movwf   postinc0
+
+ops_leave unbank             ;common exit point, REG8 all set
+         leavecheck
+
+;*******************************************************************************
+;
+;   Local subroutine READ_WORD
+;
+;   Read the next two bytes from the received packet into REG1:REG0 and update
+;   the checksum in REG3:REG2 with them.
+;
+         locsub  read_word, noregs
+
+         gcall   ip_recv_read ;read the high byte
+         movff   reg0, reg1
+         gcall   ip_recv_read ;read the low byte
+
+         mcall   cksum_local ;update the checksum in REG3:REG2 with the new word
+
+         leavecheck
+
+;*******************************************************************************
+;
+;   Local subroutine MAKE_ACK
+;
+;   Compute the new ACK value to respond to the currently open receive packet
+;   with.  REG8 contains the number of the TCP unit the received packet is for.
+;   The ACK field in that packet will be updated.  The IP read index will be
+;   set for the first new data byte from the received packet, and H_NDAT will be
+;   set to the number of new data bytes from this packet.  H_NDAT must contain
+;   the total number of TCP data bytes in the received packet on entry.
+;
+;   The number of new usable data bytes from the received packet is determined
+;   from the last ACKed value (ACK field on entry), the starting sequence number
+;   of the received packet (H_SEQ), the number of data bytes in the received
+;   packet (H_NDAT on entry), and the amount of room in the receive data buffer.
+;
+;   FSR0 is preserved.
+;
+         locsub  make_ack, regfa | regfb
+         pushreg fsr0l       ;save FSR0 on the data stack
+         pushreg fsr0h
+;
+;   Compute the offset into the payload of the received packet of the first
+;   new data byte.  This is the expected sequence number minus the actual.  The
+;   result is left in REGB.
+;
+         dbankif lbankadr
+         point0  reg8, tu_ack ;point FSR0 to the ACK field in TCP unit
+
+         movf    h_seq+0, w  ;make expected sequence number minus actual
+         subwf   postinc0, w
+         movwf   reg4
+         movf    h_seq+1, w
+         subwfb  postinc0, w
+         movwf   reg5
+         movf    h_seq+2, w
+         subwfb  postinc0, w
+         movwf   reg6
+         movf    h_seq+3, w
+         subwfb  postinc0, w
+         movwf   reg7
+
+         btfsc   reg7, 7
+         jump    mack_same   ;there is a gap before this packet
+;
+;   Set the IP payload offset of the first new data byte.  This is the value in
+;   REGB plus the size of the received packet IP header.
+;
+         movff   reg4, reg2  ;save TCP offset of first data byte in REG3:REG2
+         movff   reg5, reg3
+
+         movf    h_hlen+0, w ;make IP payload offset of first new data byte
+         addwf   reg4, w
+         movwf   reg0
+         movlw   0
+         addwfc  reg5, w
+         movwf   reg1
+         gcall   ip_recv_ofs ;set the read position to the first new data byte
+;
+;   Determine the number of new data bytes.  This is the received packet data
+;   length minus the value in REGB.  The result will be left in REGB.  H_NDAT
+;   is updated with the number of available new data bytes, which is never less
+;   than zero.
+;
+         dbankif lbankadr
+         clrf    reg1        ;make a zero byte available
+
+         movf    reg4, w     ;make number of new data bytes in REGB
+         subwf   h_ndat+0, w
+         movwf   reg4
+         movf    reg5, w
+         subwfb  h_ndat+1, w
+         movwf   reg5
+         movf    reg6, w
+         subwfb  reg1
+         movwf   reg6
+         movf    reg7, w
+         subwfb  reg1
+         movwf   reg7
+
+         clrf    h_ndat+0    ;init number of new data bytes available
+         clrf    h_ndat+1
+         btfsc   reg7, 7     ;number of new data bytes positive or zero ?
+         jump    mack_nonew  ;no new data bytes, leave H_NDAT at 0
+         movff   reg4, h_ndat+0
+         movff   reg5, h_ndat+1
+mack_nonew
+;
+;   Current state:
+;
+;     REG1  -  Zero.
+;
+;     REG3:REG2  -  Offset of the first new data byte from this packet.
+;
+;     H_NDAT  -  Number of new data bytes clipped at 0.
+;
+;   Compute the amount of room in the user receive buffer into REG1:REG0.
+;
+         point0  reg8, tu_rbsz ;point to RBSZ field in TCP unit
+         movff   postinc0, reg0 ;save buffer capacity in REG0
+
+         addfsr0 tu_bput - (tu_rbsz + 1) ;point to BPUT field
+         movff   postinc0, reg1 ;save PUT index into REG1
+
+         addfsr0 tu_bget - (tu_bput + 1) ;point to BGET field
+         movf    postinc0, w ;load GET index into W
+         subwf   reg1        ;make PUT - GET in REG1
+         incf    reg0, w     ;get buffer size into W in case needed
+         btfsc   reg1, 7     ;PUT-GET zero or positive ?
+         addwf   reg1        ;no, handle buffer wrap
+         ;
+         ;   REG0  -  Buffer capacity.
+         ;
+         ;   REG1  -  Number of data bytes in the buffer.
+         ;
+         movf    reg1, w     ;get number of bytes in the buffer
+         subwf   reg0        ;make room left in the buffer
+         clrf    reg1        ;expand room left to 16 bits in REG1:REG0
+;
+;   Clip the number of data bytes to read from this packet in H_NDAT to the
+;   buffer room in REG1:REG0.
+;
+         dbankif lbankadr
+         movf    h_ndat+0, w ;compute REG1:REG0 - H_NDAT
+         subwf   reg0, w
+         movf    h_ndat+1, w
+         subwfb  reg1, w
+         btfss   wreg, 7     ;need to clip ?
+         jump    mack_dndat  ;no, H_NDAT all set
+         movff   reg0, h_ndat+0
+         movff   reg1, h_ndat+1
+mack_dndat                   ;done making data bytes to read in H_NDAT
+;
+;   Update the ACK value as a result of this packet.  This is the expected
+;   starting sequence number, plus the number of bytes we are going to read,
+;   plus one for each of the SYN and FIN flags in the received packet.
+;
+;   The current state is:
+;
+;     REG3:REG2  -  Offset of the first data byte to read.
+;
+;     H_NDAT  -  Number of data bytes we will read from this packet.
+;
+;     FSR0  -  Pointing 1 byte past the start of the BGET field in the TCP unit.
+;
+         ;
+         ;   Make the sequence number advance due to the flags, in REG1:REG0.
+         ;
+         clrf    reg0        ;init seq advance due to flags
+         btfsc   h_flags, tflg_syn
+         incf    reg0        ;count one for the SYN flag
+         btfsc   h_flags, tflg_fin
+         incf    reg0        ;count one for the FIN flag
+         clrf    reg1        ;expand to 16 bit value in REG1:REG0
+         ;
+         ;   Add the number of data bytes we will read.
+         ;
+         dbankif lbankadr
+         movf    h_ndat+0, w
+         addwf   reg0
+         movf    h_ndat+1, w
+         addwfc  reg1
+         ;
+         ;   Advance the expected sequence number by the REG1:REG0 value.
+         ;
+         addfsr0 tu_ack - (tu_bget + 1) ;point to ACK field
+         movf    reg0, w
+         addwf   postinc0
+         movf    reg1, w
+         addwfc  postinc0
+         movlw   0
+         addwfc  postinc0
+         addwfc  postinc0
+
+mack_leave unbank            ;common exit point
+         popreg  fsr0h       ;restore caller's FSR0
+         popreg  fsr0l
+         leaverest
+
+mack_same unbank             ;no seq advance, packet will be ignored
+         dbankif lbankadr
+         clrf    h_ndat+0    ;indicate no bytes to read
+         clrf    h_ndat+1
+         jump    mack_leave
+
+;*******************************************************************************
+;
+;   Local subroutine RBUF_PUT
+;
+;   Stuff the byte in REG0 into the user receive buffer.  REG8 must contain the
+;   TCP unit number.  It is the caller's responsibility to ensure there is room
+;   in the buffer for the new byte.
+;
+         locsub  rbuf_put, regf2 | regf3 | regf4
+
+         point0  reg8, tu_rbuf ;point to RBUF field in the TCP unit
+         movff   postinc0, reg2 ;save buffer start address in REG3:REG2
+         movff   postinc0, reg3
+
+         addfsr0 tu_rbsz - (tu_rbuf + 2) ;point to RBSZ field
+         movff   postinc0, reg4 ;get last valid buffer index into REG4
+
+         addfsr0 tu_bput - (tu_rbsz + 1) ;point to BPUT field
+         movf    indf0, w    ;get buffer offset to write this byte to
+         addwf   reg2        ;make address of where to write this byte to in REG3:REG2
+         movlw   0
+         addwfc  reg3
+
+         incf    indf0       ;advance the write index to the next byte
+         movf    indf0, w    ;get the new write index
+         subwf   reg4, w     ;compare to last valid buffer index
+         skip_wle            ;still within buffer ?
+         clrf    indf0       ;no, wrap back to beginning
+
+         movff   reg2, fsr0l ;point to where to write byte into buffer
+         movff   reg3, fsr0h
+         movff   reg0, indf0 ;write the data byte into the buffer
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine TCP_RECV_PACKET
+;
+;   Process a received TCP packet.  This routine is run by the network
+;   background processing task from the IP module when a IP packet is received
+;   with the protocol ID of 6, which is TCP.
+;
+;   The received packet is currently open, and must be left open.  When done,
+;   this routine must jump or call to DONE_PACKET, or execute a RETURN at the
+;   same nesting level as on entry.  The data stack is currently empty, and
+;   the call stack contains the single entry to DONE_PACKET.  Extraneous data
+;   may be left on both stacks when jumping to DONE_PACKET.  All the REGn
+;   general registers may be trashed.
+;
+;   The REGn registers currently contain:
+;
+;     REG3:REG2  -  Number of IP payload bytes.
+;
+;     REG7:REG6:REG5:REG4  -  Source IP address.
+;
+;   The current IP payload read offset is set to 0.  In other words, if no
+;   call to IP_RECV_OFS is made, the next call to IP_RECV_READ will return the
+;   first IP packet payload byte.
+;
+         glbent  tcp_recv_packet
+
+         movff   reg2, reg10 ;save total number of TCP bytes in REG11:REG10
+         movff   reg3, reg11
+;
+;   Read TCP header compute its checksum in REG3:REG2.  Some values from the
+;   header will be saved in the H_xxx local variables.  REG12 will be set to
+;   the number of header bytes, which is always a multiple of 4.
+;
+         loadk8  reg2, 0     ;init checksum accumulator
+
+         mcall   read_word   ;source port
+         movff   reg0, h_portr+0
+         movff   reg1, h_portr+1
+
+         mcall   read_word   ;destination port
+         movff   reg0, h_portl+0
+         movff   reg1, h_portl+1
+
+         mcall   read_word   ;sequence number high word
+         movff   reg0, h_seq+2
+         movff   reg1, h_seq+3
+         mcall   read_word   ;sequence number low word
+         movff   reg0, h_seq+0
+         movff   reg1, h_seq+1
+
+         mcall   read_word   ;ACK number high word
+         movff   reg0, h_ack+2
+         movff   reg1, h_ack+3
+         mcall   read_word   ;ACK number low word
+         movff   reg0, h_ack+0
+         movff   reg1, h_ack+1
+
+         mcall   read_word   ;get data offset and flags
+         movff   reg0, h_flags ;save bytes containing the TCP flags
+         rrncf   reg1        ;extract total number of header bytes
+         rrncf   reg1, w
+         andlw   b'00111100'
+         movwf   reg12       ;save number of header bytes in REG12
+         movff   reg12, h_hlen ;save header length in header info block
+         rrncf   reg12, w    ;get number of 16 bit words in the header
+         addlw   -10         ;make additional words beyond min size header
+         movwf   reg13       ;save additional words to read
+         btfsc   reg13, 7    ;not negative ?
+         return              ;invalid header size, ignore packet
+
+         mcall   read_word   ;window value
+         movff   reg0, h_window+0
+         movff   reg1, h_window+1
+
+         mcall   read_word   ;checksum
+
+         incf    reg13       ;make number of header words left to read
+rp_head_loop unbank          ;back here each new header word
+         mcall   read_word   ;read this word and update the checksum with it
+         decfsz  reg13       ;count one less header word left
+         jump    rp_head_loop ;back to read next header word
+;
+;   Add the pseudo-header to the checksum in REG3:REG2.
+;
+         movff   reg7, reg1  ;source IP address high word
+         movff   reg6, reg0
+         mcall   cksum_local
+         movff   reg5, reg1  ;source IP address low word
+         movff   reg4, reg0
+         mcall   cksum_local
+
+         movff   our_ip+0, reg1 ;desitination IP address high word
+         movff   our_ip+1, reg0
+         mcall   cksum_local
+         movff   our_ip+2, reg1 ;desitination IP address low word
+         movff   our_ip+3, reg0
+         mcall   cksum_local
+
+         loadk16 reg0, tcp_prot ;protocol ID word
+         mcall   cksum_local
+
+         movff   reg10, reg0 ;TCP length
+         movff   reg11, reg1
+         mcall   cksum_local
+;
+;   Update the checksum to include the TCP data bytes.  The IP packet read
+;   position is at the first TCP data byte.  The total number of IP data bytes
+;   is in REG11:REG10, and REG12 contains the number of TCP header bytes.
+;
+         movf    reg12, w    ;make the number of TCP data bytes in REG11:REG10
+         subwf   reg10
+         movlw   0
+         subwfb  reg11
+         btfsc   reg11, 7    ;number of data bytes is a valid value ?
+         return              ;no, ignore this packet
+         movff   reg10, h_ndat+0 ;save number of data bytes
+         movff   reg11, h_ndat+1
+         clrf    reg12       ;init even/odd data byte counter
+
+rp_dat_loop unbank           ;back here to read each new data byte
+         movf    reg10, w
+         iorwf   reg11, w
+         bz      rp_dat_done ;done reading all the data bytes
+         gcall   ip_recv_read ;read this data byte into REG0
+         movff   reg0, reg1  ;replicate it to both bytes of word
+         btfsc   reg12, 0
+         clrf    reg1        ;odd byte, goes in low byte of word
+         btfss   reg12, 0
+         clrf    reg0        ;even byte, goes in high byte of word
+         mcall   cksum_local
+         check_yield         ;let other tasks run if it is time
+         decf    reg10       ;count one less byte left to read
+         skip_nborr
+         decf    reg11
+         incf    reg12       ;update even/odd byte counter
+         jump    rp_dat_loop ;back to read next byte
+rp_dat_done unbank           ;done accumulating data bytes into checksum
+
+         movf    reg2, w     ;check the checksum for validity
+         andwf   reg3, w
+         xorlw   h'FF'
+         skip_z              ;the checksum checks ?
+         return              ;checksum mismatch, ignore this packet
+;
+;   This is a valid TCP packet.  Current state:
+;
+;     REG7:REG6:REG5:REG4  -  Source IP address.
+;
+;     H_xxx variables  -  These contain the information from the TCP header and
+;       are all filled in.
+;
+;   Look for the TCP unit this packet is for.  There are two cases for a match:
+;
+;     1  -  The unit is in listen mode, this packet has the SYN flag set, and
+;           local port numbers match.
+;
+;     2  -  The unit is not in listen mode and the local port, remote port, and
+;           remote IP address all match.
+;
+         lfsr    0, tu0_flags ;point to FLAGS field of first unit
+         loadk8  reg1, nunits ;init number of units left to examine
+         loadk8  reg8, 0     ;init current unit number
+rp_unit_loop unbank          ;back here to examine each new TCP unit
+         btfss   indf0, tuf_inuse ;this unit is in use ?
+         jump    rp_unit_next ;no, skip it
+         movff   postinc0, reg12 ;save TCP unit flags in REG12
+
+         dbankif lbankadr
+         addfsr0 tu_portl - (tu_flags + 1) ;go to local port number in TCP unit
+         movf    h_portl+0, w ;compare to packet destination port number
+         xorwf   postinc0, w
+         movwf   reg0
+         movf    h_portl+1, w
+         xorwf   postinc0, w
+         iorwf   reg0
+         skip_z              ;packet is for this port ?
+         jump    rp_unit_next ;no, skip this unit
+         btfss   reg12, tuf_listen ;this unit is in listen mode ?
+         jump    rp_unit_nlisten ;no, already connected
+         ;
+         ;   This unit is in listen mode, meaning it is awaiting a connection
+         ;   request from a client.  A connection request is indicated by the
+         ;   SYN flag set.  FSR0 is pointing 2 bytes past the PORTL field.  The
+         ;   destination port in the packet matches the local port of this unit.
+         ;
+         dbankif lbankadr
+         btfss   h_flags, tflg_syn ;this packet is a connection request ?
+         jump    rp_unit_next ;no, not for this unit
+         jump    rp_connect  ;packet is connection request for this unit
+         ;
+         ;   This unit is not in listen mode.  FSR0 is pointing 2 bytes past the
+         ;   PORTL field.  The packet destination port matches the local port of
+         ;   this unit.
+         ;
+rp_unit_nlisten dbankis lbankadr
+         addfsr0 tu_portr - (tu_portl + 2) ;point to PORTR field
+         movf    h_portr+0, w ;compare to packet source port number
+         xorwf   postinc0, w
+         movwf   reg0
+         movf    h_portr+1, w
+         xorwf   postinc0, w
+         iorwf   reg0
+         bnz     rp_unit_next ;remote ports don't match, not this unit ?
+
+         addfsr0 tu_ipr - (tu_portr + 2) ;point to IPR field
+         movf    reg4, w     ;compare to packet source address
+         xorwf   postinc0, w
+         movwf   reg0
+         movf    reg5, w
+         xorwf   postinc0, w
+         iorwf   reg0
+         movf    reg6, w
+         xorwf   postinc0, w
+         iorwf   reg0
+         movf    reg7, w
+         xorwf   postinc0, w
+         iorwf   reg0
+         skip_nz             ;source address doesn't match this TCP unit ?
+         jump    rp_data     ;packet is data for established connection
+
+rp_unit_next unbank          ;advance to the next TCP unit to examine
+         incf    reg8        ;make number of the next unit
+         point0  reg8, tu_flags ;point to FLAGS field of next unit
+         decfsz  reg1        ;count one less unit left to do
+         jump    rp_unit_loop ;back to check this new unit
+;
+;   No matching TCP unit found that this packet is for.
+;
+;   This packet isn't for a valid connection or otherwise doesn't make sense.
+;   Send a packet with the RST flag set to tell the sender to stick it.  The
+;   packet source IP address is in REG7:REG6:REG5:REG4.
+;
+rp_rst   unbank
+         loadk16 reg0, tcp_hsize ;pass IP packet required payload size
+         gcall   task_yield_save ;give other tasks a chance to run
+         gcall   ip_xmit_open ;open new IP transmit packet
+         btfsc   reg8, 7     ;packet opened successfully ?
+         jump    rp_rst      ;no, go back and try again
+
+         loadk8  reg0, tcp_prot ;set IP packet protocol ID
+         gcall   ip_xmit_prot
+
+         movff   reg4, reg0  ;set IP packet destination address
+         movff   reg5, reg1
+         movff   reg6, reg2
+         movff   reg7, reg3
+         gcall   ip_xmit_dest
+         btfss   status, c   ;call succeeded ?
+         jump    rp_rst_close ;no, skip sending RST packet
+         ;
+         ;   Init the TCP checksum for this packet in REG3:REG2 by accumulating
+         ;   the pseudo-header information into it.
+         ;
+         loadk16 reg2, 0     ;init the TCP checksum in REG3:REG2
+
+         movff   our_ip+0, reg1 ;source IP address
+         movff   our_ip+1, reg0
+         mcalll  cksum_local
+         movff   our_ip+2, reg1
+         movff   our_ip+3, reg0
+         mcalll  cksum_local
+
+         movff   reg7, reg1  ;destination IP address
+         movff   reg6, reg0
+         mcalll  cksum_local
+         movff   reg5, reg1
+         movff   reg4, reg0
+         mcalll  cksum_local
+
+         loadk16 reg0, tcp_prot ;IP protocol ID word
+         mcalll  cksum_local
+
+         loadk16 reg0, tcp_hsize ;TCP length of this packet
+         mcalll  cksum_local
+         ;
+         ;   Write the TCP packet, which is header only.
+         ;
+         movff   h_portl+0, reg0 ;write source port number
+         movff   h_portl+1, reg1
+         mcalll  write_word
+
+         movff   h_portr+0, reg0 ;write destination port number
+         movff   h_portr+1, reg1
+         mcalll  write_word
+
+         loadk16 reg0, 0
+         mcalll  write_word  ;sequence number high word
+         mcalll  write_word  ;sequence number low word
+
+         movff   h_seq+2, reg0
+         movff   h_seq+3, reg1
+         mcalll  write_word  ;ACK value high word
+         movff   h_seq+0, reg0
+         movff   h_seq+1, reg1
+         mcalll  write_word  ;ACK value low word
+
+         loadk8  reg1, 5 << 4 ;number of 32 bit header words
+         loadk8  reg0, (1 << tflg_rst) | (1 << tflg_ack) ;set RST and ACK flags
+         mcalll  write_word
+
+         loadk16 reg0, 0
+         mcalll  write_word  ;window value
+
+         comf    reg2, w
+         movwf   reg0
+         comf    reg3, w
+         movwf   reg1
+         mcalll  write_word  ;checksum
+
+         loadk16 reg0, 0
+         mcalll  write_word  ;urgent pointer
+
+         gcall   ip_xmit_send ;send the RST packet
+rp_rst_close unbank          ;skip to here to not send packet after opening it
+         gcall   ip_xmit_close ;close the IP transmit packet
+         return              ;done handling this received packet
+;
+;   The packet is a connection request for the TCP unit identified by REG8.  The
+;   TCP unit is in listen mode, the received packet has the SYN flag set, and
+;   the local port numbers match.
+;
+rp_connect unbank
+         dbankif lbankadr
+         btfsc   h_flags, tflg_fin
+         return              ;FIN flag set, ignore packet
+         btfsc   h_flags, tflg_rst
+         return              ;RST flag set, ignore packet
+         btfsc   h_flags, tflg_ack
+         return              ;ACK flag set, ignore packet
+         ;
+         ;   This is a valid connection request for this TCP unit.  Set up the
+         ;   unit accordingly.
+         ;
+         dbankif lbankadr
+         point0  reg8, tu_flags
+         bcf     indf0, tuf_listen ;no longer in listen mode
+
+         addfsr0 tu_portr - tu_flags ;point to PORTR field
+         movff   h_portr+0, postinc0 ;save remote port number
+         movff   h_portr+1, postinc0
+
+         addfsr0 tu_ipr - (tu_portr + 2) ;point to IPR field
+         movff   reg4, postinc0 ;set remote IP address
+         movff   reg5, postinc0
+         movff   reg6, postinc0
+         movff   reg7, postinc0
+
+         addfsr0 tu_ack - (tu_ipr + 4) ;point to ACK field
+         movff   h_seq+0, postinc0 ;set initial expected sequence number
+         movff   h_seq+1, postinc0
+         movff   h_seq+2, postinc0
+         movff   h_seq+3, postinc0
+
+         addfsr0 tu_seqnx - (tu_ack + 4) ;point to SEQNX field
+         clrf    postinc0    ;set our initial sequence number
+         clrf    postinc0
+         clrf    postinc0
+         clrf    postinc0
+
+         mcall   make_ack    ;make ACK value and number of data bytes to read
+         loadk8  reg0, (1 << tflg_syn) | (1 << tflg_ack) ;pass flags to send
+         mcalll  send_packet ;send SYN ACK reply packet
+         jump    rp_drain    ;make sure all received data bytes are drained
+;
+;   The packet is for this unit, which is not in LISTEN state.  The remote port,
+;   local port, and IP addresses match.  REG8 contains the TCP unit number.
+;
+rp_data  unbank              ;packet is for existing connection
+         dbankif lbankadr
+         point0  reg8, tu_flags ;point to FLAGS field
+
+         btfsc   indf0, tuf_cclos
+         jump    rp_rst      ;already done with other side, send bug off
+
+         btfss   h_flags, tflg_rst ;received RST ?
+         jump    rp_data_nrst ;no, skip this section
+         ;
+         ;   The other side sent RST, which means it doesn't think there is a
+         ;   connection and it's telling us to bug off.  Consider the connection
+         ;   closed, but leave the unit open until the user discovers it is
+         ;   closed.
+         ;
+;
+;   Consider the connection now closed.  Any open transmit packet is closed
+;   and the TCP unit is closed if the user has previously tried to close it.
+;   The received packet is released.  The TCP unit number must be in REG8.
+;
+rp_close unbank
+         mcalll  xmit_close  ;make sure no IP transmit packet is open
+         mcall   point_flags ;point FSR0 to FLAGS field in TCP unit
+         bsf     indf0, tuf_cclos ;indicate the connection has been closed
+         bcf     indf0, tuf_listen ;no longer awaiting connection request
+         bcf     indf0, tuf_syn ;not waiting for SYN ACK in response to SYN
+         btfsc   indf0, tuf_uclos ;user not closed unit yet ?
+         clrf    indf0       ;user already closed, mark TCP unit as unused
+         return              ;ignore anything else about this packet
+;
+;   This is supposedly a packet for a established connection, which means it
+;   must contain ACK.  If it doesn't, something is clearly screwed up, so we
+;   send RST.
+;
+rp_data_nrst dbankis lbankadr ;skip to here on not RST packet
+         btfss   h_flags, tflg_ack ;received packet contains ACK ?
+         jump    rp_close_rst ;no, mark connection closed and send RST
+;
+;   Set the expected ACK value at the start of this packet if the packet
+;   contains SYN.  This also cancels the SYN flag in the TCP unit since this is
+;   the SYN response.
+;
+         dbankif lbankadr
+         btfss   h_flags, tflg_syn ;this packet contains SYN ?
+         jump    rp_nosyn    ;no, skip this section
+
+         addfsr0 tu_ack - tu_flags ;point to ACK field in TCP unit
+         movff   h_seq+0, postinc0
+         movff   h_seq+1, postinc0
+         movff   h_seq+2, postinc0
+         movff   h_seq+3, postinc0
+
+         addfsr0 tu_flags - (tu_ack + 4) ;restore pointer to FLAGS field
+         bcf     indf0, tuf_syn ;this packet is SYN ACK, so no longer waiting for it
+
+rp_nosyn dbankis lbankadr    ;skip to here on SYN not set in packet
+;
+;   Make the received ACK value minus the expected ACK value in
+;   REG3:REG2:REG1:REG0.  If this value is greater than zero, meaning the other
+;   side is ACKing something we haven't sent yet, then send RST since something
+;   is clearly messed up.  Update the TCP unit state if the ACK is exactly the
+;   expected value.
+;
+         addfsr0 tu_seqnx - tu_flags ;point to SEQNX field
+         movf    postinc0, w ;make real ACK minus expected ACK in REG3:REG2:REG1:REG0
+         subwf   h_ack+0, w
+         movwf   reg0
+         movf    postinc0, w
+         subwfb  h_ack+1, w
+         movwf   reg1
+         movf    postinc0, w
+         subwfb  h_ack+2, w
+         movwf   reg2
+         movf    postinc0, w
+         subwfb  h_ack+3, w
+         movwf   reg3
+
+         btfsc   reg3, 7     ;ACK is at or after expected value ?
+         jump    rp_doneack  ;ACK is before expected value
+         movf    reg0, w
+         iorwf   reg1, w
+         iorwf   reg2, w
+         iorwf   reg3, w
+         skip_z              ;ACK is exactly the expected value ?
+         jump    rp_close_rst ;no, invalid ACK, mark connection closed and send RST
+         ;
+         ;   The received ACK is exactly the expected value.  If a transmit
+         ;   packet is open on this TCP unit and has been previously sent, then
+         ;   then it can be released since it has now been fully ACKed.
+         ;
+         ;   FSR0 is pointing 4 bytes past the start of the SEQNX field.
+         ;
+         addfsr0 tu_ntry - (tu_seqnx + 4) ;point to NTRY field
+         movf    indf0
+         bz      rp_doneack  ;xmit packet, if any was never transmitted ?
+         mcalll  xmit_close  ;close any pending transmit packet since it has been ACKed
+rp_doneack unbank            ;done handling ACK for now
+;
+;   Ignore the packet if it does not advance its own sequence number from the
+;   start of the packet.  Such packets are not ACKed, else there could be a
+;   infinite ACK storm.  A packet advances its sequence number by the number of
+;   data bytes plus one for each of the SYN and FIN flags.
+;
+         dbankif lbankadr
+         movlw   0           ;init sequence advance due to flags
+         btfsc   h_flags, tflg_syn
+         addlw   1           ;count one for the SYN flag
+         btfsc   h_flags, tflg_fin
+         addlw   1           ;count one for the FIN flag
+         iorwf   h_ndat+0, w ;OR with data length bytes
+         iorwf   h_ndat+1, w
+         skip_z              ;packet does not advance it's sequence number
+         jump    rp_sendack  ;ACK will be sent
+         ;
+         ;   The packet will not be ACKed.  Reset the TCP unit lifetime.  This
+         ;   is automatically done when a packet is sent, but needs to be done
+         ;   explicitly here since no packet will be sent in response to the
+         ;   received packet.
+         ;
+         point0  reg8, tu_mlife ;point to MLIFE field
+         movff   postinc0, reg0 ;get max lifetime value
+         addfsr0 tu_life - (tu_mlife + 1) ;point to LIFE field
+         movff   reg0, postinc0 ;reset remaining lifetime to maximum
+         return              ;all done with this received packet
+
+rp_sendack unbank            ;skip to here if ACK will be sent
+;
+;   Send the ACK packet.  This is normally sent with just the ACK flag.  If the
+;   received packet contains FIN, then we also send the FIN flag in response and
+;   consider the connection closed.
+;
+         mcall   make_ack    ;update ACK field, determine number of data bytes
+
+         mcall   point_flags ;point to FLAGS field in TCP unit
+         dbankif lbankadr
+         loadk8  reg0, (1 << tflg_ack) ;init to just send ACK flag
+         btfsc   indf0, tuf_fin
+         bsf     reg0, tflg_fin ;we previously sent FIN, keep sending it
+         btfsc   h_flags, tflg_fin
+         bsf     reg0, tflg_fin ;packet contains FIN, respond with FIN
+         btfsc   reg0, tflg_fin
+         bsf     indf0, tuf_fin ;flag that we sent FIN
+
+         mcalll  send_packet ;send the ACK packet, flags indicated by REG0
+
+         mcall   point_flags ;point FSR0 to FLAGS field of TCP unit
+         dbankif lbankadr
+         btfss   h_flags, tflg_fin ;received FIN ?
+         jump    rp_nrfin    ;no
+         bsf     indf0, tuf_cclos ;received FIN, consider connection closed
+         bcf     indf0, tuf_listen ;definitely not waiting for connection request
+         bcf     indf0, tuf_syn ;definitely not waiting for SYN ACK
+rp_nrfin
+;
+;   Done processing the current received packet except for its data bytes, if
+;   any.  H_NDAT has been set to the number of usable data bytes in this packet,
+;   and the IP receive packet read position is set to the first data byte to
+;   read.
+;
+;   The data bytes are immediately written into the user receive buffer.  The
+;   buffer is guaranteed to have room for the indicated number of bytes.
+;
+;   REG8 is the TCP unit number.
+;
+;   Register usage in the read loop:
+;
+;     REG0  -  Data byte.
+;
+;     REG3:REG2  -  User receive buffer start address.
+;
+;     REG4  -  Last valid buffer index.
+;
+;     REG5  -  Buffer index of where to write the next byte.
+;
+;     REG7:REG6  -  Number of bytes left to read and stuff into the buffer.
+;
+;     REG8  -  TCP unit number.
+;
+;     REG10:REG9  -  Address of the BPUT field in the tCP unit.
+;
+rp_drain unbank
+         point0  reg8, tu_rbuf ;point to RBUF field in the TCP unit
+         movff   postinc0, reg2 ;save buffer start address in REG3:REG2
+         movff   postinc0, reg3
+
+         addfsr0 tu_rbsz - (tu_rbuf + 2) ;point to RBSZ field
+         movff   postinc0, reg4 ;get last valid buffer index into REG4
+
+         addfsr0 tu_bput - (tu_rbsz + 1) ;point to BPUT field
+         movff   indf0, reg5 ;init buffer index where to write next byte
+         movff   fsr0l, reg9 ;save address of BPUT field in REG10:REG9
+         movff   fsr0h, reg10
+
+         movff   h_ndat+0, reg6 ;init number of bytes left to transfer
+         movff   h_ndat+1, reg7
+
+rp_drloop unbank             ;back here to read each new data byte
+         mcall   point_flags ;point to FLAGS field in the TCP unit
+         btfss   indf0, tuf_inuse ;this TCP unit still in use ?
+         return              ;no, nothing more to do
+         btfss   indf0, tuf_uclos ;user has closed the connection ?
+         jump    rp_uopen    ;no
+         ;
+         ;   The user considers the unit closed.
+         ;
+         btfss   indf0, tuf_cclos ;the connection is closed too ?
+         return              ;no, connection is still open
+         jump    close_final ;unconditionally close the TCP unit, done with packet
+
+rp_uopen                     ;the user has not tried to close the TCP unit
+         ;
+         ;   Check for done and update bytes left to do.
+         ;
+         movf    reg6, w     ;make OR of count left bytes
+         iorwf   reg7, w
+         skip_nz             ;at least one byte left to transfer ?
+         return              ;no, all done
+         decf    reg6        ;update bytes left after this one
+         skip_nborr
+         decf    reg7
+         ;
+         ;   Get the byte and stuff it into the buffer.
+         ;
+         gcall   ip_recv_read ;get the data byte into REG0
+         movf    reg5, w     ;make address where to write byte in FSR0
+         addwf   reg2, w
+         movwf   fsr0l
+         movlw   0
+         addwfc  reg3, w
+         movwf   fsr0h
+         movff   reg0, indf0 ;write the byte into the buffer
+         ;
+         ;   Update the buffer write index for next time.
+         ;
+         incf    reg5        ;increment the buffer write index
+         movf    reg5, w     ;get the new index
+         subwf   reg4, w     ;compare to last valid index
+         skip_wle            ;still within the buffer ?
+         clrf    reg5        ;no, wrap back to beginning
+
+         movff   reg9, fsr0l ;point to the BPUT field in the TCP unit
+         movff   reg10, fsr0h
+         movff   reg5, indf0 ;update the buffer put index in the TCP unit
+
+         check_yield         ;let other tasks run if it is time
+         jump    rp_drloop   ;back to do next byte
+;
+;   Close the connection and send RST to the other side.  REG8 contains the
+;   TCP unit number.
+;
+rp_close_rst unbank
+         mcall   point_flags ;point to the FLAGS field in the TCP unit
+         bsf     indf0, tuf_cclos ;mark the connection as closed
+         bcf     indf0, tuf_listen ;definitely not waiting for connection request
+         bcf     indf0, tuf_syn ;definitely not waiting for SYN ACK
+         btfss   indf0, tuf_uclos ;the user has closed the connection too ?
+         jump    rp_rst      ;no, leave unit open and send RST
+         mcall   close_final ;unconditionally close unit and release resources
+         jump    rp_rst      ;send the RST
+
+;*******************************************************************************
+;
+;   Local subroutine CLOSE_FINAL
+;
+;   Unconditionally close a TCP unit and release its resources.  The TCP unit
+;   number is passed in REG8.  The unit will be flagged as unused.
+;
+         locsub  close_final, noregs
+
+         mcall   send_lock   ;acquire lock, point to FLAGS field
+         btfss   indf0, tuf_inuse ;the unit is still open ?
+         jump    clsf_leave  ;no, nothing to do
+
+         mcalll  xmit_close  ;close any transmit packet open on this unit
+         clrf    indf0       ;release lock and mark unit as unused
+
+clsf_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine POINT_FLAGS
+;
+;   Point FSR0 to the FLAGS field of the TCP unit indentified in REG8.
+;
+         locsub  point_flags, noregs
+
+         point0  reg8, tu_flags
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro UNIT_SETUP abort
+;
+;   Set up for dealing with the TCP unit identified in REG8.  The abort address
+;   is jumped to if the TCP unit ID in REG8 is invalid or the unit is not in
+;   use.  Otherwise, execution continues after this macro and FSR0 is left
+;   pointing to the FLAGS field in the TCP unit.
+;
+unit_setup macro abort
+         movf    reg8, w     ;get the TCP unit number
+         sublw   nunits-1    ;compare to max valid value
+         skip_wle            ;index is within range ?
+         jump    abort       ;no
+
+         point0  reg8, tu_flags ;point FSR0 to the FLAGS field of the TCP unit
+         btfss   indf0, tuf_inuse ;this unit is in use ?
+         jump    abort       ;no
+
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine TCP_OUTSIZE
+;
+;   Set the maximum payload size of future outgoing packets.  The payload size
+;   in bytes is passed in REG1:REG0.  REG8 must contain the TCP unit number.
+;
+;   Since the number of bytes that will ultimately be sent in a output packet is
+;   not known when the packet is created, such packets will be created with the
+;   size to hold the maximum possible output bytes.  This buffer space is
+;   allocated to the packet from the finite transmit buffer space, and is not
+;   available for other packets until the packet holding the space is released.
+;   When a TCP unit is opened, the maximum output payload size per packet is set
+;   to the DMAX_DEF value, defined at the top of this module.  The maximum
+;   output payload size for a TCP unit persists until it is deliberately changed
+;   with this routine or until the unit is closed.
+;
+;   A low value causes more smaller packet to be sent, and a high value uses up
+;   more of the finite output packet buffer space.
+;
+;   The maximum possible payload size of a TCP packet sent over ethernet is
+;   1460 bytes.  Larger values a silently clipped to this maximum limit.
+;
+         glbsub  tcp_outsize, noregs
+
+         unit_setup outsz_leave ;point FSR0 to FLAGS field of TCP unit
+
+         addfsr0 tu_dmax - tu_flags ;point to the DMAX field of the TCP unit
+         movlw   low 1460    ;compare passed value to max of 1460
+         subwf   reg0, w
+         movlw   high 1460
+         subwfb  reg1, w
+         skip_borr           ;passed value is within range ?
+         jump    outsz_max   ;no, set to max allowed
+
+         movff   reg0, postinc0 ;set new max payload size of future packets
+         movff   reg1, postinc0
+         jump    outsz_leave
+
+outsz_max unbank             ;set to maximum allowed payload size
+         movlw   low 1460
+         movwf   postinc0
+         movlw   high 1460
+         movwf   postinc0
+
+outsz_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TCP_STATE
+;
+;   Get state information about a TCP connection.  REG8 contains the TCP unit
+;   number.  Flag bits are returned in REG0.  The meaning of each REG0 bit when
+;   set is:
+;
+;     Bit 0  -  Unit not in use.
+;
+;     Bit 1  -  Connection not yet fully established.
+;
+;     Bit 2  -  Connection established, data can be passed normally.
+;
+;     Bit 3  -  Connection closed by other end, TCP_CLOSE will release unit.
+;
+;     Bit 4  -  Unit closed by user, connection being closed.
+;
+;     Bit 5  -  At least one input byte is immediately available.
+;
+;     Bit 6  -  Transmit buffer is currently open.
+;
+;     Bit 7  -  Transmit buffer has room for another byte.
+;
+;   The remaining bits are reserved and are set to 0 by this version.  If no
+;   bits are set, then the TCP unit number in REG8 is invalid.
+;
+         glbsub  tcp_state, regf1 | regf2
+
+         clrf    reg0        ;init to invalid TCP unit number
+         movf    reg8, w     ;get the TCP unit number
+         sublw   nunits-1    ;compare to max valid value
+         skip_wle            ;unit number is valid ?
+         jump    tst_leave   ;no
+
+         point0  reg8, tu_flags ;point FSR0 to the flags field of the TCP unit
+         movlw   (1 << 0)
+         btfss   indf0, tuf_inuse
+         jump    tst_ret     ;the unit is not in use
+
+         movlw   (1 << 4)
+         btfsc   indf0, tuf_uclos
+         jump    tst_ret     ;closed by user, connection being closed
+
+         movlw   (1 << 3)
+         btfsc   indf0, tuf_cclos
+         jump    tst_recv    ;closed by other end, not closed by user yet
+
+         movlw   (1 << 1)
+         btfsc   indf0, tuf_listen
+         jump    tst_ret     ;server awaiting connection
+         btfsc   indf0, tuf_syn
+         jump    tst_ret     ;SYN sent, awating ACK
+
+         movlw   (1 << 2)    ;indicate connection is up normally
+
+tst_recv                     ;connection could have received bytes available
+         movwf   reg0        ;init to return flags in W
+         btfsc   indf0, tuf_xmit
+         bsf     reg0, 6     ;transmit buffer is open
+
+         addfsr0 tu_bput - tu_flags ;point to BPUT field
+         movff   postinc0, reg1 ;save receive buffer PUT index in REG1
+         addfsr0 tu_bget - (tu_bput + 1) ;point to BGET field
+         movf    postinc0, w ;load the receive buffer GET index into W
+         xorwf   reg1, w     ;compare it to the PUT index
+         skip_z              ;no input bytes available
+         bsf     reg0, 5     ;indicate at least one input byte is available
+
+         addfsr0 tu_len + 1 - (tu_bget + 1) ;point to last byte of LEN field
+         movff   postdec0, reg2 ;get number of data bytes into REG2:REG1
+         movff   postdec0, reg1
+
+         addfsr0 tu_xsz - (tu_len - 1) ;point to XSZ field
+         movf    postinc0, w ;make length minus capacity in REG2:REG1
+         subwf   reg1
+         movf    postinc0, w
+         subwfb  reg2
+         btfsc   reg2, 7     ;buffer is full ?
+         bsf     reg0, 7     ;no, indicate there is room for another byte
+         jump    tst_leave
+
+tst_ret  unbank              ;return with the value in W
+         movwf   reg0
+
+tst_leave unbank             ;common exit point, REG0 set
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TCP_OPEN_CLIENT
+;
+;   Open a new TCP connection as a client to a remote server.  The IP address
+;   of the remote server is in REG7:REG6:REG5:REG4 and the server port at that
+;   address is in REG1:REG0.  FSR0  contains the start address of the receive
+;   buffer and REG2 its length.  The receive buffer is used implicitly by the
+;   TCP routines to store data bytes from received packets before the user reads
+;   them.  The receive buffer length must be from 1 to 256 bytes.  A REG2 value
+;   of 0 indicates 256 bytes.
+;
+;   REG8 contains the TCP unit number on success, which always has the high bit
+;   0 (valid TCP unit numbers are 0-127).  On failure, the high bit of REG8 is
+;   returned 1.
+;
+         glbsub  tcp_open_client, regf0 | regf1 | regf3 | regf9 | regf10 | regf11
+
+         movff   fsr0l, reg10 ;save pointer to receive buffer in REG11:REG10
+         movff   fsr0h, reg11
+;
+;   Find a unused TCP unit and set REG8 to the unit number.
+;
+         mcall   find_unused_unit ;get unused TCP unit number into REG8
+         btfsc   reg8, 7
+         jump    ocl_leave   ;no available TCP unit
+;
+;   Make the new local port number in LASTPORT.
+;
+;   Implicitly assigned local port numbers are in the range 32768 to 65535,
+;   meaning the high bit of the 16 bit port number is always set.  New implicit
+;   local ports are assigned sequentially within this range with wrapping.
+;   Since it is possible for local port numbers derived in this way to
+;   eventually repeat, a candidate local port number must be checked against all
+;   other local port numbers currently in use.  If a duplicate is found, the
+;   next sequential number is tried.  Since there are far more possible
+;   port numbers than TCP units, this process is always guaranteed to succeed.
+;
+;   Actually the local port value of each TCP unit is checked regardless of
+;   whether the unit is in use or not.  This may occasionally reject a
+;   candidate because it happend to match the garbage local port value in a
+;   unused unit.  This causes little harm since there are plenty candidate
+;   local port values to try.  The advantage is that it will avoid duplicating
+;   a recently used local port in some cases, which could avoid confusion with
+;   old packets still in the network, or packets from other machines that still
+;   think the connection is open.
+;
+ocl_tryport unbank           ;back here to try new candidate local port number
+         dbankif lbankadr
+         movlw   0
+         incf    lastport+0  ;increment port number low byte
+         addwfc  lastport+1  ;propagate carry to high byte
+         bsf     lastport+1, 7 ;wrap within 32768-65535 range
+         lfsr    0, tu0_portl - sz_tunit ;point to local port before first TCP unit
+         loadk8  reg9, nunits ;init number of units left to check
+ocl_uloop unbank             ;back here each new unit to check
+         addfsr0 sz_tunit    ;point to next TCP unit
+         dbankif lbankadr
+         movf    postinc0, w ;compare this unit local port to candidate
+         xorwf   lastport+0, w
+         movwf   reg3
+         movf    postdec0, w
+         xorwf   lastport+1, w
+         iorwf   reg3, w
+         bz      ocl_tryport ;this local port in use, back and try next
+         decfsz  reg9        ;count one less TCP unit to check
+         jump    ocl_uloop   ;back to check next TCP unit
+;
+;   Fill in the new TCP unit.  Current state:
+;
+;     REG1:REG0  -  Remote port number.
+;
+;     REG2  -  Size of receive buffer.
+;
+;     REG3  -  Available.
+;
+;     REG7:REG6:REG5:REG4  -  Remote IP address.
+;
+;     REG8  -  TCP unit number.
+;
+;     REG9  -  Available.
+;
+;     REG11:REG10  -  Start address of receive buffer.
+;
+;     LASTPORT  -  Local port number.
+;
+         mcall   point_flags ;point FSR0 to FLAGS field of the new unit
+         movlw   (1 << tuf_inuse) | (1 << tuf_syn) ;set flags for initial state
+         movwf   postinc0
+
+         addfsr0 tu_portl - (tu_flags + 1) ;point to PORTL field
+         movff   lastport+0, postinc0 ;set local port number
+         movff   lastport+1, postinc0
+
+         addfsr0 tu_portr - (tu_portl + 2) ;point to PORTR field
+         movff   reg0, postinc0 ;set remote port number
+         movff   reg1, postinc0
+
+         addfsr0 tu_ipr - (tu_portr + 2) ;point to IPR field
+         movff   reg4, postinc0 ;set remote IP address
+         movff   reg5, postinc0
+         movff   reg6, postinc0
+         movff   reg7, postinc0
+
+         addfsr0 tu_rbuf - (tu_ipr + 4) ;point to RBUF field
+         movff   reg10, postinc0 ;save start address of the user receive buffer
+         movff   reg11, postinc0
+
+         addfsr0 tu_rbsz - (tu_rbuf + 2) ;point to RBSZ field
+         decf    reg2, w     ;set user receive buffer capacity
+         movwf   postinc0
+
+         addfsr0 tu_bput - (tu_rbsz + 1) ;point to BPUT field
+         clrf    postinc0    ;init index where to write next byte into recv buffer
+
+         addfsr0 tu_bget - (tu_bput + 1) ;point to BGET field
+         clrf    postinc0    ;init index of next byte to read from recv buffer
+
+         addfsr0 tu_ack - (tu_bget + 1) ;point to ACK field
+         clrf    postinc0    ;next seq num, set later from SYN packet
+         clrf    postinc0
+         clrf    postinc0
+         clrf    postinc0
+
+         addfsr0 tu_dmax - (tu_ack + 4) ;point to DMAX field
+         movlw   low dmax_def ;set payload size of data transmit packets
+         movwf   postinc0
+         movlw   high dmax_def
+         movwf   postinc0
+
+         addfsr0 tu_seqnx - (tu_dmax + 2) ;point to SEQNX field
+         clrf    postinc0    ;init our outgoing sequence number
+         clrf    postinc0
+         clrf    postinc0
+         clrf    postinc0
+
+         addfsr0 tu_mlife - (tu_seqnx + 4) ;point to MLIFE field
+         movlw   life_def    ;set default inactivity lifetime before close
+         movwf   postinc0
+
+         addfsr0 tu_life - (tu_mlife + 1) ;point to LIFE field
+         movlw   life_def    ;init remaining lifetime
+         movwf   postinc0
+;
+;   Send the initial SYN packet to request the connection be opened.
+;
+         movlw   (1 << tflg_syn) ;pass TCP flags to set in packet
+         movwf   reg0
+         mcalll  send_packet ;send the initial SYN packet
+         btfss   flags, flagb_err ;packet not sent ?
+         jump    ocl_leave   ;packet was sent, return with success indication
+;
+;   The initial SYN packet failed to be sent for whatever reason.  Close the TCP
+;   unit and return with failure indication.
+;
+         mcall   point_flags ;point FSR0 to FLAGS field of the new unit
+         clrf    indf0       ;mark this TCP unit as unused
+         setf    reg8        ;indicate TCP unit not opened
+
+ocl_leave unbank             ;common exit point REG8 all set
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine TCP_OPEN_CLIENT_WAIT
+;
+;   Open a new TCP connection as a client to a remote server.  The IP address
+;   of the remote server is in REG7:REG6:REG5:REG4 and the server port at that
+;   address is in REG1:REG0.  FSR0 contains the start address of the receive
+;   buffer and REG2 its length.  The receive buffer is used implicitly by the
+;   TCP routines to store data bytes from received packets before the user reads
+;   them.  The receive buffer length must be from 1 to 256 bytes.  A REG2 value
+;   of 0 indicates 256 bytes.
+;
+;   This routine waits indefinitely until a connection to the server is
+;   successfully established.  REG8 is returned the TCP unit number the new
+;   connection is open on.
+;
+         glbsub  tcp_open_client_wait, regf10 | regf11
+
+         movff   fsr0l, reg10 ;save pointer to receive buffer in REG11:REG10
+         movff   fsr0h, reg11
+
+ocw_conn unbank              ;back here to try to open TCP unit again
+         movff   reg10, fsr0l ;pass start address of receive buffer
+         movff   reg11, fsr0h
+         mcall   tcp_open_client ;attempt to connect to remote server
+         btfss   reg8, 7     ;no TCP unit opened ?
+         jump    ocw_open    ;TCP unit opened, unit number is in REG8
+;
+;   No TCP unit was opened by the open attempt.  Wait a while and try again.
+;
+ocw_wait unbank
+         pushreg reg0        ;temp save register trashed by WAITMS
+         pushreg reg1
+         waitms  2000        ;wait a little while
+         popreg  reg1        ;restore registers
+         popreg  reg0
+         jump    ocw_conn    ;back and try to open connection again
+;
+;   A TCP unit was opened.  This means the initial connection request was sent
+;   and will be resent periodically until the other side accepts the connection
+;   or specifically rejects it.  The TCP unit state is monitored here in a loop
+;   until the connection request is resolved one way or the other.
+;
+ocw_open unbank              ;TCP unit was opened
+         gcall   task_yield_save ;give all other tasks a chance to run
+         point0  reg8, tu_flags ;point to the FLAGS field of the TCP unit
+         btfsc   indf0, tuf_syn ;no longer in initial SYN sent state ?
+         jump    ocw_open    ;no resolution, back and check again
+;
+;   The TCP unit is no longer in the initial SYN sent state, which means the
+;   connection attempt has been resolved somehow.  FSR0 is pointing to the
+;   FLAGS field in the TCP unit.
+;
+         btfss   indf0, tuf_cclos ;connection closed awaiting user close ?
+         jump    ocw_leave   ;connection established, return to caller
+
+         mcall   tcp_close   ;acknowledge connection closed, free the TCP unit
+         jump    ocw_wait    ;wait a while then try again
+
+ocw_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TCP_PUT
+;
+;   Send the byte in REG0 to the other end of a existing TCP connection.  REG8
+;   is the TCP unit the connection is open on.  The byte may be buffered and
+;   is not guaranteed to be sent until TCP_FLUSH is called on this TCP unit.
+;   The following bits in the global FLAGS byte are set according to what was
+;   done and the state of the TCP connection:
+;
+;     FLAGB_ERR  -  The connection is closed.  No more data can be transferred.
+;       This can also mean the TCP unit number passed in REG8 was invalid, but
+;       that is a caller error.
+;
+;     FLAGB_GT  -  The byte was sent as requested.
+;
+;   If neither flag bit is set, then the connection is still open but was not in
+;   a state to accept a new byte at this time.  This routine may be able to
+;   transfer the byte at a later time.
+;
+         glbsub  tcp_put, regf0 | regf1 | regf2 | regf3 | regf7 | regf9
+
+         movlw   (1 << flagb_err) ;init to connection closed, byte not transferred
+         movwf   reg9
+         unit_setup put_leave ;point FSR0 to FLAGS field of TCP unit
+;
+;   Check for connection closed.
+;
+         btfsc   indf0, tuf_uclos
+         jump    put_leave   ;user previously closed connection
+         btfsc   indf0, tuf_cclos
+         jump    put_leave   ;other end has already closed connection
+         btfsc   indf0, tuf_fin
+         jump    put_leave   ;we previously sent FIN
+
+         bcf     reg9, flagb_err ;indicate connection not closed
+;
+;   Check for connection not in right state to accept a data byte.
+;
+         btfsc   indf0, tuf_listen
+         jump    put_leave   ;server awaiting connection
+         btfsc   indf0, tuf_syn
+         jump    put_leave   ;connection still being established
+
+         movff   reg0, reg3  ;save the data byte in REG3
+;
+;   If a transmit packet is currently open, check that it has room for another
+;   data byte.  If not, return.  This situation is caused by a previous packet
+;   sent that requires a ACK from the other end, but that ACK has not yet been
+;   received.  Once a packet is transmitted, its number of data bytes is frozen
+;   and no new data bytes can be added to it.
+;
+         mcalll  send_lock   ;lock sending, point to FLAGS field
+         movff   reg8, reg7  ;save TCP unit number in REG7
+
+         btfss   indf0, tuf_xmit ;transmit packet is currently open ?
+         jump    put_open    ;no, go open one
+
+         addfsr0 tu_xsz - tu_flags ;point to XSZ field
+         movff   postinc0, reg0 ;get max payload size of this packet
+         movff   postinc0, reg1
+
+         addfsr0 tu_len - (tu_xsz + 2) ;point to LEN field
+         movf    postinc0, w ;compute remaining room
+         subwf   reg0
+         movf    postinc0, w
+         subwfb  reg1, w
+         iorwf   reg0, w
+         skip_nz             ;packet can accept another byte ?
+         jump    put_unlock  ;no, abort
+
+         mcall   point_flags ;point back to FLAGS field
+         jump    put_isopen  ;yes, go stuff it
+;
+;   No transmit packet is currently open.  Open one.  FSR0 is pointing to the
+;   FLAGS field of the TCP unit.
+;
+put_open unbank              ;open a new transmit packet
+         addfsr0 tu_dmax - tu_flags ;point to DMAX field
+         movff   postinc0, reg0 ;get payload size of data transmit packet
+         movff   postinc0, reg1
+         mcalll  open_out    ;open the IP transmit packet
+         mcall   point_flags ;point to FLAGS field in the TCP unit
+         btfss   indf0, tuf_xmit ;transmit packet opened
+         jump    put_unlock  ;no, abort
+
+put_isopen unbank            ;transmit packet is open with room for another byte
+;
+;   Stuff the data byte into the open transmit packet.  FSR0 is pointing to the
+;   FLAGS field of the TCP unit.  The data byte is in REG3.  The transmit packet
+;   checksum is updated with the new byte.
+;
+         bsf     reg9, flagb_gt ;the data byte will be transferred
+
+         addfsr0 tu_ipx - tu_flags ;point to IPX field
+         movff   postinc0, reg8 ;get IP transmit packet identifier in REG8
+
+         addfsr0 tu_len - (tu_ipx + 1) ;point to LEN field
+         movf    reg3, w     ;get the data byte
+         movwf   reg0        ;init it into both bytes of word to add to checksum
+         movwf   reg1
+         btfss   indf0, 0
+         clrf    reg0        ;even byte, leave it only in high half of word
+         btfsc   indf0, 0
+         clrf    reg1        ;odd byte, leave it only in low half of word
+         mcalll  cksum       ;accumulate this byte into transmit packet checksum
+
+         movff   postinc0, reg0 ;get offset of this byte into payload
+         movff   postinc0, reg1
+         movlw   low tcp_hsize ;add TCP header size to make IP offset
+         addwf   reg0
+         movlw   high tcp_hsize
+         addwfc  reg1
+         gcall   ip_xmit_ofs ;set write offset into IP packet for this byte
+         movff   reg3, reg0  ;pass the data byte
+         gcall   ip_xmit_write ;write the data byte into the IP packet
+
+         point0  reg7, tu_len ;point to LEN field in TCP unit
+         movlw   0
+         incf    postinc0    ;increment TCP payload length to include this byte
+         addwfc  postdec0
+;
+;   Send the packet if this data byte filled it.  Current state:
+;
+;     REG0  -  Unused
+;
+;     REG1  -  Unused
+;
+;     REG2  -  Unused
+;
+;     REG3  -  Unused
+;
+;     REG7  -  TCP unit number.
+;
+;     REG8  -  IP transmit packet ID.
+;
+;     FSR0  -  Pointing to the LEN field in the TCP unit.
+;
+         addfsr0 tu_xsz - tu_len ;point to XSZ field
+         movff   postinc0, reg0 ;get packet payload capacity
+         movff   postinc0, reg1
+
+         addfsr0 tu_len - (tu_xsz + 2) ;point to LEN field
+         movf    postinc0, w ;compute amount of room left
+         subwf   reg0
+         movf    postinc0, w
+         subwfb  reg1, w
+         iorwf   reg0, w     ;make OR of room left bytes
+         bnz     put_unlock  ;packet not full ?
+;
+;   The transmit packet is now full.  Send it.
+;
+         movff   reg7, reg8  ;pass the TCP unit number in REG8
+         movlw   (1 << tflg_ack) | (1 << tflg_psh)
+         movwf   reg0        ;pass TCP flags to set in this packet
+         mcalll  send_unlock ;release the sending lock
+         mcalll  send_packet ;send the packet
+         jump    put_leave   ;all done
+
+put_unlock unbank            ;release sending lock and return
+         movff   reg7, reg8  ;pass TCP unit number in REG8
+         mcalll  send_unlock
+
+put_leave unbank             ;common exit point, return flags set in REG9
+         movff   reg9, flags
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine TCP_PUT_WAIT
+;
+;   Send the byte in REG0 to the other end of the TCP connection.  If the
+;   connection is temporarily not in a state to accept a new byte, this routine
+;   waits until it is, then transfers the byte.  The FLAGB_ERR bit in FLAGS is
+;   set iff the connection was closed or a hard error occurred.
+;
+         glbsub  tcp_put_wait, noregs
+
+putw_retry unbank            ;back here to try to transfer the byte again
+         mcall   tcp_put     ;try to transfer the byte
+         btfsc   flags, flagb_err
+         jump    putw_leave  ;connection closed or hard error
+         btfsc   flags, flagb_gt
+         jump    putw_leave  ;the byte was successfully transferred
+
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    putw_retry  ;back and try to transfer the byte again
+
+putw_leave unbank            ;common exit point, FLAGB_ERR all set
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TCP_FLUSH
+;
+;   Transmit any buffered output data.  The byte written with the next call to
+;   TCP_PUT is guaranteed to be the first data byte of a packet.  REG8 must
+;   contain the TCP unit number.
+;
+         glbsub  tcp_flush, regf0 | regf1
+
+         unit_setup fls_leave ;point FSR0 to FLAGS field of TCP unit
+         btfss   indf0, tuf_xmit ;transmit packet is open ?
+         jump    fls_leave   ;no, nothing to do
+
+         movlw   (1 << tuf_listen) | (1 << tuf_syn) | (1 << tuf_fin) | (1 << tuf_uclos) | (1 << tuf_cclos)
+         andwf   indf0, w    ;mask in flags that must be off for FLUSH to make sense
+         bnz     fls_leave   ;not in mode where FLUSH is meaningful ?
+;
+;   Skip it if the transmit packet was previously sent.
+;
+         addfsr0 tu_ntry - tu_flags ;point to NTRY field
+         movf    indf0
+         bnz     fls_leave   ;the packet was previously sent
+;
+;   Send the packet.
+;
+         movlw   (1 << tflg_ack) | (1 << tflg_psh)
+         movwf   reg0        ;pass TCP flags to set in packet
+         mcalll  send_packet ;force the current packet to be sent
+
+fls_leave unbank
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine TCP_GET
+;
+;   Get the next TCP input byte if one is available.  REG8 must contain the TCP
+;   unit number.  If a byte is available, then it is returned in REG0, the
+;   FLAGB_GT bit of FLAGS is set, and the FLAGB_ERR bit of FLAGS is cleared.  If
+;   no byte is immediately available then the FLAGB_GT bit will be cleared.  If
+;   the connection is still open, then the FLAG_ERR bit will be cleared,
+;   otherwise it will be set.  In other words, FLAGB_GT indicates whether
+;   returning with a byte, and FLAGB_ERR whether the connection is closed.  The
+;   REG0 value is undefined when not returning with a data byte.
+;
+         glbsub  tcp_get, regf1
+
+         bcf     flags, flagb_gt ;init to indicate not returning with data byte
+         bsf     flags, flagb_err ;init to indicate connection closed
+         unit_setup get_leave ;point FSR0 to FLAGS field of TCP unit
+         btfsc   indf0, tuf_uclos
+         jump    get_leave   ;user previously closed connection (duh)
+         movff   indf0, reg1 ;save TCP unit flags in REG1
+
+         addfsr0 tu_bget - tu_flags ;point to BGET field in the TCP unit
+         movff   postdec0, reg0 ;save buffer read index in REG0
+
+         addfsr0 tu_bput - (tu_bget - 1) ;point to BPUT field
+         movf    postdec0, w ;get the buffer write index
+         xorwf   reg0, w     ;compare it to the read index
+         bnz     get_read    ;a data byte is available
+;
+;   There is no data byte in the receive buffer.  REG1 contains a copy of the
+;   TCP unit flags.
+;
+         btfss   reg1, tuf_cclos ;the connection is already closed ?
+         bcf     flags, flagb_err ;indicate connection not closed
+         jump    get_leave
+;
+;   A data byte is available.  FSR0 is pointing to the BPUT field minus 1.  REG0
+;   contains the receive buffer read index.
+;
+get_read unbank
+         addfsr0 tu_rbuf - (tu_bput - 1) ;point to RBUF field
+         movf    postinc0, w ;make adr to read data byte from in REG1:REG0
+         addwf   reg0
+         movlw   0
+         addwfc  postinc0, w
+         movwf   reg1
+         ;
+         ;   Get the data byte.
+         ;
+         pushreg fsr0l       ;temp save FSR0
+         pushreg fsr0h
+         movff   reg0, fsr0l
+         movff   reg1, fsr0h
+         movff   indf0, reg0 ;get the data byte into REG0
+         popreg  fsr0h       ;restore FSR0
+         popreg  fsr0l
+         ;
+         ;   Update the receive buffer read index to the next location, taking
+         ;   buffer wrapping into account.
+         ;
+         addfsr0 tu_rbsz - (tu_rbuf + 2) ;point to RBSZ field
+         movff   postinc0, reg1 ;save last valid buffer index in REG1
+
+         addfsr0 tu_bget - (tu_rbsz + 1) ;point to BGET field
+         incf    indf0       ;advance the read index by one
+         movf    indf0, w    ;get the new index
+         subwf   reg1, w     ;compare it to the last valid index
+         skip_wle            ;still within the buffer ?
+         clrf    indf0       ;no, wrap back to start of buffer
+
+         bcf     flags, flagb_err ;indicate connection not closed
+         bsf     flags, flagb_gt ;indicate returning with data byte
+
+get_leave unbank             ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine TCP_GET_WAIT
+;
+;   Wait until the next TCP input byte is available, then return it.  The byte
+;   is returned in REG0.  REG8 must contain the TCP unit number.  If the TCP
+;   connection is closed, then the FLAGB_ERR bit of FLAGS is set and the
+;   returned value of REG0 is undefined.  FLAGB_ERR is cleared when returning
+;   normally with a data byte in REG0.
+;
+         glbsub  tcp_get_wait, noregs
+
+getw_retry unbank            ;back here to try again after no byte available
+         mcall   tcp_get     ;try to get the next input byte
+         btfsc   flags, flagb_err ;connection still open ?
+         jump    getw_leave  ;no, return with connection closed indication
+         btfsc   flags, flagb_gt ;didn't get a data byte ?
+         jump    getw_leave  ;return with the data byte
+;
+;   No byte is immediately available, but the TCP connection is still open.
+;
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    getw_retry  ;back to check for received byte again
+
+getw_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TCP_CLOSE
+;
+;   Close a TCP connection.  The TCP unit number must be in REG8.  Nothing is
+;   done if REG8 contains a invalid TCP unit number (its high bit is set).
+;
+;   If the connection was previously open, then the other end is notified that
+;   the connection is being closed.  The TCP unit will stay in use until the
+;   other end acknowledges the closing or a timeout, whichever occurs first.
+;
+;   If the other end has previously closed the connection, then the TCP unit
+;   is completely closed by this call and is immediately available to be reused.
+;
+         glbsub  tcp_close, regf0
+
+         unit_setup cls_leave ;point FSR0 to FLAGS field of TCP unit
+         mcalll  send_lock   ;lock access to sending state
+
+         btfsc   indf0, tuf_uclos ;this is first attempt by user to close ?
+         jump    cls_close   ;user tried to close before, close and release TCP unit
+         bsf     indf0, tuf_uclos ;indicate user considers unit closed
+
+         btfsc   indf0, tuf_listen
+         jump    cls_close   ;never really opened, just close the TCP unit
+         btfsc   indf0, tuf_syn
+         jump    cls_close   ;only sent SYN, never got ACK, just close the unit
+         btfsc   indf0, tuf_cclos
+         jump    cls_close   ;the connection is already closed, close the unit
+         btfsc   indf0, tuf_fin
+         jump    cls_uleave  ;FIN already sent, nothing more to do
+;
+;   The TCP connection is open normally.  Send FIN to the other end.
+;
+         bsf     indf0, tuf_fin ;indicate in TCP unit that FIN sent
+
+         movlw   (1 << tflg_ack) | (1 << tflg_fin)
+         movwf   reg0        ;pass flags to set in TCP packet
+         mcalll  send_unlock ;release lock to allow sending packet
+         mcalll  send_packet ;send the FIN packet
+         jump    cls_leave   ;nothing more to do
+;
+;   Completely close the TCP unit.  The unit will be marked as not in use and
+;   will be available for immediate re-use.
+;
+cls_close unbank             ;completely close the TCP unit
+         mcalll  xmit_close  ;close open transmit packet, if any
+         clrf    indf0       ;indicate this unit not in use
+
+cls_uleave unbank            ;release sending lock and leave
+         mcalll  send_unlock ;release lock on sending
+
+cls_leave unbank             ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine TCP_100MS
+;
+;   This routine gets called by the network background processing task once
+;   every 100mS to give this module a opportunity to perform time-related
+;   functions.
+;
+;   This routine is allowed to trash all the REGn general registers.
+;
+         glbsub  tcp_100ms, noregs
+
+         dbankif lbankadr
+         setf    reg10       ;init to not 1 second tick this time
+         decfsz  cnt1s       ;one less 100mS tick until next 1s tick
+         jump    tik_d1s     ;not a 1 second tick this time
+         clrf    reg10       ;indicate 1 second tick this time
+         loadk8  cnt1s, 10   ;reset counter for next 1s tick
+tik_d1s                      ;done creating 1 second tick
+
+         clrf    reg8        ;init number of next TCP unit to check
+         loadk8  reg9, nunits ;init number of TCP units left to check
+tik_unit unbank              ;back here to check each new TCP unit
+         mcalll  point_flags ;point FSR0 to FLAGS field in the TCP unit
+         btfss   indf0, tuf_inuse
+         jump    tik_next    ;this TCP unit is not in use, skip it
+;
+;   Current register usage:
+;
+;     REG8  -  TCP unit number.
+;
+;     REG9  -  Number of TCP units left to check, including this one.
+;
+;     REG10  -  Bit 0 = 0 indicates 1 second tick.
+;
+;     FSR0  -  Pointing to FLAGS field of this TCP unit.
+;
+;   Check for inactivity timeout elapsed.  This means there has been no activity
+;   on the TCP unit for long enough that it could be a hung connection.  This
+;   can happen, for example, if the other end powered down or the network
+;   connection to it got interrupted and this end has nothing to send.
+;
+;   The remaining lifetime is in units of seconds, so this section is only run
+;   when there is a 1 second tick.  A 1 second tick is indicated by the low bit
+;   of REG10 being 0.
+;
+         btfsc   reg10, 0    ;one second tick this time ?
+         jump    tik_dlife   ;no, skip this section
+
+         btfsc   indf0, tuf_listen ;not server awaiting connection request
+         jump    tik_dlife   ;unconnected servers don't time out
+         btfsc   indf0, tuf_cclos
+         jump    tik_dlife   ;connection considered closed, nothing to time out
+
+         addfsr0 tu_life - tu_flags ;point to LIFE field
+         decf    indf0, w    ;count one less tick before end of life
+         movwf   indf0
+         movwf   reg0        ;save new life value in REG0
+         addfsr0 tu_flags - tu_life ;point back to FLAGS field
+         movf    reg0
+         bnz     tik_dlife   ;still some life left ?
+         ;
+         ;   The lifetime of this TCP unit has just expired.
+         ;
+         loadk8  reg0, (1 << tflg_fin) | (1 << tflg_ack) ;send FIN and ACK flags
+         mcalll  send_packet ;try to tell the other side we're done
+         mcalll  point_flags ;point FSR0 to FLAGS field in the TCP unit
+         bsf     indf0, tuf_fin ;indicate FIN has been sent
+
+tik_dlife unbank             ;done checking and updating lifetime
+;
+;   Check for transmit packet open.  All the remaining things we do here to a
+;   TCP unit only apply when a transmit packet is open.  FSR0 is pointing to the
+;   FLAGS field in the TCP unit.
+;
+         btfss   indf0, tuf_xmit
+         jump    tik_next    ;no transmit packet open, nothing to do
+;
+;   This unit has a transmit packet open.
+;
+         addfsr0 tu_ntry - tu_flags ;point to NTRY field in TCP unit
+         movf    postinc0, w ;get number of times packet was transmitted
+         skip_nz             ;packet was transmitted at least once ?
+         jump    tik_next    ;no, no timeouts to handle for this packet
+         movwf   reg2        ;save number of tranmits in REG2
+;
+;   The transmit packet has been sent at least once.  The retry and abort
+;   timeouts are therefore in effect.  REG2 contains the number of times this
+;   packet has already been transmitted.
+;
+         addfsr0 tu_rtick - (tu_ntry + 1) ;point to RTICK field
+         decfsz  indf0       ;count one less tick until timeout
+         jump    tik_next    ;no timeout now, nothing more to do
+;
+;   The retry timeout for the transmit packet has just expired.  REG2 contains
+;   the number of previous tranmissions of this packet, which is at least 1.
+;
+         movf    reg2, w     ;get number of transmits of this packet
+         sublw   [v nretry]  ;compare to max before giving up
+         skip_wgt            ;hit retry limit ?
+         jump    tik_resend  ;no, resend the packet
+;
+;   The retry limit for this packet has been reached.  Consider the connection
+;   closed.
+;
+         mcalll  xmit_close  ;close the IP transmit packet
+         mcalll  point_flags ;point back to the FLAGS byte of the TCP unit
+         bsf     indf0, tuf_cclos ;flag the connection as closed
+         bcf     indf0, tuf_listen ;definitely not waiting for connection request
+         bcf     indf0, tuf_syn ;definitely not waiting for SYN ACK
+         btfss   indf0, tuf_uclos ;the user thinks it's closed too ?
+         jump    tik_next    ;no, user doesn't know yet, leave unit open
+         mcalll  close_final ;completely close the unit and release resources
+         jump    tik_next    ;done with this TCP unit
+;
+;   Resend the packet.
+;
+tik_resend unbank
+         mcalll  point_flags ;point back to the FLAGS byte of the TCP unit
+         movff   indf0, reg2 ;save TCP unit flags in REG2
+         movlw   1 << tflg_ack ;get flags to send for normal case
+         btfsc   indf0, tuf_syn
+         movlw   1 << tflg_syn ;this is resend of initial SYN packet
+         movwf   reg0        ;init flags to send in packet
+         btfsc   indf0, tuf_fin
+         bsf     reg0, tflg_fin ;previously sent FIN, keep sending it
+         addfsr0 tu_len - tu_flags ;point to LEN field
+         movf    postinc0, w
+         iorwf   postinc0, w ;make OR of data length bytes
+         skip_z              ;no data bytes in this packet ?
+         bsf     reg0, tflg_psh ;send PSH flag when there are data bytes in packet
+         mcalll  send_packet ;resend the packet
+         ;
+         ;   The packet has been resent.  The number of send attempts in NTRY
+         ;   has been updated, and RTICK has been initialized to the initial
+         ;   wait time for after the first send attempt.
+         ;
+         point0  reg8, tu_ntry ;point to NTRY field in the TCP unit
+         ;
+         ;   Handle special case of initial SYN packet.  These are sent
+         ;   repeatedly every TRETRY seconds until the server accepts the
+         ;   connection by sending SYN ACK, tells us to bug off by sending RST,
+         ;   or the user aborts the process by calling TCP_CLOSE.
+         ;
+         ;   The TCP unit flags were previously saved in REG2.  FSR0 is pointing
+         ;   to the NTRY field in the TCP unit.
+         ;
+         btfss   reg2, tuf_syn ;this was resend of initial SYN ?
+         jump    tik_rsend_normal ;no, was normal resend
+         movlw   1
+         movwf   postinc0    ;reset to indicate packet only sent once
+         jump    tik_next    ;done with this TCP unit
+         ;
+         ;   The resend was for other than a initial SYN packet.  For these the
+         ;   initial retry interval is TRETRY seconds, which is increased by
+         ;   DRETRY seconds every retry.  For example, if TRETRY is 2 seconds,
+         ;   DRETRY is 1 second, and the maximum number of retry attempts is 3,
+         ;   then the sequence will look like this:
+         ;
+         ;     Send attempt 1
+         ;     Wait 2 seconds, total of 2 sec from first send
+         ;     Send attempt 2
+         ;     Wait 3 seconds, total of 5 sec from first send
+         ;     Send attempt 3
+         ;     Wait 4 seconds, total of 9 sec from first send
+         ;     Send attempt 4
+         ;     Wait 5 seconds, total of 14 sec from first send
+         ;     Give up
+         ;
+tik_rsend_normal unbank
+         decf    indf0, w    ;get the number of retries
+         mullw   tkretry     ;make additional ticks for this retry
+         addfsr0 tu_rtick - tu_ntry ;point to RTICK field
+         movf    prodl, w    ;get the additional ticks
+         addwf   indf0       ;add them to timeout for this send attempt
+;
+;   Done processing this TCP unit, proceed to next.
+;
+tik_next unbank              ;advance to the next TCP unit to check
+         check_yield         ;let other tasks run if it is time
+         incf    reg8        ;make number of next unit to check
+         decfsz  reg9        ;count one less unit left to check
+         jump    tik_unit    ;back to check this new unit
+
+         leaverest

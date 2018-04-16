@@ -1,0 +1,54 @@
+;   24 bit floating point format:
+;
+;     24 bits are used to describe a floating point value using 1 sign bit
+;     7 exponent bits, and 16 mantissa bits as follows:
+;
+;     |         byte 2        |         byte 1        |         byte 0        |
+;     |           |           |           |           |           |           |
+;      23 22 21 20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+;     ------------------------------------------------------------------------
+;     |  |                    |                                               |
+;     | S|      EXP           |                   MANT                        |
+;     |  |                    |                                               |
+;     ------------------------------------------------------------------------
+;
+;     S  -  Sign bit.  0 for positive or zero value, 1 for negative value.
+;
+;     EXP  -  Exponent.  The overall floating point value is the mantissa
+;       value times 2 ** (EXP - 64) when EXP is in the range from 1 to 127.
+;       The special EXP value of 0 is only used when the overall floating
+;       point value is 0.0.
+;
+;     MANT  -  Mantissa.  Except for the special case when the overall
+;       floating point value is 0, the mantissa represents a fixed point
+;       value such that 1 <= mantissa < 2.  This means the integer part of
+;       the mantissa is always 1.  Since this integer part is always the
+;       same, it is not stored.  The MANT field contains the 16 most
+;       significant fraction bits of the mantissa value.  Therefore
+;       MANT = (mantissa - 1) * 65536.  An overall floating point value of
+;       0.0 is indicated by EXP = 0.  In that case MANT is reserved, and
+;       should be 0.
+;
+;    Consider the following examples:
+;
+;      0.0 --> 000000h
+;
+;        S = 0  (positive or zero)
+;        EXP = 0  (special case for 0.0)
+;        MANT = 0  (special case for 0.0)
+;
+;      1.0 --> 400000h
+;
+;        S = 0  (positive or zero)
+;        exponent = 0, EXP = 64 --> 40h
+;        mantissa = 1.0, MANT = 0
+;
+;      -3.141593 --> C19220h
+;
+;        S = 1  (negative)
+;        exponent = 1, EXP = 65 --> 41h
+;        mantissa = 1.570797, MANT = 37,408 --> 9220h
+;
+;   Unless otherwise specified, overflow and underflow values are silently
+;   clipped to the maximum magnitude (7FFFFF for positive, FFFFFF for negative)
+;   and zero, respectively.

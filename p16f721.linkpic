@@ -1,0 +1,27 @@
+//   Linker control file for the PIC 16F721.
+//
+CODEPAGE NAME=config START=0x2007 END=0x2008 PROTECTED //special processor config word
+CODEPAGE NAME=idlocs START=0x2000 END=0x2003 PROTECTED //ID words
+
+SECTION NAME=.CONFIG ROM=config
+SECTION NAME=.IDLOCS ROM=idlocs
+
+CODEPAGE NAME=code0      START=0  END=0x7FF //code page 0
+CODEPAGE NAME=code1  START=0x800  END=0xFFF //code page 1
+
+DATABANK NAME=bank0  START=0x20  END=0x6F //register bank 0
+DATABANK NAME=bank1  START=0xA0  END=0xEF //register bank 1
+DATABANK NAME=bank2 START=0x120 END=0x16F //register bank 2
+
+SHAREBANK NAME=globalram  START=0x70  END=0x7F PROTECTED //global regs, bank 0
+SHAREBANK NAME=globalram  START=0xF0  END=0xFF PROTECTED //global regs, bank 1
+SHAREBANK NAME=globalram START=0x170 END=0x17F PROTECTED //global regs, bank 2
+SHAREBANK NAME=globalram START=0x1F0 END=0x1FF PROTECTED //global regs, bank 3
+
+SECTION NAME=.udata_shr RAM=globalram //global memory mapped to all register banks
+SECTION NAME=.BANK0 RAM=bank0 //for registers explicitly in bank 0
+SECTION NAME=.BANK1 RAM=bank1 //for registers explicitly in bank 1
+SECTION NAME=.BANK2 RAM=bank2 //for registers explicitly in bank 2
+SECTION NAME=.OVRL0 RAM=bank0 //for overlays explicitly in bank 0
+SECTION NAME=.OVRL1 RAM=bank1 //for overlays explicitly in bank 1
+SECTION NAME=.OVRL2 RAM=bank2 //for overlays explicitly in bank 2

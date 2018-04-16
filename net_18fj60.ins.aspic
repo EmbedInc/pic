@@ -1,0 +1,438 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Low level driver for the ethernet MAC/PHY built into the PIC 18FxxJ60
+;   series.
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;       Ethernet module.
+;
+/if [= mactype "FJ60"] then
+
+         extern  currtask    ;ID of the currently running task
+         extern_flags        ;declare global flag bits EXTERN
+;
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     [v lbank_18fj60] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+;
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+mac_locktsk res  1           ;ID of task that has the MAC/PHY locked
+
+         global  mac_locktsk
+;
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+
+.18fj60  code
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+;   This routine is assumed to be called during module initialization
+;   before system startup.  The network routines can therefore not be
+;   acquired before calling this module.  However multi-tasking has
+;   not been enabled yet either, so this call is guaranteed to be
+;   single-threaded.
+;
+         glbsub  fj60_init, noregs
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_LOCK
+;
+;   Lock the MAC/PHY for exclusive access.  If it is already locked, then this
+;   routine will stall until it is available.  The routines in this module do
+;   not lock and unlock the MAC themselves.  That is the responsibility of the
+;   caller.  The lock/unlock mechanism is provided in this module as a service
+;   to higher level subsystems.
+;
+         glbsub  fj60_lock, noregs
+
+lock_loop unbank             ;back here until lock is available
+         dbankif gbankadr
+         btfss   flag_maclock ;MAC locked by someone else ?
+         jump    lock_leave  ;no
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    lock_loop   ;back to check the lock again
+
+lock_leave dbankis gbankadr  ;common exit point
+         bsf     flag_maclock ;indicate the MAC is now locked
+         movff   currtask, mac_locktsk ;remember which task has the lock
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_UNLOCK
+;
+;   Release the lock on the MAC/PHY acquired by FJ60_LOCK.
+;
+         glbsub  fj60_unlock, noregs
+
+         dbankif gbankadr
+         bcf     flag_maclock ;indicate the MAC is not locked
+         setf    mac_locktsk ;invalidate ID of locking task
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Local subroutine WAIT_ENAB
+;
+;   Wait 1.6uS.  This length wait is required after releasing the ethernet
+;   receive or transmit logic from reset.
+;
+         locsub  wait_enab, noregs
+
+         waitns  1600, 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_RESET
+;
+;   Reset the MAC/PHY.
+;
+         glbsub  fj60_reset, noregs
+
+         setreg  0, econ2    ;disable the ethernet module
+
+         setreg  b'11000000', econ1
+                 ; 1------- hold transmit logic in reset
+                 ; -1------ hold receive logic in reset
+                 ; --0----- stop any DMA in progress
+                 ; ---0---- configure DMA to copy, not checksum compute
+                 ; ----0--- stop any transmission in progress
+                 ; -----0-- disable packet reception
+                 ; ------XX unused
+
+         setreg  0, eie      ;disable all ethernet interrupts
+
+         dbankif econ2
+         bsf     econ2, ethen ;enable the ethernet module
+
+rst_wphy unbank              ;wait until PHY is ready
+         gcall   task_yield_save ;give other tasks a chance to run
+         dbankif estat
+         btfss   estat, phyrdy ;PHY is now ready ?
+         jump    rst_wphy    ;no, wait a little while longer
+
+         dbankif econ1
+         bcf     econ1, txrst ;release transmit logic from reset
+         mcall   wait_enab   ;mandatory wait after release from reset
+         dbankif econ1
+         bcf     econ1, rxrst ;release receive logic from reset
+         mcall   wait_enab   ;mandatory wait after release from reset
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_BUFPUT
+;
+;   Write an array of bytes to the MAC/PHY data buffer.  FSR0 contains the
+;   address of the first source byte and will be trashed.  REG2:REG1 contains
+;   the number of bytes to transfer.
+;
+;   It is the caller's responsibility to set up the MAC/PHY to receive data
+;   bytes in a meaningful way.  This includes setting the buffer write
+;   address understanding how the addresses will increment and wrap in the
+;   MAC/PHY data buffer.
+;
+         glbsub  fj60_bufput, regf1 | regf2
+
+         dbankif econ2
+         bsf     econ2, autoinc ;make sure address auto-increment is enabled
+
+bp_loop  unbank              ;back here to send each new byte
+         movf    reg1, w     ;make OR of both counter bytes
+         iorwf   reg2, w
+         skip_nz             ;at least one more byte left to do ?
+         jump    bp_done     ;no more bytes left, all done
+
+         decf    reg1        ;count one less byte left to do
+         skip_nborr
+         decf    reg2
+
+         movff   postinc0, edata ;write this byte to the MAC/PHY data buffer
+         jump    bp_loop     ;back to do the next byte
+
+bp_done  unbank              ;done sending all bytes, common exit point
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_WRITE_START
+;
+;   Set up for wrting sequential data buffer bytes to the MAC/PHY.  To write a
+;   sequence of bytes, call this routine, then FJ60_WRITE for each byte, then
+;   FJ60_WRITE_END.  No other calls are allowed between starting and ending the
+;   write sequence.
+;
+;   This method of writing a sequence of buffer bytes is more efficient than
+;   separate calls to FJ60_BUFPUT1.
+;
+         glbsub  fj60_write_start, regf0
+
+         dbankif econ2
+         bsf     econ2, autoinc ;make sure address auto-increment is enabled
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_WRITE
+;
+;   Write the next buffer byte.  The value in REG0 is written to the buffer,
+;   then the buffer address incremented by 1.  A write sequence must have been
+;   previously started with FJ60_WRITE_START.
+;
+         glbsub  fj60_write, noregs
+
+         movff   reg0, edata ;write the byte into the MAC/PHY data buffer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_WRITE_END
+;
+;   End the current sequential buffer write sequence started with
+;   FJ60_WRITE_START.  Other calls to this module are allowed again after this
+;   call.
+;
+         glbsub  fj60_write_end, noregs
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_BUFPUT1
+;
+;   Write the single byte in REG0 to the MAC/PHY data memory according to the
+;   current setup.
+;
+         glbsub  fj60_bufput1, noregs
+
+         movff   reg0, edata ;write the byte into the MAC/PHY data buffer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_BUFGET
+;
+;   Read sequential bytes from the MAC/PHY data buffer into a local array.
+;   FSR0 contains the address of where to write the first data byte, and
+;   will be trashed.  REG2:REG1 contains the number of data bytes to transfer.
+;
+;   It is the caller's responsibility to set up the MAC/PHY to read data
+;   bytes in a meaningful way.  This includes setting the buffer read
+;   address and understanding how the addresses will increment and wrap in the
+;   MAC/PHY data buffer.
+;
+;   The number of bytes actually read will be left in PRODH:PRODL, which is
+;   how a 16 bit value is returned by a C function.  This implementation
+;   always reads the requested number of bytes, so the same value passed
+;   in REG2:REG1 will be returned.
+;
+         glbsub  fj60_bufget, regf1 | regf2
+
+         dbankif econ2
+         bsf     econ2, autoinc ;make sure address auto-increment is enabled
+         movff   reg1, prodl ;pass back number of bytes transferred
+         movff   reg2, prodh
+
+bg_loop  unbank              ;back here to get each new byte
+         movf    reg1, w     ;make OR of both counter bytes
+         iorwf   reg2, w
+         skip_nz             ;at least one more byte left to do ?
+         jump    bg_done     ;no more bytes left, all done
+
+         decf    reg1        ;count one less byte left to do
+         skip_nborr
+         decf    reg2
+
+         movff   edata, postinc0 ;read byte from the MAC/PHY data buffer
+         jump    bg_loop     ;back to do the next byte
+
+bg_done  unbank              ;done with all bytes
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_READ_START
+;
+;   Start the reading of sequential data buffer bytes from the MAC/PHY.  To read
+;   a sequence of bytes, call this routine, then FJ60_READ for each byte, then
+;   FJ60_READ_END.  No other calls are allowed between starting and ending the
+;   read sequence.
+;
+;   This method of reading a sequence of buffer bytes is more efficient than
+;   separate calls to FJ60_BUFGET1.
+;
+         glbsub  fj60_read_start, regf0
+
+         dbankif econ2
+         bsf     econ2, autoinc ;make sure address auto-increment is enabled
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_READ
+;
+;   Read the next MAC/PHY buffer byte.  A read sequence must have been
+;   previously started with FJ60_READ_START.  The data byte is returned in REG0.
+;
+         glbsub  fj60_read, noregs
+
+         movff   edata, reg0 ;read byte from the MAC/PHY data buffer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_READ_END
+;
+;   End the current sequential buffer read sequence started with FJ60_READ_START.
+;   Other calls to this module are allowed again after this one.
+;
+         glbsub  fj60_read_end, noregs
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_BUFGET1
+;
+;   Read a single byte from the MAC/PHY data memory according to the current
+;   setup.  The byte is returned in REG0, and in W for C18 compatibility.
+;
+         glbsub  fj60_bufget1, noregs
+
+         dbankif econ2
+         bsf     econ2, autoinc ;make sure address auto-increment is enabled
+
+         movff   edata, reg0 ;read byte from the MAC/PHY data buffer
+
+         movf    reg0, w     ;return byte in W also for C18 compatibility
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_MIDONE
+;
+;   Wait until the MII interface is idle.  The MII interface must be idle before
+;   any new MII operation is started.  The BUSY bit in MISTAT is checked
+;   repeatedly until is is found to be 0.  Since it takes at most 10.24uS for
+;   the MII interface to perform a operation, this routine does a busy wait
+;   until the MII interface is idle.
+;
+         glbsub  fj60_midone, noregs
+
+         nop                 ;wait for BUSY bit to be valid after action start
+         dbankif mistat
+
+loop_midone
+         btfsc   mistat, busy ;MII interface is now idle ?
+         jump    loop_midone ;no, go back and check again
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_PHYSET
+;
+;   Write to a PHY register.  The data to write is in REG1:REG0, and the PHY
+;   register address is in the low 5 bits of REG2.  The write to the PHY
+;   register thru the MII interface will be started, but will likely not
+;   complete before this routine returns.  The caller must wait for the write
+;   to complete before attempting to use any additional MII resources.  This
+;   routine waits for the MII interface to be idle before starting the write,
+;   and may therefore be called when the MII interface may still be busy.
+;
+         glbsub  fj60_physet, noregs
+
+         dbankif micmd
+         clrf    micmd       ;cancel any PHY read in progress
+         mcall   fj60_midone ;wait for MII hardware to be idle
+
+         movff   reg2, miregadr ;set the PHY register address
+         movff   reg0, miwrl ;set low byte of data to write
+         movff   reg1, miwrh ;set high byte and start the write
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine FJ60_PHYGET
+;
+;   Read a PHY register.  The PHY register address is passed in the low 5 bits
+;   of REG2, and the result is returned in REG1:REG0.  This routine waits for
+;   the MII interface to be idle before performing the read.  The MII interface
+;   will be idle on return.  The result is also returned in PRODH:PRODL for
+;   compatibility with C18.
+;
+         glbsub  fj60_phyget, noregs
+
+         dbankif micmd
+         clrf    micmd       ;cancel any PHY read in progress
+         mcall   fj60_midone ;wait for MII hardware to be idle
+
+         movff   reg2, miregadr ;set the PHY register address
+         dbankif micmd
+         bsf     micmd, miird ;start the read
+         mcall   fj60_midone ;wait for transfer from PHY register to complete
+         dbankif micmd
+         bcf     micmd, miird ;clear the read command bit
+         movff   mirdl, reg0 ;get and return the 16 bit PHY register value
+         movff   mirdh, reg1
+
+         movff   reg0, prodl ;also return value in PRODH:PRODL for C18
+         movff   reg1, prodh
+
+         leaverest
+
+  /endif                     ;end of MACTYPE = FJ60

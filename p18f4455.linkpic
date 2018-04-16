@@ -1,0 +1,41 @@
+//   Linker control file for the PIC 18F4455 processor.
+//
+CODEPAGE NAME=config START=0x300000 END=0x30000D PROTECTED //processor config words
+CODEPAGE NAME=idlocs START=0x200000 END=0X200007 PROTECTED //ID words
+CODEPAGE NAME=eedata START=0xF00000 END=0xF000FF PROTECTED //Initial EEPROM data
+
+CODEPAGE NAME=code0 START=0 END=0x5FFF //program memory
+
+ACCESSBANK NAME=accessram START=0x0  END=0x5F PROTECTED //RAM part of access bank
+//
+//   General RAM.
+//
+DATABANK NAME=bank0 START=0x060 END=0x0FF //register bank 0
+DATABANK NAME=bank1 START=0x100 END=0x1FF //register bank 1
+DATABANK NAME=bank2 START=0x200 END=0x2FF //register bank 2
+DATABANK NAME=bank3 START=0x300 END=0x3FF //register bank 3
+//
+//   Special RAM that is used by the USB peripheral.  Any part not used
+//   for USB can be used as general RAM.  The is 1Kbyte of dual ported
+//   memory shared between the processor core and the USB peripheral.
+//   It covers what would otherwise be RAM banks 4-7.
+//
+DATABANK NAME=usbbuf START=0x400 END=0x7FF //usb HW RAM, banks 4-7 PROTECTED
+
+SECTION NAME=.udata_acs RAM=accessram //bank 0 part of the access bank
+SECTION NAME=.BANK0 RAM=bank0 //for registers explicitly in bank 0
+SECTION NAME=.BANK1 RAM=bank1 //for registers explicitly in bank 1
+SECTION NAME=.BANK2 RAM=bank2 //for registers explicitly in bank 2
+SECTION NAME=.BANK3 RAM=bank3 //for registers explicitly in bank 3
+SECTION NAME=.usbbuf RAM=usbbuf //special area used by the USB hardware
+
+SECTION NAME=.OVR1_B0  RAM=bank0     //for overlays in bank 0
+SECTION NAME=.OVR2_B0  RAM=bank0     //for overlays in bank 0
+SECTION NAME=.OVR1_B1  RAM=bank1     //for overlays in bank 1
+SECTION NAME=.OVR2_B1  RAM=bank1     //for overlays in bank 1
+SECTION NAME=.OVR1_B2  RAM=bank2     //for overlays in bank 2
+SECTION NAME=.OVR2_B2  RAM=bank2     //for overlays in bank 2
+SECTION NAME=.OVR1_B3  RAM=bank3     //for overlays in bank 3
+SECTION NAME=.OVR2_B3  RAM=bank3     //for overlays in bank 3
+
+SECTION NAME=.EEDATA   ROM=eedata    //initial EEPROM data

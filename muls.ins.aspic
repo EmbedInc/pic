@@ -1,0 +1,74 @@
+;   Subroutine MULS
+;
+;   Perform a signed multiply of the 32 bit registers REGA times REGB.
+;   The result is written into REGA.
+;
+;   Algorithm:
+;
+;     The absolute value of the original REGA value is copied to REGC and
+;     REGA is cleared.  If the low bit of REGC is 1, then REGB is added into
+;     REGA.  REGC is then shifted right one bit and REGB is shifted left one
+;     bit.  The low bit of REGC is tested again and the process is repeated
+;     until REGC becomes zero.  The sign of REGA is flipped if the original
+;     REGA value was negative.
+;
+         extern  adda
+
+.muls    code
+         glbsub  muls, regfb | regfc | regf12
+;
+;   Copy REGA into REGC.
+;
+         movf    rega+0, w   ;copy REGA into REGC
+         movwf   regc+0
+         movf    rega+1, w
+         movwf   regc+1
+         movf    rega+2, w
+         movwf   regc+2
+         movf    rega+3, w
+         movwf   regc+3
+         movwf   reg12       ;save original REGA sign in high bit of REG12
+;
+;   Set REGC to its absolute value.  The original sign bit has already been
+;   saved in the high bit of REG12.
+;
+         btfss   regc+3, 7   ;REGC value is negative
+         goto    regc_pos    ;REGC is already positive
+         negate  regc, 4     ;negate REGC to make it positive
+regc_pos                     ;REGC is not positive, original sign in REG12 bit 7
+;
+;   Clear the accumulator.
+;
+         clrf    rega+0
+         clrf    rega+1
+         clrf    rega+2
+         clrf    rega+3
+
+mulu_loop                    ;back here each original accumulator bit
+         movf    regc+0, w   ;make OR of all shifter bits
+         iorwf   regc+1, w
+         iorwf   regc+2, w
+         iorwf   regc+3, w
+         skip_nz             ;shifter not all 0, more work left to do ?
+         goto    done_adds   ;done adding all the parial values into REGA
+
+         btfss   regc+0, 0   ;add operand into accumulator this time around ?
+         goto    done_add    ;don't add this time
+         gcall   adda        ;add operand into accumulator
+done_add
+
+         shift32rl1 regc     ;advance shifter to next bit
+         shift32l1 regb      ;update operand for next time
+         goto    mulu_loop   ;back to do this new bit position
+;
+;   All the partial values have been added into REGA.  Negate REGA if the
+;   original REGA value was negative.  The original sign is in the high bit
+;   of REG12.
+;
+done_adds
+         btfss   reg12, 7    ;original REGA value was negative ?
+         goto    done_negate ;the original REGA value was positive
+         negate  rega, 4     ;set REGA to its negative
+done_negate                  ;skip to here if not need to negate REGA
+
+         leaverest

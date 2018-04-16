@@ -1,0 +1,30 @@
+//   Linker control file for the PIC 18F2450 processor.
+//
+CODEPAGE NAME=config START=0x300000 END=0x30000D PROTECTED //processor config words
+CODEPAGE NAME=idlocs START=0x200000 END=0X200007 PROTECTED //ID words
+
+CODEPAGE NAME=code0 START=0 END=0x3FFF //program memory
+
+ACCESSBANK NAME=accessram START=0x0  END=0x5F PROTECTED //RAM part of access bank
+//
+//   General RAM.
+//
+DATABANK NAME=bank0 START=0x060 END=0x0FF //register bank 0
+DATABANK NAME=bank1 START=0x100 END=0x1FF //register bank 1
+//
+//   Special RAM that is used by the USB peripheral.  Any part not used
+//   for USB can be used as general RAM.  The is 256 bytes of dual ported
+//   memory shared between the processor core and the USB peripheral.
+//   It covers what would otherwise be RAM bank 4.
+//
+DATABANK NAME=usbbuf START=0x400 END=0x4FF //usb HW RAM, bank 4 PROTECTED
+
+SECTION NAME=.udata_acs RAM=accessram //bank 0 part of the access bank
+SECTION NAME=.BANK0 RAM=bank0 //for registers explicitly in bank 0
+SECTION NAME=.BANK1 RAM=bank1 //for registers explicitly in bank 1
+SECTION NAME=.usbbuf RAM=usbbuf //special area used by the USB hardware
+
+SECTION NAME=.OVR1_B0  RAM=bank0     //for overlays in bank 0
+SECTION NAME=.OVR2_B0  RAM=bank0     //for overlays in bank 0
+SECTION NAME=.OVR1_B1  RAM=bank1     //for overlays in bank 1
+SECTION NAME=.OVR2_B1  RAM=bank1     //for overlays in bank 1

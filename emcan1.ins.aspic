@@ -1,0 +1,1065 @@
+;   ***************************************************************
+;   * Copyright (C) 2012, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This is the first of two canned files included from the application-specific
+;   EMCAN module.  This file mostly defines some preprocessor macros and
+;   subroutines used to create application-specific data.  The second file
+;   contains all executable code and requires the customizable data to already
+;   be set.  See the second file (EMCAN2.INS.DSPIC) for most of the information
+;   about this module.
+;
+;   This module implements the required basics of the EmCan protocol for a end
+;   device.  EmCan is Embed Inc's multiple-device protocol layered on CAN.  This
+;   module requires a procedural interface to the CAN bus to be available, such
+;   as is exported by the standard CAN module.
+;
+;   The routines in this module can be customized by setting various
+;   preprocessor and assembler state before including this file.  The
+;   customization state is:
+;
+;     LBANK  -  MPASM constant.  0-15 bank number for local state of this
+;       module.  No default, required.
+;
+;     EMCAN_VBLOCK  -  Preprocessor integer constant that is the 20 bit EmCan
+;       vendor block number of this device.  This is the high 20 bits of the 24
+;       bit vendor block ID.  The default is FFFFFh.
+;
+;     EMCAN_DEVID  -  Preprocessor integer constant that is the 4 bit ID of this
+;       device within its EmCan vendor block.  This is the low 4 bits of the
+;       24 bit vendor block ID.  The default is 15.
+;
+;     EMCAN_APPID  -  Preprocessor integer constant.  This is the EmCan ID of
+;       the application for which application-specific actions are implemented.
+;       For now, this module only implements a single application and does not
+;       support multiple applications or application switching on the fly.  This
+;       constant is therefore required for now.
+;
+;     EMCAN_ROLEID  -  Fixed 32 bit ID of the role this device performs within
+;       its application.  This constant can be used when the single fixed role
+;       is known at firmware build time.
+;
+;       If there is no way to get the role ID, then it is permanently set to
+;       FFFFFFFh.
+;
+;     EMCAN_GETROLE  -  Preprocessor string constant.  This is the name of the
+;       external subroutine to call to get the saved non-volatile role ID within
+;       the application.  This routine must write the role ID into the 32 bit
+;       global integer EMCAN_ROLE, defined in this module.
+;
+;       If there is no way to get the role ID, then it is permanently set to
+;       FFFFFFFh.
+;
+;     EMCAN_SETROLE  -  Preprocessor string constant.  This is the name of the
+;       routine to call when the host is attempting to set a new role for this
+;       unit.  The new 32 bit role ID is passed in REG3:REG2:REG1:REG0.  It is
+;       up to the application what to do about the new attempted role
+;       assignment.  If the role assignment is acceptable and allowed, then the
+;       global variable EMCAN_ROLE must be updated accordingly.  The new role
+;       should also be saved in non-volatile memory such that future calls to
+;       the routine given in EMCAN_GETROLE will return this role, even after the
+;       unit is reset or powered down.
+;
+;       If this constant is not defined or set to the empty string, then it is
+;       assumed the application is incapable of changing the role.
+;
+;     EMCAN_RESET  -  Preprocessor string constant.  This is the name of the
+;       routine to call when the EmCan layer is reset, like when a valid bus
+;       address is unassigned.  Nothing is called when this constant does not
+;       exist or is set to the empty string.  When existing, this routine will
+;       be called once when the EmCan task is started before any received CAN
+;       frames are processed.
+;
+;     EMCAN_NVOL_READ  -  Preprocessor string constant.  This is the name of the
+;       routine to call from the EmCan layer to read one byte of non-volatile
+;       memory.  The 16 bit non-volatile byte address as defined in port
+;       definitions and the like is passed in REG2:REG1 and the byte value is
+;       returned in REG0.  REG2:REG1 must be adjusted to indicate the next byte.
+;       Multiple calls to this routine therefore return sequential bytes as long
+;       as REG2:REG1 is not altered between calls.
+;
+;       The EmCan layer makes no assumption about the 16 bit non-volatile
+;       addresses.  The starting address of data items are just passed back to
+;       this routine.  The application can, for example, allocate some of the
+;       16 bits to indicate different address spaces, physical devices, etc.
+;       16 bits addresses 65 kbytes, which is much more than the amount of
+;       non-volatile memory EmCan is expected to need access to.  Applications
+;       can thefefore take these 16 bits to mean what they want.  For example,
+;       if the actual non-volatile memory is larger than 65 kbytes, then the
+;       routine referenced by this constant would need to map the 16 bit address
+;       to some part of the actual address space.
+;
+;       This constant should be defined in the master include file, not the
+;       EMCAN module, because it is needed in other modules too, like ECSTR.
+;
+;     EMCAN_NVOL_WRITE  -  Preprocessor string constant.  This is the name of
+;       the routine to call from the EmCan layer to write one byte to
+;       non-volatile memory.  The byte is passed in REG0 and the 16 bit
+;       EmCan-visible non-volatile memory address in REG2:REG1.  The routine
+;       must adjust REG2:REG1 to indicate the next sequential byte.  The EmCan
+;       routines otherwise do not interpret the address or make any assmumptions
+;       about it.  See the description for EMCAN_NVOL_READ, above, for more
+;       details on the EmCan-visible non-volatile address space.
+;
+;       This constant should be defined in the master include file, not the
+;       EMCAN module, because it is needed in other modules too, like ECSTR.
+;
+;     EMCAN_NVOL_FLUSH  -  Preprocessor string constant.  The name of the
+;       routine to call to guarantee all data written with the routine named in
+;       EMCAN_NVOL_WRITE is physically written to the non-volatile memory.  The
+;       EmCan layer does not know when the host is done sending a sequence of
+;       commands that cause non-volatile writes.  It therefore has no good time
+;       to call the flush routine.  This implementation therefore uses a timer.
+;       If no non-volatile memory modifications have been requested or a while,
+;       then this flush routine is called.  This time is set by the TFLUSH
+;       constant below, and is usually around 1 second.  When this constant does
+;       not exist or is set to the empty string, it is assumed that flushing
+;       written data is not necessary in this implementation.  This could be,
+;       for example, if the application implemented its own automatic flush
+;       mechanism even if the underlying non-volatile memory requires flushing.
+;
+;     EMCAN_CONFIG  -  Preprocessor string constant.  The name of the routine to
+;       call when a valid EmCan CONFIG frame is received.  See the EmCan spec
+;       for details.  These can contain requests to turn the user-visible device
+;       ID on or off, and to enable/disable configuration state.  The global
+;       flags EMCAN_SHOW, EMCAN_CFGALLOW, and EMCAN_CONFIG should be updated by
+;       this routine.  The FLAGS byte from the CONFIG frame is passed in REG0.
+;       All the REGn general registers may be trashed.
+;
+;       When this constant is not defined or is the empty string, then the EmCan
+;       layer automatically implements its own policy.  The EMCAN_SHOW flag is
+;       always set as requested by the host, and configuration mode is allowed
+;       as long as no other devices are detected on the bus.
+;
+;     EMCAN_UPLD_DAT  -  Preprocessor string constant.  Name of the subroutine
+;       to call when new upload data has been sent by the host.  Data will be
+;       passed in registers:
+;
+;         REG0  -  The upload data byte.
+;
+;         REG4:REG3:REG2:REG1  -  Address the byte is being written to.
+;
+;         REG5  -  The 0-N data space ID the address is within.
+;
+;       All the REGn general registers may be trashed.
+;
+;       If this constant is not defined or is the empty string, then it is
+;       assumed this node does not support uploading of new data to it.  None of
+;       the other pre-defined values relating to uploading (EMCAN_UPLD_xxx) are
+;       relevant when no routine is defined via this constant.
+;
+;     EMCAN_UPLD_START  -  Preprocessor string constant.  Name of the subroutine
+;       to call when a new upload sequence is started.  REG5 will be set to
+;       indicate the address space that the uploaded data will be within.  All
+;       the REGn general registers may be trashed.
+;
+;       This constant is optional.  No routine will be called when it does not
+;       exist or is set to the empty string.
+;
+;     EMCAN_UPLD_END  -  Preprocessor string constant.  Name of the subroutine
+;       to call when a new upload sequence is ended.  REG5 will be set to
+;       indicate the address space that the uploaded data will be within.  All
+;       the REGn general registers may be trashed.
+;
+;       This constant is optional.  No routine will be called when it does not
+;       exist or is set to the empty string.
+;
+;     EMCAN_UPLD_RUN  -  Preprocessor string constant.  Name of the subroutine
+;       to call when a valid FWUPLD RUN sequence has been received.  The ACK
+;       will already have been sent.
+;
+;       If this constant does not exist or is set to the empty string, then the
+;       current node address will be deliberately released, then a RESET
+;       performed.
+;
+;     EMCAN_UPLD_SPx_STn, EMCAN_UPLD_SPx_ENn  -  Preprocessor integer constants.
+;       Each pair of these constants specifies a valid upload address range
+;       within a address space.  X is the 0-255 address space number in
+;       decimal, and N is a 1-N decimal sequential number for this address
+;       range.  The first constant is the address of the first byte in the
+;       range, and the second is the address of the last byte of the range.
+;
+;       These constants will be used to report to the host what address spaces
+;       and what ranges within those address spaces are implemented.  The host
+;       may optimize sending upload data to not include data outside all of the
+;       listed ranges.
+;
+;       For any address space, the N values must start at 1 and be sequential.
+;       The first N value for which constants don't exist implicitly indicates
+;       the end of address ranges for that address space.
+;
+;       At least one address range for address space 0 is required if uploading
+;       is supported at all.  This means that if EMCAN_UPLD_DAT exists and is
+;       not empty, then EMCAN_UPLD_SP0_ST1 and EMCAN_UPLD_SP0_EN1 must exist.
+;       The end addresse of a range must always be greater than or equal to the
+;       start address.
+;
+;
+;   Global variables defined in this module that require application actions:
+;
+;     EMCAN_VBLOCKID  -  This is a 24 bit variable that holds the combined EmCan
+;       vendor block number and the device ID.
+;
+;       This value is initialized by EMCAN_INIT to either defaults or the values
+;       provided by EMCAN_VBLOCK and EMCAN_DEVID (described above).  If this
+;       static assignment is not sufficient, the application can set this
+;       variable after EMCAN_INIT is called and before EMCAN_START.
+;
+;   External symbols:
+;
+;     TICK100MS  -  Global byte that is incremented every 100 ms.
+;
+;     SERIAL  -  32 bit serial number of this device, stored in low to high byte
+;       order.  It does not need to be in a particular bank.  It must be valid
+;       by the time EMCAN_START is called.
+;
+;     CANIN_ID, CANIN_NDAT, CANIN_DAT  -  Data for the last received CAN frame.
+;       See the description in the ECAN.INS.ASPIC library file for details of
+;       these variables.
+;
+;     FLAG_CANIN  -  CAN frame has been received and its data is locked.  See
+;       the description in ECAN.INS.ASPIC for details.
+;
+;     FLAG_CANIN_EXT  -  The received CAN frame is extended.  See the
+;       description in ECAN.INS.ASPIC for details.
+;
+;     FLAG_CANIN_RTR  -  The received CAN frame is a remote request.  See the
+;       description in ECAN.INS.ASPIC for details.
+;
+;     FLAG_CANSEND  -  Indicates that a task has the CAN sending mechanism
+;       locked.  CAN_SEND_INIT will stall waiting for it to be released when
+;       called while this flag is set.
+;
+         extern  tick100ms   ;100 ms clock tick counter
+         extern  currtask    ;ID of the currently running task
+         extern  serial      ;32 bit serial number of this unit
+         extern  canin_id, canin_ndat, canin_dat ;last received CAN frame
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Check the values set before this file was included and set defaults as
+;   needed.
+;
+/if [not [exist "emcan_appid"]] then
+  /show "  Mandatory constant EMCAN_APPID not defined."
+         error   emcan_appid
+         end
+  /stop
+  /endif
+/if [<> [and emcan_appid 16#80000000] 0] then
+  /show "  Invalid EMCAN_APPID value.  Value must be 31 bits or less."
+         error   emcan_appid
+         end
+  /stop
+  /endif
+
+/if [not [exist "emcan_vblock"]] then
+  /const emcan_vblock integer = 16#FFFFF
+  /endif
+/if [not [exist "emcan_devid"]] then
+  /const emcan_devid integer = 15
+  /endif
+/if [not [exist "emcan_getrole"]] then
+  /const emcan_getrole string = ""
+  /endif
+/if [not [exist "emcan_setrole"]] then
+  /const emcan_setrole string = ""
+  /endif
+/if [not [exist "emcan_reset"]] then
+  /const emcan_reset string = ""
+  /endif
+/if [not [exist "emcan_nvol_write"]] then
+  /const emcan_nvol_write string = ""
+  /endif
+/if [not [exist "emcan_nvol_read"]] then
+  /const emcan_nvol_read string = ""
+  /endif
+/if [not [exist "emcan_nvol_flush"]] then
+  /const emcan_nvol_flush string = ""
+  /endif
+/if [not [exist "emcan_config"]] then
+  /const emcan_config string = ""
+  /endif
+/if [not [exist "emcan_upld_dat"]] then
+  /const emcan_upld_dat string = ""
+  /endif
+/if [<> emcan_upld_dat ""] then
+  /if [not [exist "emcan_upld_qq"]] then
+    /const emcan_upld_qq string = ""
+    /endif
+  /if [not [exist "emcan_upld_start"]] then
+    /const emcan_upld_start string = ""
+    /endif
+  /if [not [exist "emcan_upld_end"]] then
+    /const emcan_upld_end string = ""
+    /endif
+  /if [not [exist "emcan_upld_run"]] then
+    /const emcan_upld_run string = ""
+    /endif
+  /endif
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   treq    real = 2.0  ;min seconds between node address request
+/const   treqres real = 0.2  ;min wait for request after reset
+/const   tadr    real = 3.0  ;minutes valid lifetime for a node address
+/const   tnag    real = 6.5  ;seconds to nag about node address before expires
+/const   tstopen real = 3.0  ;min seconds to wait between stream re-open tries
+/const   tstdat  real = 2.0  ;first seconds to wait for ACK from stream data send
+/const   tstmax  real = 10.0 ;max seconds need to wait for stream data send ACK
+/const   tflush  real = 1.0  ;time after last nvol write to call flush
+/const   ticksec real = 0.100 ;clock tick period, seconds
+/const   recvsz  integer = 32 ;size of receiving stream FIFO
+/const   sendsz  integer = 32 ;size of sending stream FIFO
+stacksz  equ     32 + ntsksave ;background task data stack size
+;
+;   Derived constants.
+;
+/if [not [exist "emcan_vblock_id"]] then
+  /const emcan_vblock_id integer = [or [shiftl emcan_vblock 4] emcan_devid]
+  /endif
+ntkreq   equ     [rnd [/ treq ticksec]] ;clock ticks between address requests
+ntkreqres equ    [rnd [/ treqres ticksec]] ;min ticks before adr request after reset
+ntklife  equ     [rnd [/ [* tadr 60] ticksec]] ;clock ticks assigned address lifetime
+ntknag   equ     [rnd [/ tnag ticksec]] ;ticks left in life to start nagging at
+ntkopen  equ     [rnd [/ tstopen ticksec]] ;min ticks between out stream open tries
+ntkstdat equ     [rnd [/ tstdat ticksec]] ;ticks before first stream out data resend
+ntkstmax equ     [rnd [/ tstmax ticksec]] ;max ticks required between stream out data resends
+ntkflush equ     [rnd [/ tflush ticksec]] ;ticks after last nvol write to call flush
+recvsz   equ     [v recvsz]
+sendsz   equ     [v sendsz]
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Macro LOCCMD opc, adr
+;
+;   Creates one entry in a command dispatch table.  OPC is the opcode for this
+;   entry and ADR is the address of the routine to run to process a frame with
+;   that opcode.
+;
+;   Each table entry starts with a 16 bit opcode, followed by either a 2 or 3
+;   byte address.  2 byte addresses are used if this machine has 65536 program
+;   memory bytes or less, and 3 bytes when it has more.  The number of bytes
+;   required to express a program memory address is the value of the assembly
+;   constant PROGADRB, which was previously set by the general PIC development
+;   enivronment.
+;
+;   Since the opcode space is sparsely implemented, tables only include entries
+;   for implemented opcodes.  Tables are scanned until a entry matching the
+;   opcode is found, or until the end of the table is reached.  The end of the
+;   table is indicated by the opcode being 65535, which is not a valid opcode in
+;   the schemes used by this firmware.  The end of table entry therefore only
+;   needs to contain the two opcode bytes without the address bytes.
+;
+loccmd   macro   opc, adr
+         db      low (opc)   ;write opcode in low to high byte order
+         db      high (opc)
+
+  if progadrb > 2            ;write address in high to low byte order
+         db      upper (adr)
+    endif
+         db      high (adr)
+         db      low (adr)
+         endm
+
+;*******************************************************************************
+;
+;   Macro CANCMD opc, adr
+;
+;   Like LOCCMD, except that the dispatch address will be declared EXTERN.  This
+;   macro should be used for entries that will dispatch to routines outside this
+;   module.
+;
+cancmd   macro   opc, adr
+         extern  adr
+         loccmd  opc, adr
+         endm
+
+;*******************************************************************************
+;
+;   Macro TBL_END
+;
+;   Indicates the end of a opcodes dispatch table.  Each table must end with
+;   this macro.
+;
+tbl_end  macro
+         db      255
+         db      255
+         endm
+
+;*******************************************************************************
+;
+;   Port definition tables.  The information about each EmCan port defined by
+;   this node is put in program memory tables so that it can be found by the
+;   code in this module at run time with the minimum of application support.
+;
+;   The tables are built from definitions made in the application part of this
+;   module (the file that includes this one).  The preprocessor macros and
+;   subroutines below are provided to build the tables from information provided
+;   in more easily human-understandable format.  The details about how to use
+;   these facilities is documented in the template for the application specific
+;   part of this file.  This section documents the layout of the tables, since
+;   that is private to the code here.  Some of the information is made
+;   accessible externally via the EMCAN_PORT_xxx routines.
+;
+;   The master ports table starts at EMCAN_PORTS in program memory.  This
+;   contains all the fixed-size data for each defined port and references to
+;   variable-size data in other places.
+;
+;   Each entry is a fixed number of program memory bytes in size.  The address
+;   offset of each program memory byte from the start of the entry for that port
+;   is shown, followed by a description of its contents.  For each port:
+;
+;     1,0: TYPE ID.  Both upper bits 0 indicates this port is not defined and
+;       that the rest of this table entry contains no meaningful data.
+;
+;     2: BITS.  This is the number of data bits - 1.
+;
+;     4,3: DIM ID.  Indicates the physical property represented by the port
+;       value.
+;
+;     5: DFORM.  Data format ID.
+;
+;     11,10,9,8,7,6: Zero value offset.  EmCan 48 bit floating point format.
+;
+;     17,16,15,14,13,12: Scale factor.  EmCan 48 bit floating point format.
+;
+;     20,19,18: Pointer to description string in program memory.  This pointer
+;       is always valid.  If no description string was supplied, then this will
+;       point to a empty string.  The first byte of the string is the length,
+;       with exactly that many data bytes following.
+;
+;     22,21: Role address.  The non-volatile memory address of where the 32 bit
+;       role ID is stored.  FFFFh indicates settable role is not supported and
+;       the role ID is always 0.
+;
+;     24,23: Initial data address.  The non-volatile memory address of where the
+;       initial port data is stored.  The data is stored in least to most
+;       significant byte order, and only needs to be enough bytes long to hold
+;       the number of bits indicated by BITS.  FFFFh indicates this port does
+;       not support a settable startup value.
+;
+;     25: Number of config bytes.  This is a function of the port type, so is
+;       technically redundant information.  However, it is stored here to avoid
+;       the need to derive this information from the port type at run time.
+;
+;     27,26: Config address.  The non-volatile memory address of the
+;       configuration data for this port.  The data is stored in least to most
+;       significant byte order, and only needs to be enough bytes long to hold
+;       the size of configuration data required by this port type.  FFFFh
+;       indicates this port does not support a settable configuration.
+;
+;     29,28: Usage string address.  The non-volatile memory address of the
+;       settable usage description string for this port.  FFFFh indicates this
+;       port does not support a settable usage string, which is therefore always
+;       the empty string.  The first byte of the string structure pointed to by
+;       this address is the maximum allowable string length.  The second byte is
+;       the actual current string length, which is then followed by exactly that
+;       many valid data bytes.  When a new string is written, its length must
+;       not exceed the maximum allowed length as specified by the first byte of
+;       the structure.  The maximum allowed length is irrelevant when reading
+;       the string.
+;
+;     32,31,30: Write routine address.  The address of the routine to call to
+;       write new data to the port.  The port number will be passed in
+;       REG7:REG6.  FSR0 will be pointing to the sequence of data bytes as
+;       passed from the host in most to least significant byte order.  All the
+;       REGn general registers may be trashed.  This routine is responsible for
+;       any interpretation of the data depending on the port TYPE and the
+;       current configuration setting.  This address must point to a valid
+;       routine when the port is writable.
+;
+;     35,34,33: Read routine address.  The address of the routine to call to
+;       read data from the port.  The port number will be passed in REG7:REG6
+;       and FSR0 will point to a byte buffer of where to write the port data, in
+;       most to least significant byte order.  All the REGn general registers
+;       may be trashed.  This routine is responsible for any interpretation of
+;       the data depending on the port TYPE and the current configuration
+;       setting.  This address must point to a valid routine when the port is
+;       readable.
+;
+;     36, 37, 38, 39, 40, 41, 42: Port function ID.  The first byte contains the
+;       number of bytes in the function ID, which may be 0 to 6.  The remaining
+;       bytes contains the function ID in the order it is transmitted in the
+;       PORTFUNC frame.
+;
+/const   emcan_portdeflen integer = 43 ;port definition length, prog mem addresses
+
+//  Define symbolic constants for some of the port definition values.
+//
+/const   type_bits integer = 0 ;just bits with no special handling
+/const   type_bool integer = 1 ;boolean
+/const   type_cntbool integer = 2 ;counted boolean event
+
+/const   format_unspec integer = 0 ;unspecified data format
+/const   format_uint integer = 1 ;unsigned integer
+/const   format_sint integer = 2 ;twos complement signed integer
+
+/const   dim_none integer = 0 ;not a physical quantity
+/const   dim_unsc integer = 1 ;raw numeric, scale and offset not applied
+/const   dim_num integer = 2 ;unspecified numeric, scale and offset applied
+/const   dim_dless integer = 3 ;dimensionless
+/const   dim_length integer = 4 ;length, meters
+/const   dim_mass integer = 5 ;mass, kilograms
+/const   dim_time integer = 6 ;time, seconds
+/const   dim_force integer = 7 ;force, newtons
+/const   dim_emf integer = 8 ;EMF, volts
+/const   dim_curr integer = 9 ;current, amperes
+/const   dim_freq integer = 10 ;frequency, Hz
+
+//   Define the variables that describe the various port parameters.
+//
+/var new port integer        ;0-N port number
+/var new port_io string      ;input/output selection
+/var new port_type integer   ;type ID
+/var new port_format integer ;data format ID
+/var new port_size integer   ;number of bits in the data value
+/var new port_dim integer    ;physical quantity ID
+/var new port_offset real    ;zero offset
+/var new port_scale real     ;scale factor
+/var new port_desc string    ;fixed description string
+/var new port_roleadr string ;expression for non-volatile address of role ID
+/var new port_initadr string ;expression for non-volatile address of start value
+/var new port_cfgadr string  ;expression for non-volatile address of configuration data
+/var new port_useadr string  ;expression for non-volatile address of usage string
+/var new port_write string   ;expression for routine to call to write to port
+/var new port_read string    ;expression for routine to call to read from the port
+/var new port_funcid string  ;function ID, 0 to 6 tokens with 0-255 numerical value
+
+////////////////////////////////////////
+//
+//   Subroutine PORTVALS_INIT
+//
+//   Initialize the variables used to define a port.  This routine is called
+//   before each port definition is set.
+//
+/subroutine portvals_init
+  /set port -1
+  /set port_io ""
+  /set port_type -1
+  /set port_format -1
+  /set port_size 0
+  /set port_dim -1
+  /set port_offset 0.0
+  /set port_scale 1.0
+  /set port_desc ""
+  /set port_roleadr ""
+  /set port_initadr ""
+  /set port_cfgadr ""
+  /set port_useadr ""
+  /set port_write ""
+  /set port_read ""
+  /set port_funcid ""
+  /endsub
+
+////////////////////////////////////////
+//
+//   Subroutine PORT_DEFINE
+//
+//   Write the definition of the next sequential port into program memory at the
+//   current location.  This adds the entry for one port to the ports table.
+//
+/subroutine port_define
+  /var local error bool
+  /var local typeword integer = 0
+  /var local ii integer
+  /var local s string
+  /var local cfgsize integer ;number of bytes required to hold config data
+  /var local tk string
+  /var local ind integer
+  /var local funcidlen integer ;number of bytes in port function ID
+  /var local funcid0 integer
+  /var local funcid1 integer
+  /var local funcid2 integer
+  /var local funcid3 integer
+  /var local funcid4 integer
+  /var local funcid5 integer
+  /var local err bool
+
+  /block                     ;check for inconsistant or invalid values
+    /var local err bool
+    /set error true          ;not all checks definitely passed yet
+    /if [= port -1] then
+      /show "  Port number not set, expected " nports
+      /quit
+      /endif
+    /if [<> port nports] then
+      /show "  Port definition out of sequence."
+      /show "  New definition is for port " port ", expected " nports "."
+      /quit
+      /endif
+
+    /set port_io [ucase port_io]
+    /if [= port_io "UNUSED"] then
+      /set error false
+      /set typeword 0
+      /quit
+      /endif
+    /set err true
+    /if [= port_io "IN"] then
+      /set err false
+      /set typeword 16#4000
+      /endif
+    /if [= port_io "OUT"] then
+      /set err false
+      /set typeword 16#8000
+      /endif
+    /if [= port_io "INOUT"] then
+      /set err false
+      /set typeword 16#C000
+      /endif
+    /if err then
+      /quit
+      /endif
+    /if [<> [and typeword 16#8000] 0]
+      /then                  ;the port is writeable
+        /if [= port_write ""] then
+          /show "  Port is writeable, but no write routine specified."
+          /quit
+          /endif
+      /else                  ;the port is not writeable
+        /if [<> port_write ""] then
+          /show "  Port is not writeable, but write routine specified."
+          /quit
+          /endif
+      /endif
+    /if [<> [and typeword 16#4000] 0]
+      /then                  ;the port is readable
+        /if [= port_read ""] then
+          /show "  Port is readable, but no read routine specified."
+          /quit
+          /endif
+      /else                  ;the port is not readable
+        /if [<> port_read ""] then
+          /show "  Port is not readable, but read routine specified."
+          /quit
+          /endif
+      /endif
+
+    /if [= port_type -1] then
+      /show "  PORT_TYPE not set in definition of port " nports
+      /quit
+      /endif
+    /if [<> port_type [and port_type 16#3FFF]] then
+      /show "  Invalid PORT_TYPE value of " port_type " for port " nports
+      /quit
+      /endif
+    /set cfgsize 0           ;init to default configuration size
+    /if [= port_type type_bool] then
+      /set cfgsize 1
+      /endif
+    /if [= port_type type_cntbool] then
+      /set cfgsize 1
+      /endif
+    /set typeword [or typeword port_type]
+
+    /if [= port_format -1] then
+      /show "  PORT_FORMAT not set in definition of port " nports
+      /quit
+      /endif
+    /if [<> port_format [and port_format 16#FF]] then
+      /show "  Invalid PORT_FORMAT value of " port_format " for port " nports
+      /quit
+      /endif
+
+    /if [= port_size 0] then ;use default port size ?
+      /if [= port_type type_bool] then
+        /set port_size 1
+        /endif
+      /endif
+    /if [= port_size 0] then
+      /show "  PORT_SIZE not set in definition of port " nports
+      /quit
+      /endif
+    /if [or [< port_size 1] [> port_size 48]] then
+      /show "  Invalid PORT_SIZE value of " port_size " for port " nports
+      /quit
+      /endif
+
+    /if [= port_dim -1] then
+      /show "  PORT_DIM not set in definition of port " nports
+      /quit
+      /endif
+    /if [<> port_dim [and port_dim 16#FFFF]] then
+      /show "  Invalid PORT_DIM value of " port_dim " for port " nports
+      /quit
+      /endif
+
+    //   Parse the port function ID string PORT_FUNCID.  The local variables
+    //   FUNCIDLEN and FUNCID0-FUNCID5 are set.
+    //
+    /set ind 1               ;init string parse index
+    /set funcidlen 0         ;init number of bytes in port function ID
+    /set ii 0                ;init 0-5 function ID byte index
+    /set err true
+    /block
+      /if [<= ind [slen port_funcid]]
+        /then                ;still data to be parsed from PORT_FUNCID
+          /call string_token port_funcid ind tk ;get next token from input string
+          /set funcid[v ii] [chars tk] ;save this byte value
+          /if [or [< funcid[v ii] -128] [> funcid[v ii] 255]] then
+            /show "  Port function ID byte " [+ ii 1] " of port " nports " is out of range"
+            /quit
+            /endif
+          /set funcidlen [+ funcidlen 1] ;count one more function ID byte in use
+        /else                ;PORT_FUNCID has been exhausted
+          /set funcid[v ii] 16#FF ;set byte to the unused value
+        /endif
+      /set ii [+ ii 1]
+      /if [<= ii 5] then
+        /repeat
+        /endif
+      /set err false         ;indicate no error detected in the loop
+      /endblock              ;back to set next port function ID byte
+    /if err then             ;loop exited due to error ?
+      /quit
+      /endif
+    /if [<= ind [slen port_funcid]] then
+      /show "  Too many function ID bytes for port " nports
+      /quit
+      /endif
+
+    /set error false         ;all checks passed
+    /endblock                ;done with validity checking, ERROR set accordingly
+  /if error then
+    /show "  Error in definition of port " nports
+         error   Port definition
+         end
+    /stop
+    /endif
+
+  /const port[v nports]_desc string = port_desc ;save description string of this port
+
+  /write
+  /set s [str "         ;   port " nports]
+  /if [<> port_desc ""] then
+    /set s [str s ", " port_desc]
+    /endif
+  /write s
+  /write "         ;"
+
+  /block
+    /if [= typeword 0] then  ;special case of unused port ?
+      /set s [str s " (unused)"]
+      /write s
+      /write "         ;"
+         db      0, 0        ;TYPE
+         db      0           ;bits
+         db      0, 0        ;DIM
+         db      0           ;DFORM
+         fp48p   0.0         ;offset
+         fp48p   1.0         ;scale
+         db      low empty_string, high empty_string, upper empty_string
+         db      h'FF', h'FF' ;non-volatile memory address of role
+         db      h'FF', h'FF' ;non-volatile memory address of initial data
+         db      0           ;number of config bytes
+         db      h'FF', h'FF' ;non-volatile memory address of config data
+         db      h'FF', h'FF' ;non-volatile memory address of usage string
+         db      h'FF', h'FF', h'FF' ;write routine address
+         db      h'FF', h'FF', h'FF' ;read routine address
+         db      0, h'FF', h'FF', h'FF', h'FF', h'FF', h'FF' ;port function ID
+      /quit
+      /endif
+
+    /if [<> port_desc ""] then
+      /set s [str s ", " port_desc]
+      /endif
+    /write s
+    /write "         ;"
+
+         pword   typeword, "TYPE"
+         pbyte   [- port_size 1], "BITS"
+         pword   port_dim, "DIM"
+         pbyte   port_format, "DFORM"
+         fp48p   port_offset
+         fp48p   port_scale
+
+    /if [= port_desc ""]
+      /then                  ;empty description string ?
+         db      low empty_string, high empty_string, upper empty_string ;desc
+      /else
+        /set ii 0            ;init number of description string to reference
+        /block               ;back to check next port for duplicate description
+          /if [>= ii nports] then ;done checking all previous description strings ?
+            /quit
+            /endif
+          /if [= port[v ii]_desc port_desc] then ;duplicate of previous port ?
+            /quit
+            /endif
+          /set ii [+ ii 1]
+          /repeat
+          /endblock          ;II is set to port num descr string to reference
+         db      low port[v ii]_desc ;description string address
+         db      high port[v ii]_desc
+         db      upper port[v ii]_desc
+      /endif
+
+    /if [= port_roleadr ""]
+      /then
+         db      h'FF', h'FF' ;nvol role address
+      /else
+         db      low ([chars port_roleadr]) ;nvol role address
+         db      high ([chars port_roleadr])
+      /endif
+
+    /if [= port_initadr ""]
+      /then
+         db      h'FF', h'FF' ;nvol startup value address
+      /else
+         db      low ([chars port_initadr]) ;nvol startup value address
+         db      high ([chars port_initadr])
+      /endif
+
+    /set s ""                ;write number of configuration bytes
+    /call tabopcode s
+    /set s [str s "db"]
+    /call taboperand s
+    /set s [str s cfgsize]
+    /call startcomm s
+    /set s [str s "config size"]
+    /write s
+
+    /if [= port_cfgadr ""]
+      /then
+         db      h'FF', h'FF' ;nvol config data address
+      /else
+         db      low ([chars port_cfgadr]) ;nvol config data address
+         db      high ([chars port_cfgadr])
+      /endif
+
+    /if [= port_useadr ""]
+      /then
+         db      h'FF', h'FF' ;nvol usage string address
+      /else
+         db      low ([chars port_useadr]) ;nvol usage string address
+         db      high ([chars port_useadr])
+      /endif
+    /endblock
+
+  /if [= port_write ""]
+    /then
+         db      h'FF', h'FF', h'FF' ;no write routine
+    /else
+         db      low ([chars port_write]) ;write routine address
+         db      high ([chars port_write])
+         db      upper ([chars port_write])
+    /endif
+
+  /if [= port_read ""]
+    /then
+         db      h'FF', h'FF', h'FF' ;no read routine
+    /else
+         db      low ([chars port_read]) ;read routine address
+         db      high ([chars port_read])
+         db      upper ([chars port_read])
+    /endif
+
+  /set tk ""
+  /call tabopcode tk
+  /set tk [str tk "db"]
+  /call taboperand tk
+  /set tk [str tk funcidlen]
+  /set ii 0
+  /block
+    /set tk [str tk ", h'"]
+    /set tk [str tk [int [and funcid[v ii] 16#FF] "fw 2 lz base 16 usin"]]
+    /set tk [str tk "'"]
+    /set ii [+ ii 1]
+    /if [<= ii 5] then
+      /repeat
+      /endif
+    /endblock
+  /call startcomm tk
+  /set tk [str tk "function ID length and data"]
+  /write tk
+
+  /set nports [+ nports 1]   ;count one more defined port
+  /call portvals_init        ;reset values ready for defining next port
+  /endsub
+
+/var new nports integer = 0  ;init number of EmCan ports
+/call portvals_init          ;init values ready for first port definition
+
+.emcan_defs code_pack        ;define section for the static definitions
+
+;*******************************************************************************
+;
+;   Upload addresses table
+;
+;   If the application supports firmware uploading (EMCAN_UPLD_DAT not the empty
+;   string), then a table is written that indicates all the implemented address
+;   ranges in all the implemented address spaces.
+;
+;   The table starts at EMCAN_UPADR_TBL.  Each table entry defines one address
+;   range within one address space.  Entries are 9 bytes long and have the
+;   format:
+;
+;     0  -  Address space ID
+;
+;     1:2:3:4  -  32 bit first address within the range.
+;
+;     5:6:7:8  -  32 bit last address within the range.
+;
+;   The preprocessor integer constant EMCAN_UPADR_NENT is created here and is
+;   set to the number of entries in the table.
+;
+;
+/if [= emcan_upld_dat ""]
+  /then                      ;application does not support uploading
+    /const emcan_upadr_nent integer = 0 ;no address ranges table entries
+  /else                      ;application supports uploading
+    /block                   ;context for local variables
+      /var local tent integer = 0 ;total table entries
+
+emcan_upadr_tbl              ;start of upload address ranges table
+
+      /loop                  ;back here each 0-255 address space
+        /var local sp integer = -1 ;init address space number
+
+        /set sp [+ sp 1]     ;make address space number for this iteration
+        /if [> sp 255] then  ;done with all address spaces ?
+          /quit
+          /endif
+
+        /loop                ;back here each adr range in this adr space
+          /var local n integer = 0 ;1-N number of current address range
+          /var local exst bool ;start of range exists
+          /var local exen bool ;end of range exists
+          /var local st integer ;start address of range
+          /var local en integer ;end address of range
+          /var local comm string ;end of line comment
+
+          /set n [+ n 1]     ;make 1-N number of range within this adr space
+          /set exst [exist [str "emcan_upld_sp" sp "_st" n]]
+          /set exen [exist [str "emcan_upld_sp" sp "_en" n]]
+          /if [and [not exst] [not exen]] then ;this range doesn't exist
+            /quit
+            /endif
+          /if [and exst [not exen]] then
+            /show "  Start of range " n " in space " sp " exists, but no end"
+         error   Upload range
+         end
+            /stop
+            /endif
+          /if [and [not exst] exen] then
+            /show "  End of range " n " in space " sp " exists, but no start"
+         error   Upload range
+         end
+            /stop
+            /endif
+          /set st emcan_upld_sp[v sp]_st[v n]
+          /set en emcan_upld_sp[v sp]_en[v n]
+          /if [<> 0 tent] then
+            /write
+            /endif
+          /set comm ""
+          /set comm [str comm "space " sp ", range "]
+          /set comm [str comm [int st "fw 8 lz base 16 usin"] " - "]
+          /set comm [str comm [int en "fw 8 lz base 16 usin"]]
+         pbyte   [v sp], [v comm] ;write the address space ID byte
+         pbyte   [shiftr st 24] ;write start address
+         pbyte   [shiftr st 16]
+         pbyte   [shiftr st 8]
+         pbyte   [v st]
+          /call pbyte_finish
+         pbyte   [shiftr en 24] ;write end address
+         pbyte   [shiftr en 16]
+         pbyte   [shiftr en 8]
+         pbyte   [v en]
+          /call pbyte_finish
+          /set tent [+ tent 1] ;count one more table entry
+          /endloop           ;back for next adr range in this adr space
+
+        /if [<= tent 0] then
+          /show "  No address range in upload address space 0."
+         error   Upload range
+         end
+          /stop
+          /endif
+        /endloop             ;back to check next address space
+
+
+      /write
+      /write "         ;   " tent " entries in table"
+
+      /const emcan_upadr_nent integer = tent ;indicate total table entries
+      /endblock              ;end of outer block
+  /endif                     ;end of upload supported no/yes cases
+
+;*******************************************************************************
+;
+;   Upload address spaces table
+;
+;   If the application supports firmware uploading (EMCAN_UPLD_DAT not the empty
+;   string), then a table is written that list all the upload address spaces
+;   implemented by the applications.
+;
+;   The table starts at EMCAN_UPSPACE_TBL.  The table is simply a sequential
+;   list of the supported upload address spaces.  Each successive byte contains
+;   a new address space ID.
+;
+;   The preprocessor integer constant EMCAN_UPADR_NSPACE is created here and is
+;   set to the number of upload address spaces.  This is guaranteed to be at
+;   least 1 when the application supports uploading data, 0 otherwise.
+;
+/if [= emcan_upld_dat ""]
+  /then                      ;application does not support uploading
+    /const emcan_up_nspace integer = 0 ;no upload address spaces implemented
+  /else                      ;application supports uploading
+emcan_upspace_tbl            ;start of upload data spaces table
+    /loop                    ;loop over all 0-255 possible address spaces
+      /var local sp integer = 0 ;current address space ID
+      /var local nsp integer = 0 ;number of different address spaces found
+      /var local s string    ;assembler output line
+      /var local outl bool = false ;init to no output line in progress
+
+      /if [exist [str "emcan_upld_sp" sp "_st1"]] then ;this adr space exists ?
+        /set nsp [+ nsp 1]   ;count one more address space found
+        /if [not outl] then  ;no output line, initialize one first ?
+          /set s ""
+          /call tabopcode s
+          /set s [str s "db"]
+          /call taboperand s
+          /endif
+        /if outl then        ;write separator after previous value ?
+          /set s [str s ", "]
+          /endif
+        /set s [str s sp]    ;add this adr space ID to end of line
+        /set outl true       ;output line now definitely in progress
+        /if [> [slen s] 70] then ;output line long enough, write it ?
+          /write s
+          /set outl false
+          /endif
+        /endif
+
+      /set sp [+ sp 1]       ;advance to the next address space
+      /if [> sp 255] then    ;done all address spaces ?
+        /if outl then        ;write out partial last line ?
+          /write s
+          /endif
+        /write
+        /set s ""
+        /call tabopcode s
+        /set s [str s ";   " nsp " entries in table"]
+        /write s
+        /const emcan_upadr_nspace integer = nsp ;number of address spaces found
+        /quit
+        /endif
+      /endloop               ;back to do next address space
+  /endif                     ;end of upload supported no/yes cases

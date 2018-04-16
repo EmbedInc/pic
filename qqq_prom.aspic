@@ -1,0 +1,53 @@
+;   ***************************************************************
+;   * Copyright (C) 2012, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Procedural interface to the non-volatile memory.
+;
+;   The following routines are exported, which is the rest of the system's
+;   sole access to the EERPOM:
+;
+;     PROM_LOCK  -  Acquire exclusive access to PROM_xxx routines.
+;
+;     PROM_ADR  -  Set address of the next EEPROM read or write from REG2:REG1.
+;
+;     PROM_READ  -  Read byte from current EEPROM address into REG0,
+;       then increment the current address.
+;
+;     PROM_WRITE  -  Write REG0 to current EEPROM address, then
+;       increment the current address.
+;
+;     PROM_FLUSH  -  Guarantees all write data is physically written
+;       to the EEPROM.  Write data may be buffered until this call.
+;
+;     PROM_UNLOCK  -  Release exclusive access to PROM_xxx routines.
+;
+;   The following resources must be defined externally to this module.
+;
+;     FLAG_PROMLOCK  -  Used to implement PROM_LOCK/PROM_UNLOCK mutex.  Set
+;       when a task has the PROM routines locked.  Read-only outside this
+;       module.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     1           ;register bank for the local state of this module
+
+/include "(cog)src/pic/prom18.ins.aspic" ;PIC 18 internal EEPROM, multi-tasking
+
+         end

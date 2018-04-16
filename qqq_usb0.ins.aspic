@@ -1,0 +1,167 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This file is included in the USB0 module and provides the static
+;   USB enumeration data.  It is in a separate file to make customization
+;   easier.
+;
+;   Various macros are intended to simplify creating the enumeration
+;   data tables.  These are defined and documented in the USB0 module,
+;   but briefly they are:
+;
+;     WORD val
+;
+;       Create a 16 bit word with two separate DB directives.  The low
+;       byte will be stored first, then the high byte.  This is the order
+;       required by 16 bit words in USB descriptors.
+;
+;     STRING n, str
+;
+;       Define a USB string descriptor.  N is the 2-N sequential number
+;       of the string, which will be the "index" used to request the
+;       string.  String numbers should start at 2 and use sequential
+;       numbers from there.  String 0 is defined by the USB specification
+;       and indicates the language.  String 1 is handled as a special case
+;       and is the user-settable name of this unit stored in the EEPROM.
+;
+
+;
+;   Configuration constants.
+;
+usbma    equ     500         ;mA maximum USB current draw, must be 0-500
+;
+;   Derived constants.
+;
+         ;
+         ;   Set VERSBCD to 1-255 firware version number in 3 digit BCD format.
+         ;
+ii       set     fwver       ;get binary firmware version number
+vers100  equ     ii / 100    ;100s digit of version number
+ii       set     ii - (vers100 * 100)
+vers10   equ     ii / 10     ;10s digit of version number
+ii       set     ii - (vers10 * 10)
+vers1    equ     ii          ;1s digit of version number
+versbcd  set     (vers100 << 8) | (vers10 << 4) | vers1 ;version number in BCD
+;
+;   Device descriptor.
+;
+desc_dev
+         db      desc_dev_len ;size of whole descriptor in bytes
+         db      1           ;descriptor type is DEVICE
+         word    h'110'      ;compliant with USB spec version 1.10
+         db      h'FF'       ;vendor specific device class
+         db      0           ;device subclass, not used
+         db      h'FF'       ;vendor specific device protocol
+         db      out0sz      ;max packet size endpoint 0 can accept
+         word    usb_vid     ;USB vendor ID for this device
+         word    usb_pid     ;USB product ID within this vendor ID
+         word    versbcd     ;device version number in BCD
+         db      2           ;string index of manufacturer name
+         db      3           ;string index of product name
+         db      0           ;string index of serial number
+         db      1           ;number of possible configurations
+desc_dev_len equ $ - desc_dev ;compute descriptor length
+;
+;   Configuration descriptor 0.  This device only supports a single
+;   configuration.
+;
+desc_config1
+         db      desc_config1_len ;size of whole descriptor in bytes
+         db      2           ;descriptor type is CONFIGURATION
+         word    config1_all_len ;length of all descriptors in this configuration
+         db      1           ;number of interfaces within this configuration
+         db      1           ;ID to select this configuration
+         db      0           ;string index of config description
+         db      b'10000000' ;attribute flags
+                 ; 1-------  reserved, must be set to 1
+                 ; -0------  not self-powered
+                 ; --0-----  does not support remote wakeup
+                 ; ---00000  reserved, set to 0
+         db      usbma / 2   ;max current draw, units of 2mA
+desc_config1_len equ $ - desc_config1
+;
+;   Interface descriptor 1.  This is the only interface within the only
+;   configuration.
+;
+desc_iface1
+         db      desc_iface1_len ;size of whole descriptor in bytes
+         db      4           ;descriptor type is INTERFACE
+         db      0           ;0-N number of this interface within config
+         db      0           ;alternate setting number for this interface
+         db      2           ;number of direction/endpoints in this interface
+         db      h'FF'       ;does not adhere to a USB-defined class
+         db      0           ;subclass ID, not used
+         db      h'FF'       ;does not adhere to a USB-defined protocol
+         db      0           ;string index of interface description
+desc_iface1_len equ $ - desc_iface1
+;
+;   Endpoint descriptor 0.  This is for endpoint 1 OUT.
+;
+desc_endp0
+         db      desc_endp0_len ;size of whole descriptor in bytes
+         db      5           ;descriptor type is ENDPOINT
+         db      b'00000001'
+                 ; 0-------  OUT endpoint
+                 ; -000----  reserved, must be set to 0
+                 ; ----0001  endpoint number
+         db      b'00000010'
+                 ; XXXXXX--  reserved
+                 ; ------10  bulk transfer type
+         word    out1sz      ;max bytes per packet
+         db      1           ;ms polling interval, not used
+desc_endp0_len equ $ - desc_endp0
+;
+;   Endpoint descriptor 1.  This is for endpoint 1 IN.
+;
+desc_endp1
+         db      desc_endp1_len ;size of whole descriptor in bytes
+         db      5           ;descriptor type is ENDPOINT
+         db      b'10000001'
+                 ; 1-------  IN endpoint
+                 ; -000----  reserved, must be set to 0
+                 ; ----0001  endpoint number
+         db      b'00000010'
+                 ; XXXXXX--  reserved
+                 ; ------10  bulk transfer type
+         word    in1sz       ;max bytes per packet
+         db      1           ;ms polling interval, not used
+desc_endp1_len equ $ - desc_endp1
+
+config1_all_len equ $ - desc_config1 ;length all descriptors in configuration 0
+;
+;   String descriptors.  These are referenced by the numbers 1-N from other
+;   descriptors above.  The special string descriptor 0 provides the list of
+;   languages that each string is available in.
+;
+;   The special string descriptor 0 must be first.  In other words, all other
+;   string descriptors must have positive address offsets from descriptor 0.
+;
+;   String 1 is the unique name for this particular unit, and is therefore stored
+;   in data EEPROM and not program memory.  String 1 is handled as a special case
+;   in the code, and must not be defined here.
+;
+;   A descriptor must be defined for each number 2-N up to the maximum used.
+;   In other words, no string descriptor numbers may be skipped from 2 to the
+;   last.
+;
+string0                      ;special "string" defining supported languages
+         db      string0_len ;size of whole descriptor in bytes
+         db      3           ;descriptor type is STRING
+         word    h'0409'     ;language US English
+string0_len equ  $ - string0
+
+         string  2, "Embed Inc" ;manufacturer name
+         string  3, "U1EX demo firmware" ;product name

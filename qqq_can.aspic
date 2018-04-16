@@ -1,0 +1,8 @@
+/include "qq2.ins.aspic"
+
+/const   bitrate real = 500e3 ;CAN bus bit rate, Hz
+/const   canin_callback = "" ;name of routine to call when CAN frame received
+lbank    equ     1           ;register bank for the local state of this module
+
+/include "(cog)src/pic/ecan.ins.aspic" ;driver for ECAN module, like in 18F4580
+         end

@@ -1,0 +1,33 @@
+;   Create derived values from the application task configuration.  This state
+;   is used as input:
+;
+;     TSKSAVE  -  Or of the REGFn flags to indicate which REGn general registers
+;       are to be preserved per task accross a call to TASK_YIELD.  The default
+;       is REG0-REG7 if this symbol is not defined.
+;
+;   This state is created:
+;
+;     TSKNSAVE  -  Or of all the REGFn flags for the variables not saved accross
+;       a call to TASK_YIELD.
+;
+;     NTSKSAVE  -  Number of bytes indicated by TSKSAVE that must be saved and
+;       restored by TASK_YIELD.
+;
+  ifndef tsksave
+tsksave  equ     regf0 | regf1 | regf2 | regf3 | regf4 | regf5 | regf6 | regf7
+    endif
+
+tsknsave equ     regf_all & ~tsksave ;mask of registers not saved by TASK_YIELD
+;
+;   Set NTSKSAVE to the number of saved context bytes that will be added to each
+;   task stack when suspended.
+;
+jj       set     0           ;init number of added bytes to 0
+ii       set     0
+  while ii < numregs         ;once for each REGn register that exists
+    if ((1 << ii) & tsksave) ;this register is saved/restored per task ?
+jj       set     jj + 1      ;count one more stack byte used
+      endif
+ii       set     ii + 1      ;advance to next REGn register number
+    endw
+ntsksave equ     jj          ;set final number of data stack bytes used during TASK_YIELD

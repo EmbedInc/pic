@@ -1,0 +1,446 @@
+;   ***************************************************************
+;   * Copyright (C) 2011, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   USB stream command processor.  The routines in this module interpret and
+;   process the command stream coming from the host computer via the USB.
+;
+;   The code in this module requires some global flags in addition to the
+;   standard USB flags.  The flags below are defined such that they can be
+;   copied into the project include file and uncommented.
+;
+;   /flag    namelock            ;name get routines are locked
+;   /flag    cmdreset            ;reset command processor logic next time run
+;   /flag    namecmd             ;name get routines acquired by command processor
+;   /flag    rsp_lock            ;response to host is locked by a task
+;   /flag    cmd_rsplock         ;response lock is being held by command proc task
+;
+/include "qq2.ins.aspic"
+
+         extern  currtask    ;0-N number of the currently running task
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+stacksz  equ     64          ;size of command processor data stack
+lbank    equ     1           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+cmdtask  res     1           ;ID of the command processing task
+;
+;   The command processor stack goes in its own data section so that the linker
+;   has more freedom in placing it.
+;
+.cmdstack udata
+cmdstack res     stacksz     ;command processing task data stack
+
+
+.cmd     code
+
+;*******************************************************************************
+;
+;   Subroutine CMD_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  cmd_init, noregs
+
+         dbankif lbankadr
+         setf    cmdtask     ;init to command processing task is not running
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine YIELD
+;
+;   Let other tasks run for a time slice.  In addition, this routine restarts
+;   the command processing logic if a USB reset was received.  That means the
+;   previous command stream was aborted and a new one has been started.
+;
+;   Since this routine calls TASK_YIELD, all registers not listed in TSKSAVE are
+;   trashed.
+;
+         locsub  yield, noregs
+
+         gcall   task_yield  ;give other tasks a chance to run
+
+         dbankif gbankadr
+         btfsc   flag_cmdreset ;don't need to reset the command processor ?
+         jump    task_restart ;reset the command processor
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_BYTE
+;
+;   Get the next input byte into REG0.  This subroutine will not return until an
+;   input byte is available.  Only the registers listed in TSKSAVE will be
+;   preserved.  Other tasks will be run while waiting for a new input byte to
+;   become available.  A YIELD is guaranteed to be performed at least once.
+;
+         locsub  get_byte, regf1
+
+gbloop   unbank              ;back here until input byte is available
+         popregs savedregs
+         mcall   yield       ;give other tasks a chance to run
+         pushregs savedregs
+         dbankif gbankadr
+         clrf    reg1        ;indicate to transfer byte if one is available
+         gcall   usb_get1    ;try to get a byte from the USB
+         btfsc   reg1, usbs_noxf ;we got a byte ?
+         jump    gbloop      ;no, go back and try again
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro GETBYTE
+;
+;   Call GET_BYTE, which is defined immediately above.  This macro is to make it
+;   easier to exchange code with other firmware that does not use a subroutine
+;   to get the next byte.
+;
+;   Registers not listed in MSKSAVE may be trashed.
+;
+getbyte  macro
+         mcall   get_byte    ;get the next byte into REG0
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine GET16
+;
+;   Get the next 2 input bytes as a 16 bit value and return it in REG1:REG0.
+;   The input bytes are assumed to be in low to high byte order.
+;
+         locsub  get16, noregs
+
+         getbyte             ;get low byte into REG0
+         pushreg reg0        ;temp save it on the stack
+         getbyte
+         movff   reg0, reg1
+
+         popreg  reg0        ;restore low byte into REG0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET24
+;
+;   Get the next 3 input bytes as a 24 bit value and return it in
+;   REG2:REG1:REG0.  The input bytes are assumed to be in low to high byte
+;   order.
+;
+         locsub  get24, noregs
+
+         getbyte             ;get low byte into REG0
+         pushreg reg0        ;temp save it on the stack
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+
+         popreg  reg0        ;restore low byte into REG0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET32
+;
+;   Get the next 4 input bytes as a 32 bit value and return it in
+;   REG3:REG2:REG1:REG0.  The input bytes are assumed to be in low to high byte
+;   order.
+;
+         locsub  get32, noregs
+
+         getbyte             ;get low byte into REG0
+         pushreg reg0        ;temp save it on the stack
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+         movff   reg0, reg3
+
+         popreg  reg0        ;restore low byte into REG0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_LOCK
+;
+;   Acquire exclusive access to sending to the host.  The lock must be held
+;   while sending a response to guarantee the bytes from responses from multiple
+;   tasks do not get interleaved.
+;
+         glbsub  cmd_lock, noregs
+
+lck_loop unbank
+         dbankif gbankadr
+         btfss   flag_rsp_lock ;lock not available now ?
+         jump    lck_ready   ;lock is available
+         gcall   task_yield_save ;let all other tasks run for a bit
+         jump    lck_loop    ;back and check lock again
+
+lck_ready dbankis gbankadr   ;the lock is availabe
+         bsf     flag_rsp_lock ;grab the lock
+
+         dbankif lbankadr
+         movf    cmdtask, w  ;get the ID of the command processing task
+         dbankif gbankadr
+         xorwf   currtask, w ;compare to ID of the current task
+         skip_nz             ;this is not command processor ?
+         bsf     flag_cmd_rsplock ;indicate command processor has the response lock
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_UNLOCK
+;
+;   Release the exclusive lock on sending to the host.
+;
+         glbsub  cmd_unlock, noregs
+
+         dbankif gbankadr
+         bcf     flag_rsp_lock ;response stream is not locked
+         bcf     flag_cmd_rsplock ;command processing task doesn't have the lock
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine PUT_BYTE
+;
+;   Send the byte in REG0 as a response byte to the host.  Registers not listed
+;   in MSKSAVE may be trashed.
+;
+         locsub  put_byte, regf1
+
+pb_loopu unbank              ;back here to retry sending byte via USB
+         clrf    reg1        ;indicate to tranfer byte if possible
+         gcall   usb_put1    ;try to send the byte
+         btfss   reg1, usbs_noxf ;the byte was not sent ?
+         jump    pb_leave    ;the byte was sent
+
+         popregs savedregs
+         mcall   yield       ;give other tasks a chance to run
+         pushregs savedregs
+         jump    pb_loopu
+
+pb_leave unbank              ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro SENDBYTE
+;
+;   Send the byte in REG0 as a response to the current command.  This macro
+;   provides a means to customize the code for sending a byte depending on
+;   implementation.  Some implementations may not use a subroutine to send a
+;   byte.  Command code should use SENDBYTE instead of the PUT_BYTE subroutine.
+;
+;   Registers not listed in MSKSAVE may be trashed.
+;
+sendbyte macro
+         mcall   put_byte
+         endm
+
+;*******************************************************************************
+;
+;   Macro SENDK const
+;
+;   Send the indicated 8 bit constant value to the host.
+;
+;   W, REG0, and the current bank setting are trashed.  All registers not listed
+;   in MSKSAVE may be trashed.
+;
+sendk    macro   const
+         loadk8  reg0, const
+         sendbyte
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine CMD_START
+;
+;   Start up host command processing.  This routine launches a new task to
+;   perform the host command processing, then returns.
+;
+         glbsub  cmd_start, regf0 | regf1 | regf2 | regf3
+
+         task_create cmd_task, cmdstack ;start the host command processing task
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Command task.
+;
+cmd_task unbank              ;task start point
+         movff   currtask, cmdtask ;save ID of the command processing task
+;
+;   Command processor restart point.  This entry point can be called or jumped
+;   to in any state, including with the call and data stacks not empty.
+;
+task_restart unbank          ;will restart here on a USB reset
+         dbankif stkptr
+         clrf    stkptr      ;reset the call stack to empty
+         stack_set cmdstack  ;reset the data stack to empty
+         dbankif gbankadr
+         bcf     flag_cmdreset ;clear any pending reset
+;
+;   Initialize command processing state for after a USB reset.
+;
+         ;
+         ;   Release the lock on the response stream to the host if it is held
+         ;   by this task.
+         ;
+         dbankif gbankadr
+         btfss   flag_cmd_rsplock ;response stream locked by this task ?
+         jump    no_rsplock  ;no
+         mcall   cmd_unlock  ;release lock on the response stream
+no_rsplock unbank
+         ;
+         ;   Release the NAME_GET_xxx routines if locked by this task.
+         ;
+         dbankif gbankadr
+         btfss   flag_namecmd ;this task has NAME_GET locked ?
+         jump    no_namelock ;no
+         bcf     flag_namecmd ;indicate no longer locked
+         gcall   name_get_end ;release the lock
+no_namelock unbank
+;
+;   Wait for the USB to be usable before attempting to do USB I/O.
+;
+cmd_waitusb unbank
+         mcall   yield       ;give other tasks a chance to run
+         dbankif gbankadr
+         btfss   flag_usbon  ;USB is ready for app use ?
+         jump    cmd_waitusb ;no, go back and check again
+;
+;   Command routines jump here when done.
+;
+cmd_done unbank              ;done successfully processing last command
+         dbankif stkptr
+         clrf    stkptr      ;reset the call stack to empty
+         stack_set cmdstack  ;reset the data stack to empty
+;
+;   Process next command.
+;
+cmd_next unbank              ;back here to interpret next byte as command opcode
+         gcall   task_yield  ;give other tasks a chance to run
+         getbyte             ;get the next opcode byte into REG0
+         dispatch cmd_table  ;jump to the selected command routine
+         jump    cmd_next    ;not a valid opcode, back to get next
+
+;*******************************************************************************
+;
+;   Command PING
+;
+;   Send the PONG response.
+;
+cm_ping  unbank
+         mcall   cmd_lock
+         sendk   rsp_pong
+         mcall   cmd_unlock
+         jump    cmd_done
+
+;*******************************************************************************
+;
+;   Command FWINFO
+;
+;   Send FWINFO response, which indicates the firmware version.
+;
+cm_fwinfo unbank
+         mcall   cmd_lock
+
+         sendk   rsp_fwinfo  ;send FWINFO response opcode
+         sendk   fwtype      ;type ID for this firmware
+         sendk   fwver       ;1-255 firmware version number
+         sendk   fwseq       ;1-255 firmware sequence number
+
+         mcall   cmd_unlock
+         jump    cmd_done    ;done processing this command
+
+;*******************************************************************************
+;
+;   Command NAME
+;
+;   Send NAME response to indicate the user-settable unit name.
+;
+cm_name  unbank
+         gcall   name_get_start ;set up for getting name, length into REG0
+         dbankif gbankadr
+         bsf     flag_namecmd ;indicate we have the NAME_GET lock
+         movff   reg0, reg1  ;save number of name characters
+
+         mcall   cmd_lock    ;acquire lock on the response stream
+         sendk   rsp_name    ;send response opcode
+         movff   reg1, reg0
+         sendbyte            ;send the number of name characters to follow
+name_loop unbank             ;back here to send each new name character
+         movf    reg1
+         bz      name_done   ;done sending all the name characters ?
+         gcall   name_get_char ;get this name character
+         sendbyte            ;send it
+         decf    reg1        ;count one less character left to do
+         jump    name_loop   ;back to send next name char
+name_done unbank             ;done sending all the name characters
+         mcall   cmd_unlock  ;release lock on response stream to host
+
+         gcall   name_get_end ;done getting unit name
+         dbankif gbankadr
+         bcf     flag_namecmd ;indicate we are not holding the NAME_GET lock
+         jump    cmd_done    ;done processing this command
+
+;*******************************************************************************
+;
+;   Commands dispatch table.
+;
+.cmdtable code_pack
+         dsp_start cmd_table ;start command opcodes dispatch table
+
+         dsp_entry 0, cmd_done ;NOP
+         dsp_entry 1, cm_ping ;PING, send PONG response
+         dsp_entry 2, cm_fwinfo ;send firmware information
+         dsp_entry 3, cm_name ;send unique name of this unit
+
+         dsp_end cmd_table   ;end of command opcodes dispatch table
+
+         end

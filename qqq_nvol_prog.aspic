@@ -1,0 +1,130 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Non-volatile memory manager using program memory (not EEPROM).
+;
+;   A section of program memory is used to emulate EEPROM.  The program memory
+;   is usually rated for much fewer lifetime writes than EEPROM, so the
+;   application must be careful not to change values frequently.  Redundant
+;   writes to the same value are detected automatically in this module and do
+;   not cause physical writes to the program memory.
+;
+
+;*******************************************************************************
+;
+;   Make sure the NVOL_ADR.INS.ASPIC file exists but is empty.  This is written
+;   when NVOL_FINISH is called at the end of this module.  It will contain the
+;   definitions of symbols for address offsets into the non-volatile memory, as
+;   required by the NVOL_READ and NVOL_WRITE routines.  This file is intended to
+;   be included from the project include file so that these symbols are
+;   available to all modules that access non-volatile memory.  Since building
+;   this module creates the file, this module needs to be built first.  To allow
+;   for simply unconditionally including it from the project include file, it is
+;   created here before the project include file is included.
+;
+/writepush "nvol_adr.ins.aspic" ;make sure file exists and initialize it to empty
+/writepop                  ;pop back to previous output file
+
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Fixed values.  These constants represent values that are externally fixed,
+;   and that are therefore not design choices.  Check the datasheet for the
+;   particular PIC in use.  The write block size in particular varies between
+;   different parts.
+;
+/const   erasesz integer = 64 ;bytes per erase block, must be power of 2
+/const   writesz integer = 32 ;bytes per write block, must be power of 2
+;
+;   Configuration constants.
+;
+/const   nvolsz  integer = 1024 ;minimum number of non-volatile bytes to implement
+lbank    equ     1           ;register bank for the local state of this module
+
+
+/include "(cog)src/pic/nvol_prog.ins.aspic"
+
+;*******************************************************************************
+;
+;   Initial values for the non-volatile data.  The non-volatile data will be set
+;   to these values when the HEX file is programmed into the chip.
+;
+;   All the non-volatile bytes need not be defined here.  The remaining non-
+;   volatile bytes will be initialized to FFh.
+;
+;   Several macros are available to aid in defining initial values of the
+;   program memory that will be used for the non-volatile memory.  Some of the
+;   following may be useful:
+;
+;     [label] PBYTE value [, comment]
+;
+;       Defines the initial value for the next 8-bit byte.
+;
+;     [label] PWORD value [, comment]
+;
+;       Defines the intial value for the next 16-bit word.  The 16 bit word may
+;       be arbitrarily aligned.  The bytes are written in least to most
+;       significant order.
+;
+;     [label] PWORD24 value [, comment]
+;
+;       Like PWORD, but writes a 24 bit value.
+;
+;     [label] PWORD32 value [, comment]
+;
+;       Like PWORD, but writes a 32 bit value.
+;
+;     [label] NSTRING maxsize, "..." [, comment]
+;
+;       Defines a character string.  The string format is a length byte followed
+;       by the characters of the string.  Each character takes one byte.  Since
+;       the length is limited to a single byte, this type of string can have a
+;       length of up to 255 characters.
+;
+;       MAXSIZE defines how much memory to reserve for the string.  This is the
+;       maximum number of characters the string can ever hold, regardless of how
+;       many are in the intial value string.  The second parameter (after
+;       MAXSIZE) is the initial value to set the string to.  The parameter is a
+;       preprocessor string.  The initial value comes from this string,
+;       including the length byte.  MAXSIZE is only used to determine how much
+;       memory to reserve, which will be MAXSIZE+1 bytes.
+;
+;     [label] MNSTRING maxsize, "..." [, comment]
+;
+;       Like NSTRING except that a additional maximum length byte is stored
+;       first.  In order, the bytes of this type of string are the maximum
+;       length, the current actual length, and then the data bytes.
+;
+;   In all cases, the macro invocation can be preceeded by a label name.  If so,
+;   the label symbol will be written to the separate file NVOL_ADR.INS.ASPIC.
+;   The value of each label will be the offset of its byte from the start of the
+;   non-volatile memory.  These are the address values that NVOL_READ and
+;   NVOL_WRITE will use.  Modules that need to access non-volatile memory by
+;   using these symbolic addresses must include NVOL_ADR.INS.ASPIC.
+;
+
+nvprimes pbyte   2, "example primes"
+         pbyte   3
+         pbyte   5
+         pbyte   7
+         pbyte   11
+
+nvstr    mnstring 16, "Dominator5000", "model name"
+
+/call nvol_finish            ;finish non-volatile mem define, write NVOL_ADR.INS.ASPIC
+
+         end

@@ -1,0 +1,1620 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   User Datagram Protocol (UDP).
+;
+;   The User Datagram Protocol is defined in RFC 768.  The documentation in this
+;   module assumes a basic understanding of UDP.
+;
+;   Below is a overview of externally exported subroutines from this module
+;   intended for normal use by applications.  This section is only meant to give
+;   a quick idea of what is available.  The details are described in the
+;   comments at the beginning of each subroutine.
+;
+;     UDP_XMIT_OPEN
+;
+;       Allocates a UDP output unit and initializes the state for sending a UDP
+;       packet.  The maximum payload size is passed.  A larger payload may not
+;       be written later to this packet.
+;
+;     UDP_XMIT_SRC_PORT
+;
+;       Sets the source UDP port of the open transmit packet.  The default is 0.
+;
+;     UDP_XMIT_DEST_PORT
+;
+;       Sets the destination UDP port number of the transmit packet open on this
+;       output unit.  The default is 0.
+;
+;     UDP_XMIT_DEST_IP
+;
+;       Sets the destination IP address of the transmit packet open on this UDP
+;       output unit.  There is no default.  If the destination IP address is not
+;       set then the datagram will not be transmitted.
+;
+;     UDP_XMIT_OFS
+;
+;       Set the offset into the packet payload of the next byte to read or write.
+;
+;     UDP_XMIT_WRITE
+;
+;       Write the byte at the current payload offset, then advance the offset by
+;       one.
+;
+;     UDP_XMIT_READ
+;
+;       Read the byte at the current payload offset, then advance the offset by
+;       one.
+;
+;     UDP_XMIT_SEND
+;
+;       Transmit the UDP packet in its current state.
+;
+;     UDP_XMIT_CLOSE
+;
+;       Release the UDP transmit packet resources and free the UDP transmit I/O
+;       unit.
+;
+;
+;
+;     UDP_RECV_OPEN
+;
+;       Sets up a UDP input unit for receiving datagrams to a specific port.
+;
+;     UDP_RECV_CHECK
+;
+;       Checks whether a received datagram is available on a input unit.
+;
+;     UDP_RECV_WAIT
+;
+;       Waits until a datagram is received on a input unit.
+;
+;     UDP_RECV_SRC_PORT
+;
+;       Returns the source port of a recieved datagram.
+;
+;     UDP_RECV_DEST_PORT
+;
+;       Returns the destination port of a received datagram.
+;
+;     UDP_RECV_LEN
+;
+;       Returns the data payload length of a received datagram.  This is the
+;       full length minus the header size (which is always 8).
+;
+;     UDP_RECV_OFS
+;
+;       Set the offset into the received datagram payload of the next byte to
+;       read.
+;
+;     UDP_RECV_READ
+;
+;       Read the byte at the current received datagram payload offset, and
+;       advance the offset by one.
+;
+;     UDP_RECV_RELEASE
+;
+;       Release the received datagram.  The network stack handles one received
+;       packet at a time.  When a packet is received, it must be processed
+;       released quickly.
+;
+;     UDP_RECV_CLOSE
+;
+;       Close the UDP input unit opened with UDP_RECV_OPEN.  The input unit
+;       becomes available for re-use.
+;
+;
+;   Global settings used by this module:
+;
+;     USING_NET_UDP  -  Preprocessor BOOL.  This module is completely
+;       disabled and produces no code when this is FALSE.
+;
+;     USING_NET_UDP_SEND  -  Preprocessor BOOL.  Enables UDP datagram sending
+;       facility.
+;
+;     USING_NET_UDP_RECV  -  Preprocessor BOOL.  Enables UDP datagram receiving
+;       facility.
+;
+;     N_UDP_SEND  -  Preprocessor integer.  Number of UDP output units to
+;       create.  This is the maximum number of UDP transmit packets that can be
+;       open simultaneously.  Must be at least 1 when USING_NET_UDP_SEND is
+;       TRUE.
+;
+;     N_UDP_RECV  -  Preprocessor integer.  Number of UDP input units to create.
+;       This is the maximum number of ports the application can be listening on
+;       for UDP packets simultaneously.  Must be at least 1 when
+;       USING_NET_UDP_RECV is TRUE.
+;
+/if [not using_net_udp] then ;UDP is globally disabled ?
+  /show "  Disabled"
+         end
+  /stop
+  /endif
+
+         extern  our_ip      ;our IP address, high to low byte order
+         extern  recv_destip ;dest IP adr of received IP packet, high to low order
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Constants that reflect realities which we have no control over.
+;
+head_size equ    8           ;size of UDP header, bytes
+udp_prot equ     17          ;IP protocol ID for UDP
+;
+;   Configuration constants.
+;
+lbank    equ     [v lbank_net_udp] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+/var new ii integer          ;make scratch preprocessor integer
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+n_udp_send equ   [v n_udp_send] ;number of output units
+n_udp_recv equ   [v n_udp_recv] ;number of input units
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+;*******************
+;
+;   Datagram receiving state.  There can only be one received datagram open at
+;   at time, so much of the receiving state does not need to be per input unit.
+;
+/if using_net_udp_recv then
+
+recv_unit res    1           ;0-127 UDP input unit number, bit 7 set for none
+recv_src_port res 2          ;source port number of received datagram
+recv_dest_port res 2         ;destintion port number of received datagram
+recv_len res     2           ;number of payload bytes in received datagram
+recv_ofs res     2           ;offset into UDP paylod to read next byte from
+
+  if debug
+         global  recv_unit, recv_src_port, recv_dest_port, recv_len, recv_ofs
+    endif
+;
+;   Input units.  Each input unit holds the control state for listening for
+;   incoming packets on a particular port.
+;
+;   The byte offset of each field from the start of the descriptor is named
+;   UR_xxx.  The FLAGS field is guaranteed to be the first field (UR_FLAGS = 0),
+;   but the code should make no assumptions about order of the remaining fields.
+;
+;   The fields in the individual descriptors are name URn_xxx, where N is the
+;   input unit number.  Input unit numbers start with 0 and go up by one each
+;   new unit.
+;
+;   The input units must be contiguous in memory, but may cross bank boundaries
+;   and the banks do not need to be known at build time.  The block of input
+;   units is therefore placed in its own linker section to allow the linker
+;   maximum flexibility in placing the block.
+;
+;   The assembler constant SZ_UR is set to the byte size of one input unit.
+;
+  /if [< n_udp_recv 1] then
+    /show "  ERROR: Receiving enabled but no output units defined."
+         error   N_UDP_RECV
+         end
+    /stop
+    /endif
+
+.udprecv udata               ;separate linker section of UDP output units
+ur_units res     0           ;start address of array of output units
+
+  /set ii 0
+  /block                     ;back here each output unit to define
+ur[v ii]_flags res 1         ;flags byte, see URFLG_xxx constants, below
+ur[v ii]_port res 2          ;port number listening for datagrams on
+
+  if debug
+         global  ur[v ii]_flags, ur[v ii]_port
+    endif
+
+    /if [= ii 0] then        ;just defined the first unit ?
+sz_ur    equ     $-ur_units  ;make size of one output unit
+      /endif
+    /set ii [+ ii 1]         ;make next 0-N unit number
+    /if [< ii n_udp_recv] then
+      /repeat                ;back to define next unit
+      /endif
+    /endblock
+         ;
+         ;   Symbols for the offsets of each field from the start of the
+         ;   descriptor.
+         ;
+ur_flags equ     ur0_flags - ur_units
+ur_port  equ     ur0_port - ur_units
+         ;
+         ;   Flag bits in the UR_FLAGS field.  Each symbol here is the bit
+         ;   number for the particular flag within the UR_FLAGS byte.  The
+         ;   sense of all bits is such that 0 is the default or unused value.
+         ;
+urfl_inuse equ   0           ;unit is in use
+
+  /endif                     ;end of reception enabled case
+
+;*******************
+;
+;   Output units.  Each output unit holds the control state for one UDP packet
+;   being built for transmission.
+;
+;   The byte offset of each field from the start of the descriptor is named
+;   UX_xxx.  The FLAGS field is guaranteed to be the first field (UX_FLAGS = 0),
+;   but the code should make no assumptions about order of the remaining fields.
+;
+;   The fields in the individual descriptors are name UXn_xxx, where N is the
+;   output unit number.  Output unit numbers start with 0 and go up by one each
+;   new unit.
+;
+;   The output units must be contiguous in memory, but may cross bank boundaries
+;   and the banks do not need to be known at build time.  The block of output
+;   units is therefore placed in its own linker section to allow the linker
+;   maximum flexibility in placing the block.
+;
+;   The assembler constant SZ_UX is set to the byte size of one output unit.
+;
+/if using_net_udp_send then  ;sending UDP datagrams is enabled ?
+  /if [< n_udp_send 1] then
+    /show "  ERROR: Sending enabled but no output units defined."
+         error   N_UDP_SEND
+         end
+    /stop
+    /endif
+
+.udpxmit udata               ;separate linker section of UDP output units
+ux_units res     0           ;start address of array of output units
+
+  /set ii 0
+  /block                     ;back here each output unit to define
+ux[v ii]_flags res 1         ;flags byte, see UXFLG_xxx constants, below
+ux[v ii]_ip res  1           ;IP unit number
+ux[v ii]_ofs res 2           ;offset into payload of next byte to read or write
+ux[v ii]_len res 2           ;payload length, bytes
+
+  if debug
+         global  ux[v ii]_flags, ux[v ii]_ip, ux[v ii]_ofs, ux[v ii]_len
+    endif
+
+    /if [= ii 0] then        ;just defined the first unit ?
+sz_ux    equ     $-ux_units  ;make size of one output unit
+      /endif
+    /set ii [+ ii 1]         ;make next 0-N unit number
+    /if [< ii n_udp_send] then
+      /repeat                ;back to define next unit
+      /endif
+    /endblock
+         ;
+         ;   Symbols for the offsets of each field from the start of the
+         ;   descriptor.
+         ;
+ux_flags equ     ux0_flags - ux_units
+ux_ip    equ     ux0_ip - ux_units
+ux_ofs   equ     ux0_ofs - ux_units
+ux_len   equ     ux0_len - ux_units
+         ;
+         ;   Flag bits in the UX_FLAGS field.  Each symbol here is the bit
+         ;   number for the particular flag within the UX_FLAGS byte.  The
+         ;   sense of all bits is such that 0 is the default or unused value.
+         ;
+uxfl_inuse equ   0           ;unit is in use
+uxfl_cksum equ   1           ;checksum has been written since last change
+uxfl_len equ     2           ;length written to header is up to date
+uxfl_ipadr equ   3           ;destination IP address has been set
+
+  /endif                     ;end of transmitting enabled case
+
+
+.udp     code
+
+;*******************************************************************************
+;
+;   Macro ADDOFS ofs
+;
+;   Add the fixed offset OFS to REG1:REG0.
+;
+addofs   macro   ofs
+         movlw   low (ofs)
+         addwf   reg0
+         movlw   high (ofs)
+         addwfc  reg1
+         endm
+
+;*******************************************************************************
+;
+;   Macro POINT_SEND_OFS unitvar, ofs
+;
+;   Point FSR0 to offset OFS into the output unit indicated by the variable
+;   UNITVAR.  No checking is done.  Results are undefined when UNITVAR does not
+;   contain a valid output unit number.  UNITVAR must be directly accessible
+;   with the current bank setting, which is not altered.
+;
+;   Trashed: PRODH, PRODL
+;
+point_send_ofs macro unitvar, ofs
+         lfsr    0, ux_units + (ofs) ;point to selected field in unit 0
+         movf    unitvar, w  ;get the 0-N unit number
+         mullw   sz_ux       ;make offset for selected unit in PRODH:PRODL
+         movf    prodl, w    ;add the offset into the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Macro POINT_RECV_OFS unitvar, ofs
+;
+;   Point FSR0 to offset OFS into the input unit indicated by the variable
+;   UNITVAR.  No checking is done.  Results are undefined when UNITVAR does not
+;   contain a valid input unit number.  UNITVAR must be directly accessible
+;   with the current bank setting, which is not altered.
+;
+;   Trashed: PRODH, PRODL
+;
+point_recv_ofs macro unitvar, ofs
+         lfsr    0, ur_units + (ofs) ;point to selected field in unit 0
+         movf    unitvar, w  ;get the 0-N unit number
+         mullw   sz_ur       ;make offset for selected unit in PRODH:PRODL
+         movf    prodl, w    ;add the offset into the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine NET_UDP_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  net_udp_init, regf0
+;
+;   Initialize sending state.
+;
+/if using_net_udp_send then
+         lfsr    0, ux_units ;point to start of first output unit
+         loadk8  reg0, n_udp_send ;init number of units left to initialize
+ini_out  unbank
+         clrf    indf0       ;init this unit to unused
+         addfsr0 sz_ux       ;point to next unit
+         decfsz  reg0        ;count one less unit left to init
+         jump    ini_out
+  /endif                     ;end of transmitting is enabled
+;
+;   Initialize receiving state.
+;
+/if using_net_udp_recv then
+         dbankif lbankadr
+         setf    recv_unit   ;init to no received datagram is open
+
+         lfsr    0, ur_units ;point FSR0 to start of input units
+         loadk8  reg0, n_udp_recv ;init number of units left to initialize
+ini_in   unbank
+         clrf    postinc0    ;init this unit to unused
+         addfsr0 sz_ur - 1   ;point to next unit
+         decfsz  reg0        ;count one less unit left to do
+         jump    ini_in
+  /endif                     ;end of receiving is enabled
+
+         leaverest
+
+;*******************************************************************************
+;*******************************************************************************
+;
+;   This section of code is only built if sending UDP datagrams is enabled.
+;
+/if [not using_net_udp_send]
+  /then
+    /show "  UDP transmission code not built"
+  /else
+    /show "  UDP transmission configured for " n_udp_send " units"
+
+;*******************************************************************************
+;
+;   Subroutine POINT_SEND
+;
+;   Point FSR0 to the start of the output unit identified by REG8.  This will
+;   point to the FLAGS field, since this is always at the start of the unit.
+;
+         locsub  point_send, noregs
+
+         point_send_ofs reg8, ux_flags
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro SETUP_SEND abort
+;
+;   Set up for dealing with the output unit identified by REG8.  The abort
+;   address is jumped to if the output unit number in REG8 is invalid or the
+;   unit is not in use.  Otherwise, execution continues after this macro and
+;   FSR0 is left pointing to the first byte (FLAGS field) of the output unit.
+;
+setup_send macro abort
+         movf    reg8, w     ;get the buffer index number
+         sublw   n_udp_send-1 ;compare to max valid value
+         skip_wle            ;index is within range ?
+         jump    abort       ;no
+
+         mcall   point_send  ;point FSR0 to the start of the descriptor
+         btfss   indf0, uxfl_inuse ;this descriptor is in use ?
+         jump    abort       ;no
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine SWAP_IP_UDP
+;
+;   Swap the UDP output unit number with the IP transmit packet unit number.
+;   One is assumed to be in REG7, the other in REG8.  This routine therefore
+;   swaps the values of REG7 and REG8.
+;
+         locsub  swap_ip_udp, noregs
+
+         movf    reg7, w
+         xorwf   reg8, w     ;XOR of both value
+         xorwf   reg8
+         xorwf   reg7
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_OPEN
+;
+;   Opens a UDP output unit.  If a output unit is successfully opened, then its
+;   ID is returned in REG8.  Valid unit IDs are in the range of 0-127, which
+;   means the high bit is 0.  If no output unit was opened, the high bit of REG8
+;   is set.  The application must always check the high bit of REG8 to determine
+;   whether a output unit was opened.  If a output unit is successfully opened,
+;   then a UDP transmit datagram will be allocated and initialized.
+;
+;   The maximum number of UDP payload bytes to configure for is in REG1:REG0.  A
+;   smaller datagram can be sent, but the unused memory may not be available for
+;   other uses until the transmit unit is closed.  The maximum allowed payload
+;   size is 1472 bytes.  A request for a larger packet always fails.
+;
+         glbsub  udp_xmit_open, regf0 | regf1 | regf2 | regf3
+;
+;   Find the first unused output unit.
+;
+         loadk8  reg2, n_udp_send ;init loop counter
+         clrf    reg8        ;init index of first descriptor
+xop_fdsc_loop unbank         ;back here to check each new descriptor
+         mcall   point_send  ;point FSR0 to this descriptor
+         btfss   indf0, uxfl_inuse ;this descriptor is in use ?
+         jump    xop_fdsc_done ;no, found available descriptor
+         incf    reg8        ;make index of next descriptor
+         decfsz  reg2
+         jump    xop_fdsc_loop
+         jump    xop_fail
+
+xop_fdsc_done unbank         ;REG8 is index of available descriptor
+;
+;   FSR0 is pointing to a unused output unit, and REG8 contains its number.
+;
+;   We have to assume routines outside this module may perform task swaps, so
+;   the output unit must be flagged as in use while any such call is made.  If
+;   the overall operation later fails, the unit must be reset to unused and
+;   the high bit of REG8 set to indicate failure.  This can be done at any time
+;   by jumping to XOP_ABORT with the UDP output unit number on the top of the
+;   data stack.
+;
+         movlw   (1 << uxfl_inuse) ;indicate this unit is now in use
+         movwf   postinc0
+         pushreg reg8        ;save UDP output unit number
+;
+;   Compute the IP packet payload size and try to open a IP transmit packet.
+;   The UDP header is 8 bytes in size, so the IP payload size is the UDP payload
+;   size plus 8.
+;
+         movlw   low head_size ;add UDP header size to make IP payload size
+         addwf   reg0
+         movlw   high head_size
+         addwfc  reg1
+         movff   reg8, reg2  ;temp save UDP output unit number in REG2
+         gcall   ip_xmit_open ;try to create IP transmit packet
+         btfsc   reg8, 7     ;IP transmit packet opened successfully ?
+         jump    xop_abort   ;no
+         movff   reg8, reg3  ;save IP unit number in REG3
+         movff   reg2, reg8  ;restore UDP output unit number in REG8
+;
+;   The IP transmit packet was opened and its IP unit number is in REG3.  REG8
+;   contains the UDP output unit number.
+;
+;   Initialize the UDP output unit.  The FLAGS byte has already been intialized.
+;
+         mcall   point_send  ;point to the UDP output unit with ID in REG8
+
+         addfsr0 ux_ip - ux_flags ;save IP transmit unit number
+         movff   reg3, postinc0
+
+         addfsr0 ux_ofs - (ux_ip + 1) ;init byte offset into payload
+         clrf    postinc0
+         clrf    postinc0
+
+         addfsr0 ux_len - (ux_ofs + 2) ;init actual used payload length
+         clrf    postinc0
+         clrf    postinc0
+;
+;   Init parts of the packet.
+;
+         movff   reg3, reg8  ;pass unit number to IP routines
+
+         loadk8  reg0, udp_prot ;set the IP protocol ID to that of UDP
+         gcall   ip_xmit_prot
+
+         loadk16 reg0, 0
+         gcall   ip_xmit_write2 ;init source UDP port number to 0
+         gcall   ip_xmit_write2 ;init destination UDP port number to 0
+
+         popreg  reg8        ;return number of opened UDP output unit
+         jump    xop_leave
+;
+;   A failure has occurred after the output unit was opened.  The unit number is
+;   on the top of the stack.
+;
+xop_abort unbank
+         popreg  reg8        ;get the UDP unit number into REG8
+         mcall   point_send  ;point to the unit that was just opened
+         clrf    indf0       ;release the output unit
+
+xop_fail unbank              ;return indicating failure
+         setf    reg8
+
+xop_leave unbank             ;common exit point, REG8 all set
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_SRC_PORT
+;
+;   Sets the UDP source port number of a UDP transmit datagram to the value in
+;   REG1:REG0.  REG8 must contain the output unit number.
+;
+         glbsub  udp_xmit_src_port, regf8
+
+         setup_send xsrc_leave ;validate output unit and point FSR0 to it
+         bcf     postinc0, uxfl_cksum ;checksum will be invalid
+         addfsr0 ux_ip - (ux_flags + 1) ;point to IP unit number
+         movff   indf0, reg8 ;get the IP unit number
+
+         pushregs regf0 | regf1 ;save port number to write
+         loadk16 reg0, 0     ;set offset into IP packet payload
+         gcall   ip_xmit_ofs
+         popregs regf0 | regf1 ;get port number to write back into REG1:REG0
+         gcall   ip_xmit_write2 ;write source port into UDP header
+
+xsrc_leave unbank            ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_DEST_PORT
+;
+;   Sets the UDP destination port number of a UDP transmit datagram to the value
+;   in REG1:REG0.  REG8 must contain the output unit number.
+;
+         glbsub  udp_xmit_dest_port, regf8
+
+         setup_send xdst_leave ;validate output unit and point FSR0 to it
+         bcf     postinc0, uxfl_cksum ;checksum will be invalid
+         addfsr0 ux_ip - (ux_flags + 1) ;point to IP unit number
+         movff   indf0, reg8 ;get the IP unit number
+
+         pushregs regf0 | regf1 ;save port number to write
+         loadk16 reg0, 2     ;set offset into IP packet payload
+         gcall   ip_xmit_ofs
+         popregs regf0 | regf1 ;get port number to write back into REG1:REG0
+         gcall   ip_xmit_write2 ;write destination port into UDP header
+
+xdst_leave unbank            ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_DEST_IP
+;
+;   Sets the destination IP address of a UDP transmit datagram to the value in
+;   REG3:REG2:REG1:REG0.  REG8 must contain the output unit number.
+;
+         glbsub  udp_xmit_dest_ip, regf8
+
+         setup_send xdip_leave ;validate output unit, point FSR0 to it
+
+         bcf     indf0, uxfl_cksum ;invalidate previously computed checksum
+         bsf     postinc0, uxfl_ipadr ;destination IP address will be set
+
+         addfsr0 ux_ip - (ux_flags + 1) ;point to IP unit number
+         movff   indf0, reg8 ;get the IP unit number
+         gcall   ip_xmit_dest ;set destination IP and associated hardware adr
+
+xdip_leave unbank            ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_OFS
+;
+;   Set the offset into a UDP transmit datagram of the next byte to read or
+;   write.  The unsigned offset is in REG1:REG0.  REG8 must contain the output
+;   unit number.
+;
+         glbsub  udp_xmit_ofs, noregs
+
+         setup_send xofs_leave ;validate output unit, point FSR0 to it
+
+         addfsr0 ux_ofs - ux_flags ;point to OFS field in output unit
+         movff   reg0, postinc0 ;save new offset in the output unit
+         movff   reg1, indf0
+
+xofs_leave unbank            ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_WRITE
+;
+;   Write the byte in REG0 into the payload of a UDP transmit datagram.  REG8
+;   must contain the output unit number.  The byte will be written at the
+;   current offset, which will be incremented by 1.  The payload length value is
+;   increased as necessary to include the new byte written.
+;
+         glbsub  udp_xmit_write, regf0 | regf1 | regf2 | regf7 | regf8
+
+         setup_send xwr_leave ;validate output unit, point FSR0 to it
+         movff   reg0, reg2  ;save the data byte in REG2
+         bcf     postinc0, uxfl_cksum ;invalidate any previously computed checksum
+
+         addfsr0 ux_ip - (ux_flags + 1) ;point to IP field
+         movff   postinc0, reg7 ;get and save IP transmit unit number
+;
+;   Get the offset into the payload region into REG1:REG0 and increment the
+;   offset for next time by 1.  FSR0 is currently pointing one byte past the
+;   IP field.
+;
+         addfsr0 ux_ofs - (ux_ip + 1) ;point to payload offset to write to
+         movff   postinc0, reg0 ;get offset of this transfer into REG1:REG0
+         movff   postdec0, reg1
+
+         movlw   0           ;add 1 to offset in the packet descriptor
+         incf    postinc0
+         addwfc  postinc0
+
+         btfsc   reg1, 7     ;offset is not before payload region ?
+         jump    xwr_leave   ;before payload region, don't do the transfer
+;
+;   Update the LEN field, if necessary, to cover the offset in REG1:REG0.
+;   FSR0 is pointing to OFS+2.
+;
+         addfsr0 ux_len - (ux_ofs + 2) ;point to the LEN field
+
+         movf    postinc0, w ;compute OFFSET - LEN
+         subwf   reg0, w
+         movf    postdec0, w
+         subwfb  reg1, w
+         bn      xwr_len_done ;length already covers this offset ?
+         ;
+         ;   The payload length must be updated to cover the offset in
+         ;   REG1:REG0.  FSR0 is pointing to the low byte of LEN.
+         ;
+         incf    reg0, w     ;write OFFSET+1 into LEN
+         movwf   postinc0
+         movlw   0
+         addwfc  reg1, w
+         movwf   indf0
+         ;
+         ;   The payload length has been changed.  Make sure the LEN flag in the
+         ;   output unit is not set.
+         ;
+         mcall   point_send  ;point to the FLAGS byte
+         bcf     indf0, uxfl_len ;length written to header is not up to date
+xwr_len_done unbank          ;done updating packet payload length
+;
+;   Write the byte to the IP transmit packet.  Current register usage:
+;
+;     REG1:REG0  -  Offset of where to write the byte into the IP payload.
+;
+;     REG2  -  Data byte value.
+;
+;     REG7  -  IP transmit packet unit number.
+;
+;     REG8  -  Index of this IP transmit packet.
+;
+         movff   reg7, reg8  ;pass IP transmit packet unit number
+
+         addofs  head_size   ;make IP packet payload offset
+         gcall   ip_xmit_ofs ;set IP packet payload offset
+
+         movff   reg2, reg0  ;pass the data byte to write
+         gcall   ip_xmit_write ;write the data byte
+
+xwr_leave unbank             ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_WRITE2
+;
+;   Write the two bytes in REG1:REG0 to the UDP output packet open on the unit
+;   identified by REG8.  The two bytes are written in network order (high byte
+;   first).  The first byte is written at the current payload offset, which is
+;   incremented by 2.
+;
+         glbsub  udp_xmit_write2, noregs
+
+         pushreg reg0        ;temp save REG0 on the stack
+         movff   reg1, reg0
+         mcall   udp_xmit_write ;write the high byte
+         popreg  reg0        ;restore REG0 from the stack
+         mcall   udp_xmit_write ;write the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_WRITE4
+;
+;   Write the 4 bytes in REG3:REG2:REG1:REG0 to the UDP output packet open on
+;   the unit identified by REG8.  The bytes are written in network order (high
+;   byte first).  The first byte is written at the current payload offset, which
+;   is incremented by 4.
+;
+         glbsub  udp_xmit_write4, noregs
+
+         pushreg reg0        ;temp save REG0 on the stack
+         movff   reg3, reg0
+         mcall   udp_xmit_write ;write the high byte
+         movff   reg2, reg0
+         mcall   udp_xmit_write
+         movff   reg1, reg0
+         mcall   udp_xmit_write
+         popreg  reg0        ;restore REG0 from the stack
+         mcall   udp_xmit_write ;write the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_WRITE_IND
+;
+;   Write a sequence of data bytes to the UDP output packet open on the unit
+;   identified by REG8.  The bytes are in memory starting at where FSR0 is
+;   pointing.  They will be written starting at the current payload offset,
+;   which will be incremented by 1 for each byte.  REG1 contains the number of
+;   bytes to write.  If this is zero, then no bytes will be written.  FSR0 is
+;   preserved.
+;
+         glbsub  udp_xmit_write_ind, regf0 | regf1 | regf2 | regf3
+
+         movf    reg1
+         bz      xwind_leave ;no bytes to write ?
+;
+;   Init REG3:REG2 pointing to the next source byte and save the original
+;   pointer on the stack.
+;
+         movf    fsr0l, w
+         movwf   reg2
+         pushw
+         movf    fsr0h, w
+         movwf   reg3
+         pushw
+;
+;   Write the bytes.  There is at least one byte to write.
+;
+xwind_loop unbank
+         movff   reg2, fsr0l ;point to this byte
+         movff   reg3, fsr0h
+         movff   indf0, reg0 ;fetch it
+         mcall   udp_xmit_write ;write it to the packet
+         incf    reg2        ;advance the read pointer to the next byte
+         skip_ncarr
+         incf    reg3
+         decfsz  reg1        ;count one less byte left to write
+         jump    xwind_loop  ;back to write the next byte
+
+         popreg  fsr0h       ;restore original FSR0 value
+         popreg  fsr0l
+
+xwind_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_WRITE_FILL
+;
+;   Write the value in REG0 to the next REG1 bytes of the UDP output packet open
+;   on the unit identified by REG8.  The first byte will be written at the
+;   current payload offset, which is advanced to immediately after the last
+;   byte.
+;
+         glbsub  udp_xmit_write_fill, regf1
+
+xfill_loop unbank
+         movf    reg1
+         bz      xfill_leave ;no more bytes left to write
+         mcall   udp_xmit_write ;write one byte
+         decf    reg1        ;count one less byte left to write
+         jump    xfill_loop  ;back to write the next byte
+
+xfill_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_READ
+;
+;   Read the byte at the current payload offset into REG0.  The payload offset
+;   is advanced by 1 after the read.  REG8 must contain the output unit number.
+;
+         glbsub  udp_xmit_read, regf1 | regf8
+
+         setup_send xrd_leave ;validate output unit, point FSR0 to it
+
+         addfsr0 ux_ip - ux_flags ;point to IP field
+         movff   postinc0, reg8 ;get and save IP transmit unit number
+
+         addfsr0 ux_ofs - (ux_ip + 1) ;point to current payload offset field
+         movff   postinc0, reg0 ;get the UDP offset into REG1:REG0
+         movff   postdec0, reg1
+         incf    postinc0    ;increment the offset for next time
+         movlw   0
+         addwfc  postdec0
+
+         addofs  head_size   ;add UDP header size to make IP offset
+         gcall   ip_xmit_ofs ;set the IP packet payload offset
+         gcall   ip_xmit_read ;read the byte
+
+xrd_leave unbank             ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_SEND
+;
+;   Send the UDP packet open on the output unit identified by REG8.  The request
+;   is ignored if the destination IP address has not been set.
+;
+         glbsub  udp_xmit_send, regf0 | regf1 | regf2 | regf3 | regf4 | regf5 | regf7 | regf8
+
+         setup_send xsnd_leave ;validate output unit, point FSR0 to it
+         btfss   postinc0, uxfl_ipadr ;destination IP address has been set ?
+         jump    xsnd_leave  ;no, ignore the send request
+
+         addfsr0 ux_ip - (ux_flags + 1) ;point to IP unit number
+         movff   postinc0, reg7 ;save IP unit number in REG7
+
+         addfsr0 ux_len - (ux_ip + 1) ;point to UDP payload length
+         movlw   low head_size ;add header size to make full UDP size
+         addwf   postinc0, w
+         movwf   reg4
+         movlw   high head_size
+         addwfc  indf0, w
+         movwf   reg5
+
+         mcall   point_send  ;point FSR0 back to FLAGS byte
+;
+;   Write the current length into the header if this is not already up to date.
+;   Current register contents:
+;
+;     REG0, REG1, REG2, REG3  -  Available for scratch.
+;
+;     REG5:REG4  -  Total UDP packet size (header + payload).
+;
+;     REG7  -  IP transmit packet unit number.
+;
+;     REG8  -  UDP output unit number.
+;
+;     FSR0  -  Points to FLAGS field in UDP output unit.
+;
+         btfsc   indf0, uxfl_len ;length word in header not up to date ?
+         jump    xsnd_donelen ;is up to date, skip this section
+         bcf     indf0, uxfl_cksum ;checksum will need to be recomputed
+         bsf     indf0, uxfl_len ;length will be up to date
+
+         mcall   swap_ip_udp ;switch to IP unit ID in REG8
+         loadk16 reg0, 4     ;set IP offset to length word in UDP header
+         gcall   ip_xmit_ofs
+         movff   reg4, reg0
+         movff   reg5, reg1
+         gcall   ip_xmit_write2 ;write the length word
+         mcall   swap_ip_udp ;switch back to UDP output unit in REG8
+         mcall   point_send  ;point FSR0 back to FLAGS byte
+
+xsnd_donelen unbank          ;UDP header length word is all set
+;
+;   Compute the UDP checksum and write this into the UDP header if it is not
+;   already set.  Current register contents:
+;
+;     REG0, REG1, REG2, REG3 - available for scratch.
+;
+;     REG5:REG4  -  Total UDP packet size (header + payload).
+;
+;     REG7  -  IP transmit packet unit number.
+;
+;     REG8  -  UDP output unit number.
+;
+;     FSR0  -  Points to FLAGS field in UDP output unit.
+;
+         btfsc   indf0, uxfl_cksum ;checksum in header not up to date ?
+         jump    xsnd_donecksum ;is up to date, skip this section
+         bsf     postinc0, uxfl_cksum ;checksum will now be set
+         ;
+         ;   Initialize the checksum in REG3:REG2 with the pseudo-header.
+         ;
+         gcall   net_cksum_init ;init checksum in REG3:REG2
+
+         movff   our_ip+0, reg1 ;add source address high word
+         movff   our_ip+1, reg0
+         gcall   net_cksum_word
+         movff   our_ip+2, reg1 ;add source address low word
+         movff   our_ip+3, reg0
+         gcall   net_cksum_word
+
+         loadk16 reg0, udp_prot ;protocol ID with 0 in upper byte
+         gcall   net_cksum_word
+
+         movff   reg4, reg0  ;UDP length
+         movff   reg5, reg1
+         gcall   net_cksum_word
+
+         mcall   swap_ip_udp ;switch to IP unit ID in REG8
+         gcall   ip_xmit_dest_geth ;get high word of destination IP adr
+         gcall   net_cksum_word
+         gcall   ip_xmit_dest_getl ;get low word of destination IP adr
+         gcall   net_cksum_word
+         ;
+         ;   Add the UDP header and the data bytes to the checksum.  Current
+         ;   register contents:
+         ;
+         ;     REG0, REG1  -  Available for scratch.
+         ;
+         ;     REG3:REG2  -  Checksum of the pseudo-header.
+         ;
+         ;     REG5:REG4  -  Total UDP packet size (header + payload).
+         ;
+         ;     REG7  -  UDP output unit ID.
+         ;
+         ;     REG8  -  IP transmit unit ID.
+         ;
+         loadk16 reg0, 6     ;set offset to checksum in the UDP header
+         gcall   ip_xmit_ofs
+         loadk16 reg0, 0
+         gcall   ip_xmit_write2 ;clear the existing checksum
+         gcall   ip_xmit_ofs ;position to start of UDP packet
+xsnd_cksloop unbank          ;back here to add each new word to the checksum
+         check_yield         ;let other tasks run if needed
+         gcall   ip_xmit_read ;get high byte of word
+         movff   reg0, reg1
+
+         movf    reg4, w     ;check for that was last byte
+         xorlw   1
+         iorwf   reg5, w
+         bnz     xsnd_ckmore ;this was not last byte ?
+         clrf    reg0        ;set unused low byte of word to 0
+         gcall   net_cksum_word ;add final high byte to the checksum
+         jump    xsnd_ckdcomp ;done computing the checksum
+xsnd_ckmore unbank           ;did not just read last packet byte
+
+         gcall   ip_xmit_read ;get low byte of word
+         gcall   net_cksum_word ;add this word into the checksum
+
+         movlw   2           ;count two less bytes left to do
+         subwf   reg4
+         movlw   0
+         subwfb  reg5
+         movf    reg4, w     ;check for zero bytes left
+         iorwf   reg5, w
+         bnz     xsnd_cksloop ;more bytes left to do ?
+
+xsnd_ckdcomp unbank          ;done computing the checksum in REG3:REG2
+         ;
+         ;   Done accumulating the checksum, which is in REG3:REG2.  The ones
+         ;   complement of this is written to the packet, except when that comes
+         ;   out to 0.  In that case FFFFh is written instead.
+         ;
+         loadk16 reg0, 6     ;set offset to checksum in the UDP header
+         gcall   ip_xmit_ofs
+         comf    reg2, w     ;put complement of checksum into REG1:REG0
+         movwf   reg0
+         comf    reg3, w
+         movwf   reg1
+         iorwf   reg0, w     ;make OR of both resulting checksum bytes
+         bnz     xsnd_cknz   ;resulting checksum is not zero ?
+         loadk16 reg0, h'FFFF' ;is zero, replace with FFFFh
+xsnd_cknz unbank
+         gcall   ip_xmit_write2 ;write the final checksum into the packet
+         mcall   swap_ip_udp ;switch back to UDP output unit in REG8
+
+xsnd_donecksum unbank        ;UDP checksum is all set
+;
+;   Send the packet.  Current register contents:
+;
+;     REG0, REG1, REG2, REG3  -  Available for scratch.
+;
+;     REG5:REG4  -  Total UDP packet size (header + payload).
+;
+;     REG7  -  IP transmit packet unit number.
+;
+;     REG8  -  UDP output unit number.
+;
+;     FSR0  -  Points to FLAGS field in UDP output unit.
+;
+         movff   reg7, reg8  ;set IP transmit unit number in REG8
+         gcall   ip_xmit_send ;send the packet
+
+xsnd_leave unbank            ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_XMIT_CLOSE
+;
+;   Close the UDP output unit and deallocate any resources associated with it.
+;   The number of the unit to close is passed in REG8.  REG8 is returned with
+;   the high bit set, which causes it to contain a invalid unit number.
+;
+         glbsub  udp_xmit_close, noregs
+
+         setup_send xcls_leave ;validate output unit and point FSR0 to it
+         clrf    postinc0    ;mark this output unit as unused
+
+         addfsr0 ux_ip - (ux_flags + 1) ;point to IP field
+         movff   indf0, reg8 ;get the IP transmit packet unit number
+         gcall   ip_xmit_close ;close transmit packet, invalidate REG8
+
+xcls_leave unbank            ;common exit point
+         leaverest
+
+
+  /endif                     ;end of UDP sending code
+
+;*******************************************************************************
+;*******************************************************************************
+;
+;   This section of code is only built if receiving UDP datagrams is enabled.
+;
+/if [not using_net_udp_recv]
+  /then
+    /show "  UDP reception code not built"
+  /else
+    /show "  UDP reception configured for " n_udp_recv " units"
+
+;*******************************************************************************
+;
+;   Local subroutine POINT_RECV
+;
+;   Point FSR0 to the start of the input unit identified by REG8.  This will
+;   point to the FLAGS field, since this is always at the start of the unit.
+;
+         locsub  point_recv, noregs
+
+         point_recv_ofs reg8, ur_flags
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro SETUP_RECV abort
+;
+;   Set up for dealing with the input unit identified by REG8.  The abort
+;   address is jumped to if the input unit number in REG8 is invalid or the unit
+;   is not in use.  Otherwise, execution continues after this macro and FSR0 is
+;   left pointing to the first byte (FLAGS field) of the input unit.
+;
+setup_recv macro abort
+         movf    reg8, w     ;get the buffer index number
+         sublw   n_udp_recv-1 ;compare to max valid value
+         skip_wle            ;index is within range ?
+         jump    abort       ;no
+
+         mcall   point_recv  ;point FSR0 to the start of the descriptor
+         btfss   indf0, urfl_inuse ;this descriptor is in use ?
+         jump    abort       ;no
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_OPEN
+;
+;   Open a UDP input unit for receiving UDP datagrams to a particular port on
+;   this machine.  The port number is passed in REG1:REG0.  On success, the
+;   input unit number is returned in REG8, which is always in the 0-127 range.
+;   The high bit of REG8 will be returned set on failure.  In that case, the low
+;   7 bits are undefined.
+;
+         glbsub  udp_recv_open, regf2
+;
+;   Find the first unused input unit.
+;
+         loadk8  reg2, n_udp_recv ;init loop counter
+         clrf    reg8        ;init index of first descriptor
+rop_fdsc_loop unbank         ;back here to check each new descriptor
+         mcall   point_recv  ;point FSR0 to this descriptor
+         btfss   indf0, urfl_inuse ;this descriptor is in use ?
+         jump    rop_fdsc_done ;no, found available descriptor
+         incf    reg8        ;make index of next descriptor
+         decfsz  reg2
+         jump    rop_fdsc_loop
+         ;
+         ;   All input units are in use.
+         ;
+         setf    reg8        ;return invalid input unit ID
+         jump    rop_leave
+
+rop_fdsc_done unbank         ;REG8 is index of available descriptor
+         movlw   1 << urfl_inuse ;set this unit to in-use
+         movwf   postinc0
+
+         addfsr0 ur_port - (ur_flags + 1) ;point to PORT field
+         movff   reg0, postinc0 ;save the target UDP port number
+         movff   reg1, postinc0
+
+rop_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_CHECK
+;
+;   Checks whether a received datagram is available for a particular UDP input
+;   unit.  REG8 contains the input unit number.  The Z flag is returned set if
+;   no received datagram is available, and cleared if one is.
+;
+         glbsub  udp_recv_check, noregs
+
+         btfsc   reg8, 7     ;REG8 contains a possibly valid unit number ?
+         jump    rchk_no
+
+         dbankif lbankadr
+         movf    reg8, w     ;get the 0-N unit number
+         xorwf   recv_unit, w ;compare to the unit with received packet, if any
+         bnz     rchk_no     ;received packet not for us ?
+
+         bcf     status, z   ;indicate received datagram is available
+rchk_leave unbank            ;common exit point
+         leaverest
+
+rchk_no  unbank              ;received datagram is not available
+         bsf     status, z
+         jump    rchk_leave
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_WAIT
+;
+;   Wait for a received datagram to be available for a particular UDP input
+;   unit.  The unit number is in REG8.  This routine waits indefinitely until
+;   a datagram is available.
+;
+         glbsub  udp_recv_wait, noregs
+
+rwat_loop unbank             ;back here to try again
+         gcall   task_yield_save ;give other tasks a chance to run
+         mcall   udp_recv_check ;set Z iff datagram available
+         bz      rwat_loop   ;nothing available, back and check again ?
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_SRC_PORT
+;
+;   Returns the UDP source port number of the current received datagram into
+;   REG1:REG0.  The returned value is undefined if there is no open received
+;   datagram.
+;
+         glbsub  udp_recv_src_port, noregs
+
+         movff   recv_src_port+0, reg0
+         movff   recv_src_port+1, reg1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_DEST_PORT
+;
+;   Returns the UDP destination port number of the current received datagram
+;   into REG1:REG0.  The returned value is undefined if there is no open
+;   received datagram.
+;
+         glbsub  udp_recv_dest_port, noregs
+
+         movff   recv_dest_port+0, reg0
+         movff   recv_dest_port+1, reg1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_LEN
+;
+;   Get the payload length of the current received UDP datagram into REG1:REG0.
+;   This value is undefined if there is no open received datagram.
+;
+         glbsub  udp_recv_len, noregs
+
+         movff   recv_len+0, reg0
+         movff   recv_len+1, reg1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_OFS
+;
+;   Set the offset into the payload of the current received datagram where the
+;   next byte will be read from.  The offset is passed in REG1:REG0.  The read
+;   offset is initialized to 0 when the packet is first received.
+;
+         glbsub  udp_recv_ofs, noregs
+
+         movff   reg0, recv_ofs+0
+         movff   reg1, recv_ofs+1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_READ
+;
+;   Read the byte at the current offset into the received UDP datagram payload,
+;   and increment the offset by 1.  The byte is returned in REG0.  The result
+;   is undefined if the offset is past the end of the payload.  Zero is returned
+;   if there is no current open received datagram.
+;
+         glbsub  udp_recv_read, regf1
+
+         clrf    reg0        ;init returned value
+         dbankif lbankadr
+         btfsc   recv_unit, 7 ;there is a received datagram ?
+         jump    rrd_leave   ;no, return the zero already in REG0
+
+         movlw   low head_size ;make offset into IP packet payload in REG1:REG0
+         addwf   recv_ofs+0, w
+         movwf   reg0
+         movlw   high head_size
+         addwfc  recv_ofs+1, w
+         movwf   reg1
+
+         incf    recv_ofs+0  ;increment our offset by one for next time
+         skip_ncarr
+         incf    recv_ofs+1
+
+         gcall   ip_recv_ofs ;set IP payload offset of next read
+         gcall   ip_recv_read ;read the byte from the IP packet into REG0
+
+rrd_leave unbank             ;common exit point
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_READ_IND
+;
+;   Read a sequence of data bytes from the UDP input message and write them
+;   starting where FSR0 is pointing.  REG1 contains the number of bytes to read.
+;   The first byte will be read from the current offset into the UDP payload.
+;   The offset will be advanced by the number of bytes read.  FSR0 is preserved.
+;
+         glbsub  udp_recv_read_ind, regf0 | regf1 | regf2 | regf3
+
+         movf    reg1
+         bz      rind_leave  ;no bytes to read ?
+;
+;   Init REG3:REG2 pointing to the next destination byte and save the original
+;   pointer on the stack.
+;
+         movf    fsr0l, w
+         movwf   reg2
+         pushw
+         movf    fsr0h, w
+         movwf   reg3
+         pushw
+;
+;   Read the bytes.  There is at least one byte to read.
+;
+rind_loop unbank
+         mcall   udp_recv_read ;read this byte into REG0
+         movff   reg2, fsr0l ;point to where to write the byte
+         movff   reg3, fsr0h
+         movff   reg0, indf0 ;write it
+         incf    reg2        ;advance the write pointer to the next byte
+         skip_ncarr
+         incf    reg3
+         decfsz  reg1        ;count one less byte left to write
+         jump    rind_loop   ;back to write the next byte
+
+         popreg  fsr0h       ;restore original FSR0 value
+         popreg  fsr0l
+
+rind_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_RELEASE
+;
+;   Indicate done with the current received UDP datagram.  There will be no open
+;   received datagram after this call.  Only a single received network packet is
+;   processed at a time, so applications must read a received datagram and
+;   release is "quickly" so that other received packets can be processed.
+;
+         glbsub  udp_recv_release, noregs
+
+         dbankif lbankadr
+         setf    recv_unit   ;indicate no received datagram open
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine UDP_RECV_CLOSE
+;
+;   Close the UDP input unit opened with UDP_RECV_OPEN.  The unit number is
+;   passed in REG8, which is returned with the high bit set to contain a invalid
+;   unit number.
+;
+         glbsub  udp_recv_close, noregs
+;
+;   If the current received datagram is for this unit, then release it.
+;
+         dbankif lbankadr
+         movf    recv_unit, w ;get the input unit received datagram is for
+         xorwf   reg8, w     ;compare to the unit being closed
+         bnz     rcls_released ;not for this unit, nothing to release ?
+
+         mcall   udp_recv_release ;release the current received datagram
+rcls_released unbank         ;received datagram for this unit has been released
+;
+;   Close the input unit.
+;
+         setup_recv rcls_leave ;validate input unit, point FSR0 to it
+         clrf    indf0       ;flag the input unit as not in use
+
+rcls_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine READW_CKSUM
+;
+;   Read the next word of the current open IP packet into REG1:REG0 and add this
+;   word to the checksum being accumulated in REG3:REG2.
+;
+         locsub  readw_cksum, noregs
+
+         gcall   ip_recv_read ;get high byte of word into REG1
+         movff   reg0, reg1
+         gcall   ip_recv_read ;get low byte of word into REG0
+         gcall   net_cksum_word ;add the new word to the checksum in REG3:REG2
+
+         leavecheck
+
+;*******************************************************************************
+;
+;   Routine UDP_RECV_PACKET
+;
+;   Process a received UDP packet.  This routine is run by the network
+;   background processing task from the IP module when a IP packet is received
+;   with the protocol ID of 17, which is UDP.
+;
+;   The received packet is currently open, and must be left open.  When done,
+;   this routine must jump or call to DONE_PACKET, or execute a RETURN at the
+;   same nesting level as on entry.  The data stack is currently empty, and
+;   the call stack contains the single entry to DONE_PACKET.  Extraneous data
+;   may be left on both stacks when jumping to DONE_PACKET.  All the REGn
+;   general registers may be trashed.
+;
+;   The REGn registers currently contain:
+;
+;     REG3:REG2  -  Number of IP payload bytes.
+;
+;     REG7:REG6:REG5:REG4  -  Source IP address.
+;
+;   The current IP payload read offset is set to 0.  In other words, if no
+;   call to IP_RECV_OFS is made, the next call to IP_RECV_READ will return the
+;   first IP packet payload byte.
+;
+         glbent  udp_recv_packet
+
+         dbankif lbankadr
+         setf    recv_unit   ;init to no received UDP datagram open
+;
+;   Compute and save the number of UDP payload bytes.  The packet is discarded
+;   if it does not contain at least the UDP header, which is HEAD_SIZE bytes in
+;   size.
+;
+         dbankif lbankadr
+         movlw   low head_size ;make IP length - UDP header size into RECV_LEN
+         subwf   reg2, w
+         movwf   recv_len+0
+         movlw   high head_size
+         subwfb  reg3, w
+         movwf   recv_len+1
+         btfsc   recv_len+1, 7 ;resulting UDP payload length is not negative ?
+         return              ;IP packet is too short to be valid UDP packet
+;
+;   Init the checksum with the UDP pseudo header.
+;
+         movf    reg2, w     ;save UDP length in REG9:REG8 and copy it into REG1:REG0
+         movwf   reg0
+         movwf   reg8
+         movf    reg3, w
+         movwf   reg1
+         movwf   reg9
+
+         gcall   net_cksum_init ;init checksum accumulator in REG3:REG2
+
+         gcall   net_cksum_word ;add UDP length into the checksum
+
+         movff   reg4, reg0  ;add low word of source IP address
+         movff   reg5, reg1
+         gcall   net_cksum_word
+         movff   reg6, reg0  ;add high word of source IP address
+         movff   reg7, reg1
+         gcall   net_cksum_word
+
+         movff   reg8, reg4  ;save UDP length in REG5:REG4
+         movff   reg9, reg5
+
+         loadk16 reg0, udp_prot ;add protocol ID word to checksum
+         gcall   net_cksum_word
+
+         movff   recv_destip+0, reg1 ;add destination IP adr high word to checksum
+         movff   recv_destip+1, reg0
+         gcall   net_cksum_word
+         movff   recv_destip+2, reg1 ;add destination IP adr low word to checksum
+         movff   recv_destip+3, reg0
+         gcall   net_cksum_word
+;
+;   Add the UDP header into the checksum.  The value of some of the fields will
+;   be saved in the process.  The registers currently contain:
+;
+;     REG3:REG2  -  Checksum accumulated so far
+;
+;     REG5:REG4  -  UDP length (UDP header + payload size)
+;
+         mcall   readw_cksum ;get UDP source port
+         movff   reg0, recv_src_port+0
+         movff   reg1, recv_src_port+1
+
+         mcall   readw_cksum ;get UDP destination port
+         movff   reg0, recv_dest_port+0
+         movff   reg1, recv_dest_port+1
+
+         mcall   readw_cksum ;get UDP length into REG1:REG0
+         movf    reg0, w     ;compare UDP length to IP payload length
+         xorwf   reg4, w
+         movwf   reg9
+         movf    reg1, w
+         xorwf   reg5, w
+         iorwf   reg9
+         skip_z              ;UDP length and IP payload length match ?
+         return              ;no, discard this packet
+
+         mcall   readw_cksum ;get the UDP checksum
+         movff   reg0, reg4  ;save it in REG5:REG4
+         movf    reg1, w
+         movwf   reg5
+         iorwf   reg4, w     ;make OR of both checksum bytes
+         skip_nz             ;transmitted checksum is not 0 ?
+         jump    rpkt_cksum_ok ;checksum not in use
+;
+;   Add the UDP payload to the checksum.  Current register contents:
+;
+;     REG3:REG2  -  Checksum accumulated so far.
+;
+;     REG5:REG5  -  Checksum contained in the UDP header.
+;
+         movff   recv_len+0, reg6 ;get the number of bytes to read in REG7:REG6
+         movff   recv_len+1, reg7
+rpkt_cksum unbank            ;back here to add each new word to checksum
+         movf    reg6, w
+         iorwf   reg7, w
+         bz      rpkt_cksum_done ;done accumulating the checksum ?
+         gcall   ip_recv_read ;read high byte of this word
+         movff   reg0, reg1
+         gcall   ip_recv_read ;read low byte of this word
+         movlw   2           ;count 2 bytes less left to do
+         subwf   reg6
+         movlw   0
+         subwfb  reg7
+         btfsc   reg7, 7     ;remaining byte count didn't just underflow ?
+         clrf    reg0        ;set odd unused byte to 0
+         gcall   net_cksum_word ;add this word into the checksum
+         btfss   reg7, 7     ;definitely done ?
+         jump    rpkt_cksum  ;back to do next word
+rpkt_cksum_done unbank       ;all done accumulating the checksum
+
+         movf    reg2, w     ;get checksum low byte
+         andwf   reg3, w     ;AND with checksum high byte
+         xorlw   h'FF'       ;compare to required result
+         skip_z              ;checksum checks ?
+         return              ;checksum error
+
+rpkt_cksum_ok unbank         ;the checksum checks
+;
+;   The packet appears to be a valid UDP datagram.  RECV_SRC_PORT,
+;   RECV_DEST_PORT, and RECV_LEN have all been set from information in the UDP
+;   header.
+;
+;   Now find the UDP input unit this packet is for and set up the state
+;   accordingly.  If no UDP input unit is looking for datagrams to this
+;   destination port, then the received packet is discarded.
+;
+         loadk8  reg2, n_udp_recv ;init number of units left to check
+         loadk8  reg8, 0     ;init 0-N number of next unit to check
+rpkt_unit unbank             ;back here to check each new unit in array
+         mcall   point_recv  ;point to FLAGS field of this input unit
+         btfss   postinc0, urfl_inuse ;this input unit is in use ?
+         jump    rpkt_unit_next ;no, advance to next unit
+
+         addfsr0 ur_port - (ur_flags + 1) ;point to PORT field
+         dbankif lbankadr
+         movf    postinc0, w ;compare expected dest port to actual dest port
+         xorwf   recv_dest_port+0, w
+         movwf   reg0
+         movf    indf0, w
+         xorwf   recv_dest_port+1, w
+         iorwf   reg0, w
+         bz      rpkt_have_unit ;packet is to port of this unit ?
+
+rpkt_unit_next unbank        ;advance to the next UDP input unit
+         incf    reg8        ;make 0-N number of the next unit
+         decfsz  reg2        ;count one less unit left
+         jump    rpkt_unit   ;back to check this next unit
+         return              ;no unit listening on this port, discard packet
+
+rpkt_have_unit unbank        ;packet is for the unit identified in REG8
+         dbankif lbankadr
+         clrf    recv_ofs+0  ;init offset into payload to first byte
+         clrf    recv_ofs+1
+         movff   reg8, recv_unit ;indicate received packet open on this unit
+;
+;   The state is all set up for the received UDP datagram for the particular
+;   input unit that is waiting for datagrams to the UDP port this was sent to.
+;   The application code must now discover the received packet, read it as
+;   desired, then indidate it is done with it.
+;
+;   The application code indicates done by setting the high bit of RECV_UNIT to
+;   1 (using subroutine UDP_RECV_RELEASE or UDP_RECV_CLOSE).  The received
+;   is released when this routine here returns.  We therefore spin waiting on
+;   the high bit of RECV_UNIT to get set.
+;
+rpkt_wait unbank
+         gcall   task_yield  ;give all other tasks a chance to run
+    /if using_net_dhcp then  ;DHCP could be enabled ?
+         gcall   dhcp_run    ;run DHCP processing pseudo-thread for a bit
+      /endif
+         dbankif gbankadr
+         btfss   recv_unit, 7 ;application is done with the received datagram ?
+         jump    rpkt_wait   ;no, go back and check again
+         return              ;release the received packet
+
+  /endif                     ;end of UDP receiving code

@@ -1,0 +1,48 @@
+;   Subroutine COMPA
+;
+;   Compare REGA and REGB.  The arithmetic flags will be set for REGA
+;   compared to REGB.  For example, the GT flag will be set if REGA = 5
+;   and REGB = 3.
+;
+.compa   code
+         glbsub  compa, noregs
+
+         movlw   ~flag_ar    ;get mask for all but arithmetic flags
+         andwf   flags       ;init all the arithmetic flags to unset
+
+         movf    regb+3, w
+         subwf   rega+3, w   ;compare byte 3 (high byte)
+         skip_z
+         goto    compa_ne
+
+         movf    regb+2, w
+         subwf   rega+2, w   ;compare byte 2
+         skip_z
+         goto    compa_ne
+
+         movf    regb+1, w
+         subwf   rega+1, w   ;compare byte 1
+         skip_z
+         goto    compa_ne
+
+         movf    regb+0, w
+         subwf   rega+0, w   ;compare byte 0
+         skip_z
+         goto    compa_ne
+;
+;   Equal
+;
+         bsf     flags, flagb_eq
+         return
+;
+;   The two values are definitely not equal, and the C flag is set according
+;   to the comparison.
+;
+compa_ne
+         skip_wgt            ;A is smaller ?
+         goto    compa_gt    ;accumulator is larger
+         bsf     flags, flagb_lt ;accumulator is smaller
+         return
+compa_gt                     ;accumulator is larger
+         bsf     flags, flagb_gt
+         return

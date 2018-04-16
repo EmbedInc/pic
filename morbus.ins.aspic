@@ -1,0 +1,52 @@
+;   General definitions related to the MorBus.
+;
+/const   emcan_appid integer = 2 ;EmCan ID for the MorBus application
+/const   morbus_tcp_port integer = 2005 ;TCP server port number
+
+;**********
+;
+;   Command stream opcodes.  These are used from the remote TCP client to here,
+;   and from here to the CAN processor.
+;
+/const   cmd_nop integer = 0 ;NOP, must be ignored
+/const   cmd_ping integer = 1 ;requests PONG response
+/const   cmd_id  integer = 2 ;request ID response
+/const   cmd_fwinfo integer = 3 ;requests FWINFO response
+/const   cmd_cmds integer = 4 ;requests CMDS response
+/const   cmd_reset integer = 5 ;reset the bus
+/const   cmd_sends integer = 6 ;send standard CAN data frame
+/const   cmd_sende integer = 7 ;send extended CAN data frame
+/const   cmd_sendsr integer = 8 ;send standard CAN remote request frame
+/const   cmd_sender integer = 9 ;send extended CAN remote request frame
+/const   cmd_enum integer = 10 ;enumerate known MorBus devices
+/const   cmd_keepalive integer = 11 ;reset inactivity timeout
+/const   cmd_strout integer = 12 ;send bytes over stream to a node
+
+/const   cmd_off integer = 64 ;power down the layout
+/const   cmd_stop integer = 65 ;stop all physical activity
+/const   cmd_on  integer = 66 ;power up the layout
+/const   cmd_onoff integer = 67 ;request ONOFF response
+/const   cmd_mval integer = 68 ;request measured value
+/const   cmd_dcc integer = 69 ;perform function on DCC busses
+
+;**********
+;
+;   Response stream opcodes.  These are used from the CAN processor to here, and
+;   from here to the remote TCP client.
+;
+/const   rsp_nop integer = 0 ;NOP, guaranteed to be harmlessly ignored
+/const   rsp_pong integer = 1 ;reply to PING command
+/const   rsp_id  integer = 2 ;server ID
+/const   rsp_fwinfo integer = 3 ;firmware info
+/const   rsp_cmds integer = 4 ;list of implemented commands
+/const   rsp_canfr integer = 5 ;received CAN frame
+/const   rsp_reset integer = 6 ;CAN bus has been reset
+/const   rsp_adr integer = 7 ;indicates one EmCan node address assignment
+/const   rsp_unadr integer = 8 ;reports EmCan node address unassigned
+/const   rsp_strout integer = 9 ;reports result of STROUT command
+/const   rsp_strinsyn integer = 10 ;next byte in stream from node is opcode
+/const   rsp_strin integer = 11 ;reports stream bytes sent by a node
+
+/const   rsp_onoff integer = 64 ;reports on/off status of the layout
+/const   rsp_mval integer = 65 ;reports measured value or not supported
+/const   rsp_short integer = 66 ;fuse tripped or was reset

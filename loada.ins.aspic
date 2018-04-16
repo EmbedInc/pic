@@ -1,0 +1,26 @@
+;   Subroutine LOADA
+;
+;   Load a 32 bit value into the accumulator (REG0-REG3).
+;
+;   FSR is points to the source value.  The current indirect register bank
+;   must be set for access to the value.  FSR is trashed.
+;
+.loada   code
+         glbsub  loada, noregs
+
+         movf    indf, w
+         movwf   reg0
+
+         incf    fsr
+         movf    indf, w
+         movwf   reg1
+
+         incf    fsr
+         movf    indf, w
+         movwf   reg2
+
+         incf    fsr
+         movf    indf, w
+         movwf   reg3
+
+         leave   noregs

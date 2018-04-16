@@ -1,0 +1,284 @@
+;   ***************************************************************
+;   * Copyright (C) 2015, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Command processing routines.
+;
+;   Most routines to process individual commands are in this module.  The
+;   general mechanics of command processing other than implementing individual
+;   commands is in the CMD module.
+;
+;   The interface to all command routines is the same.  The entry point to each
+;   command processing routine is named CM<name>_xxx.  This naming convention is
+;   not be used elsewhere in the system except for command processing routines.
+;
+;   The <name> part of command routine names defaults to the empty string.  This
+;   is typically only used when there are multiple command processors in a
+;   system.  In that case, each is given a different name, which makes the
+;   command routine names unique between command processors.  The name is set by
+;   the NAME configuration constants in each CMD module, and again here in each
+;   CMDS module.
+;
+;   Each command processing routine must follow these rules:
+;
+;     1 - TASK_YIELD must be called in a loop whenever waiting for a external
+;         event.
+;
+;     2 - Sending any data to the response stream must be preceeded by a call
+;         to CMD_LOCK_OUT.
+;
+;     3 - CMD_UNLOCK_OUT may only be called between whole responses.  It is not
+;         necessary to call CMD_UNLOCK_OUT for the last response.
+;
+;     4 - When done, execution must end up at CMD_DONE (actually
+;         CMD<name>_DONE).  This can be done by explicitly jumping there.  It
+;         can also be done by executing a RETURN from the top nesting level.
+;         The CMD_DONE return address is seeded onto the stack for this purpose
+;         before the command processing routine is run.  In other words, the
+;         command processing routine may act as a subroutine.
+;
+;         The call and data stacks will be reset to empty by CMD_DONE, so it is
+;         permissible to jump to CMD_DONE from a nested subroutine or with data
+;         left on the data stack.  It is also permissible to call CMD_DONE, as
+;         may be necessary from a higher level language that has no ability to
+;         jump to a external address.
+;
+;         CMD_DONE will also release any output stream lock, so this need not be
+;         explicitly done by a command routine if sending a response is the last
+;         thing it does.
+;
+;   Several subroutines and other resources are available to command routines:
+;
+;     CMD<name>_GET8
+;
+;       Gets the next command stream byte into W0.
+;
+;     CMD<name>_GET16
+;
+;       Gets the next two command stream bytes as a 16 bit integer and returns
+;       it in REG1:REG0.  The bytes are assumed to be in most to least
+;       significant order.
+;
+;     CMD<name>_GET24
+;
+;       Gets the next three command stream bytes as a 24 bit integer and returns
+;       it in REG2:REG1:REG0.  The bytes are assumed to be in most to least
+;       significant order.
+;
+;     CMD<name>_GET32
+;
+;       Gets the next four command stream bytes as a 32 bit integer and returns
+;       it in REG3:REG2:REG1:REG0.  The bytes are assumed to be in most to least
+;       significant order.
+;
+;     CMD<name>_PUT8
+;
+;       Sends the byte in REG0 out the response stream.  The response stream
+;      lock must be held when this routine is called.
+;
+;     CMD<name>_PUT16
+;
+;       Sends the 16 bits in REG1:REG0 out the response stream.  The bytes are
+;       sent in most to least significant order.  The response stream lock must
+;       be held when this routine is called.
+;
+;     CMD<name>_PUT24
+;
+;       Sends the 24 bits in REG2:REG1:REG0 out the response stream.  The bytes
+;       are sent in most to least significant order.  The response stream lock
+;       must be held when this routine is called.
+;
+;     CMD<name>_PUT32
+;
+;       Sends the 32 bits in REG3:REG2:REG1:REG0 out the response stream.  The
+;       bytes are sent in most to least significant order.  The response stream
+;       lock must be held when this routine is called.
+;
+;     CMD<name>_LOCK_OUT
+;
+;       Acquires the exclusive lock on the response stream.  Whole responses
+;       must be sent with this lock held to prevent them being interleaved with
+;       response data sent by other parts of the system asynchronously.
+;
+;     CMD<name>_UNLOCK_OUT
+;
+;       Releases the lock on the response stream, if held by this task.  This
+;       may be called after sending a complete response to let other parts of
+;       the system send response data.  Any output stream lock held by this task
+;       is automatically released by CMD_DONE, so it is not necessary to call
+;       CMD_UNLOCK_OUT at the end of a command routine.
+;
+;       If a command routine sends multiple responses, it is permissible to
+;       hold the output lock continuously for all of them as long as the command
+;       routine does not wait on a external event.  Note that simply releasing
+;       the lock then acquiring it again without a call to TASK_YIELD in between
+;       is just a waste of cycles since no other task has the opportunity to
+;       acquire the lock while it is available.
+;
+;     PUT8, PUT16, PUT24, PUT32
+;     GET8, GET16, GET24, GET32
+;     LOCKOUT, UNLOCKOUT
+;
+;       Convenience wrapper macros that use the NAME constant generate the full
+;       names of the routines above, then call them.
+;
+;     PUTK8 val
+;
+;       Sends the byte value VAL out the response stream.  REG0 is trashed.  VAL
+;       must be a constant resolvable by MPASM.
+;
+;     COMMAND cmdname
+;
+;       Convenience wrapper for starting a command routine.  The global entry
+;       point CM<name>_<cmdname> will be created and the bank set to unknown.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   name    string = "" ;unique name for this command processor
+lbank    equ     1           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+
+.cmds[chars name] code
+;*******************************************************************************
+;
+;   Subroutine CMDS_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+cmds[chars name]_init glbsub
+
+         leaverest
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Convenience wrapper macros for generating the full CMD<name>_xxx routine
+//   name, then calling it.
+//
+/macro put8
+         gcall   cmd[chars name]_put8
+  /endmac
+
+/macro put16
+         gcall   cmd[chars name]_put16
+  /endmac
+
+/macro put24
+         gcall   cmd[chars name]_put24
+  /endmac
+
+/macro put32
+         gcall   cmd[chars name]_put32
+  /endmac
+
+/macro get8
+         gcall   cmd[chars name]_get8
+  /endmac
+
+/macro get16
+         gcall   cmd[chars name]_get16
+  /endmac
+
+/macro get24
+         gcall   cmd[chars name]_get24
+  /endmac
+
+/macro get32
+         gcall   cmd[chars name]_get32
+  /endmac
+
+/macro lockout
+         gcall   cmd[chars name]_lock_out
+  /endmac
+
+/macro unlockout
+         gcall   cmd[chars name]_unlock_out
+  /endmac
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro PUTK8 val
+//
+//   Sends the byte value VAL out the response stream.  REG0 is trashed.  VAL
+//   must be a constant resolvable by MPASM.
+//
+/macro putk8
+         loadk8  reg0, [arg 1]
+         put8
+  /endmac
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro COMMAND cmdname
+//
+//   Creates the entry point of a command routine and initializes build-time
+//   state appropriately.
+//
+//   CMDNAME is the bare name of the command.  The full command routine entry
+//   point will be CM<name>_<cmdname>.
+//
+/macro command
+         glbent  cm[chars name]_[arg 1]
+  /endmac
+
+;*******************************************************************************
+;
+;   Command PING
+;
+;   Sends the PONG response.  This can be used to test bi-directional
+;   communication.
+;
+         command ping
+         lockout
+         putk8   rsp_pong
+         return
+
+;*******************************************************************************
+;
+;   Command FWINFO
+;
+;   Sends the FWINFO response.
+;
+         command fwinfo
+
+         lockout
+         putk8   rsp_fwinfo
+         putk8   fwtype
+         putk8   fwver
+         putk8   fwseq
+         return
+
+         end

@@ -1,0 +1,4 @@
+/include "qq2.ins.aspic"
+/include "(cog)src/pic/qq2_network.ins.aspic"
+/include "(cog)src/pic/packet.ins.aspic"
+         end

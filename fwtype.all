@@ -1,0 +1,246 @@
+;   This Prepic include file uses the previously defined strings FWNAME and
+;   SRCDIR to determine the firmware type ID.  FWTYPE is created as a integer
+;   Prepic constant set to the firmware type ID.
+;
+;   This file contains only Prepic code, so can be used for both PIC and dsPIC
+;   (MPASM and ASM30) projects.  No native assembler symbol is therefore
+;   created.
+;
+;   It is a error if this file is included but FWNAME or SRCDIR is not
+;   defined.
+;
+;   This file is intended to be the one central place firmare IDs are kept.  In
+;   the past, firmware IDs were assigned somewhat arbitrarily in each project.
+;   New projects use this file to get the firmware ID.  Some firmware IDs are
+;   documented here even if the project is old and does not include this file.
+;
+/if [not [exist "fwname"]] then
+  /show "  FWNAME is not defined but FWTYPE.ALL was included."
+  /stop
+  /endif
+/if [not [exist "srcdir"]] then
+  /show "  SRCDIR is not defined but FWTYPE.ALL was included."
+  /stop
+  /endif
+
+/var new unam string = [ucase fwname] ;upper case for case-insensitive matching
+/var new udir string = [ucase srcdir]
+/var new ty integer = -1     ;init to no type ID defined for this firmware name
+
+/if [and [= unam "LPK"] [= udir "SENTW"]] then
+  /set ty 0
+  /endif
+/if [and [= unam "TEST"] [= udir "USB"]] then
+  /set ty 1
+  /endif
+/if [and [= unam "T2TAG"] [= udir "SENTW"]] then
+  /set ty 1
+  /endif
+/if [and [= unam "RECV"] [= udir "SENTW"]] then
+  /set ty 1
+  /endif
+/if [and [= unam "CLON"] [= udir "NANOB"]] then
+  /set ty 1
+  /endif
+/if [and [= unam "IO1P"] [= udir "IOEXT"]] then
+  /set ty 2
+  /endif
+/if [and [= unam "EBCTRLP"] [= udir "CNANO"]] then
+  /set ty 2
+  /endif
+/if [and [= unam "MB3PWR"] [= udir "ODEP"]] then
+  /set ty 2
+  /endif
+/if [and [= unam "EUSB"] [= udir "PICPRG"]] then
+  /set ty 2
+  /endif
+/if [and [= unam "NET1P"] [= udir "NETW"]] then
+  /set ty 3
+  /endif
+/if [and [= unam "LPRG"] [= udir "PICPRG"]] then
+  /set ty 3
+  /endif
+/if [and [= unam "NET1C"] [= udir "NETW"]] then
+  /set ty 4
+  /endif
+/if [and [= unam "RCVB"] [= udir "SENTW"]] then
+  /set ty 4
+  /endif
+/if [and [= unam "FLUSHIO"] [= udir "TANG"]] then
+  /set ty 5
+  /endif
+/if [and [= unam "FLUSH_PWR"] [= udir "TANG"]] then
+  /set ty 5
+  /endif
+/if [and [= unam "PVALV"] [= udir "PARKER"]] then
+  /set ty 5
+  /endif
+/if [and [= unam "TAURUS"] [= udir "FISHER"]] then
+  /set ty 6
+  /endif
+/if [and [= unam "TTRECV"] [= udir "PAULT"]] then
+  /set ty 7
+  /endif
+/if [and [= unam "TTCOM"] [= udir "PAULT"]] then
+  /set ty 8
+  /endif
+/if [and [= unam "EBHV"] [= udir "CNANO"]] then
+  /set ty 9
+  /endif
+/if [and [= unam "EBCT"] [= udir "CNANO"]] then
+  /set ty 10
+  /endif
+/if [and [= unam "R1LIT"] [= udir "LUMEW"]] then
+  /set ty 11
+  /endif
+/if [and [= unam "EMCPS"] [= udir "EMC"]] then
+  /set ty 12
+  /endif
+/if [and [= unam "COPB"] [= udir "EMC"]] then
+  /set ty 13
+  /endif
+/if [and [= unam "OCCD"] [= udir "IOEXT"]] then
+  /set ty 14
+  /endif
+/if [and [= unam "SHIPM"] [= udir "LUMEW"]] then
+  /set ty 15
+  /endif
+/if [and [= unam "HANSIM"] [= udir "FISHER"]] then
+  /set ty 16
+  /endif
+/if [and [= unam "OCCB"] [= udir "IOEXT"]] then
+  /set ty 17
+  /endif
+/if [and [= unam "HALLT"] [= udir "MSSA"]] then
+  /set ty 18
+  /endif
+/if [and [= unam "TAGLCD"] [= udir "MGH"]] then
+  /set ty 19
+  /endif
+/if [and [= unam "VOYAG"] [= udir "HYDROP"]] then
+  /set ty 20
+  /endif
+/if [and [= unam "MINIX"] [= udir "FISHER"]] then
+  /set ty 21
+  /endif
+/if [and [= unam "CPAP"] [= udir "DESH"]] then
+  /set ty 22
+  /endif
+/if [and [= unam "DUMET"] [= udir "MGH"]] then
+  /set ty 23
+  /endif
+/if [and [= unam "DUMSOL"] [= udir "MGH"]] then
+  /set ty 24
+  /endif
+/if [and [= unam "DUMCAN"] [= udir "MGH"]] then
+  /set ty 25
+  /endif
+/if [and [= unam "DUMSND"] [= udir "MGH"]] then
+  /set ty 26
+  /endif
+/if [and [= unam "BLDC"] [= udir "DESH"]] then
+  /set ty 27
+  /endif
+/if [and [= unam "DUMOT"] [= udir "MGH"]] then
+  /set ty 28
+  /endif
+/if [and [= unam "MORBET"] [= udir "ODEP"]] then
+  /set ty 29
+  /endif
+/if [and [= unam "MORB"] [= udir "ODEP"]] then
+  /set ty 30
+  /endif
+/if [and [= unam "MBDCC"] [= udir "ODEP"]] then
+  /set ty 31
+  /endif
+/if [and [= unam "MB1DIO"] [= udir "ODEP"]] then
+  /set ty 32
+  /endif
+/if [and [= unam "MB1DIOB"] [= udir "ODEP"]] then
+  /set ty 32
+  /endif
+/if [and [= unam "DUMAUD"] [= udir "MGH"]] then
+  /set ty 33
+  /endif
+/if [and [= unam "DCCPWR"] [= udir "ODEP"]] then
+  /set ty 34
+  /endif
+/if [and [= unam "H2SNODE"] [= udir "UCELL"]] then
+  /set ty 35
+  /endif
+/if [and [= unam "H2SBASE"] [= udir "UCELL"]] then
+  /set ty 36
+  /endif
+/if [and [= unam "CO2PWR"] [= udir "UCELL"]] then
+  /set ty 37
+  /endif
+/if [and [= unam "MENG"] [= udir "FISHER"]] then
+  /set ty 38
+  /endif
+/if [and [= unam "DSNIF"] [= udir "ODEP"]] then
+  /set ty 39
+  /endif
+/if [and [= unam "MB2SOL"] [= udir "ODEP"]] then
+  /set ty 40
+  /endif
+/if [and [= unam "MB2SOLP"] [= udir "ODEP"]] then
+  /set ty 41
+  /endif
+/if [and [= unam "G1S"] [= udir "LUMEW"]] then
+  /set ty 42
+  /endif
+/if [and [= unam "PBPTEST"] [= udir "PBP"]] then
+  /set ty 43
+  /endif
+/if [and [= unam "MB1DIOT"] [= udir "ODEP"]] then
+  /set ty 44
+  /endif
+/if [and [= unam "JDSP"] [= udir "JOWA"]] then
+  /set ty 45
+  /endif
+/if [and [= unam "JMTM"] [= udir "JOWA"]] then
+  /set ty 46
+  /endif
+/if [and [= unam "AGSTP"] [= udir "JOWA"]] then
+  /set ty 47
+  /endif
+/if [and [= unam "AGSTC"] [= udir "JOWA"]] then
+  /set ty 48
+  /endif
+/if [and [= unam "JSER"] [= udir "JOWA"]] then
+  /set ty 49
+  /endif
+/if [and [= unam "MTMT"] [= udir "JOWA"]] then
+  /set ty 50
+  /endif
+
+// NOTE: 51 is unused.
+
+/if [and [= unam "AGPAN"] [= udir "JOWA"]] then
+  /set ty 52
+  /endif
+/if [and [= unam "CURRT"] [= udir "JOWA"]] then
+  /set ty 53
+  /endif
+/if [and [= unam "AGCTRL"] [= udir "JOWA"]] then
+  /set ty 54
+  /endif
+/if [and [= unam "SYNVB"] [= udir "SYNV"]] then
+  /set ty 55
+  /endif
+/if [and [= unam "SYNVT"] [= udir "SYNV"]] then
+  /set ty 56
+  /endif
+
+/if [= ty -1] then
+  /show "  No ID assigned in FWTYPE.ALL to firmware " unam " from the source directory " udir
+         error   No FWTYPE
+         end
+  /stop
+  /endif
+
+/const   fwtype  integer = ty ;set the firmware type
+
+/del ty                      ;delete temporary variables
+/del udir
+/del unam

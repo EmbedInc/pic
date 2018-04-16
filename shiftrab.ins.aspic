@@ -1,0 +1,32 @@
+;   Subroutine SHIFTRAB
+;
+;   Perform an arithmetic shift right of REGB.  REG8 is the number of bits
+;   to shift right.  REG8 may be negative in which case REGB will be shifted
+;   left -REG8 bits.  Nothing will be done if REG8 is zero.
+;
+.shiftrab code
+         glbsub  shiftrab, regf8
+
+         movf    reg8        ;set Z flag on shift count
+         skip_nz
+         goto    shiftrab_leave ;nothing to do ?
+         btfsc   reg8, 7     ;shift count is positive ?
+         goto    shiftrab_neg ;shift count is negative
+;
+;   Shift count is positive, shift to the right.
+;
+shiftrab_posl                ;back here each additional bit to shift
+         shift32ra1 regb     ;arithmetic right shift 1 bit
+         decfsz  reg8        ;count one less bit shift to go
+         goto    shiftrab_posl ;back to shift another bit right
+         goto    shiftrab_leave
+;
+;   Shift count is negative, shift to the left.
+;
+shiftrab_neg
+         shift32l1 regb      ;left shift 1 bit
+         incfsz  reg8        ;count one less bit shift to go
+         goto    shiftrab_neg ;back to shift another bit left
+
+shiftrab_leave               ;common exit point
+         leaverest

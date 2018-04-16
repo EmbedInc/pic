@@ -1,0 +1,2499 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Network packet I/O interface.  This module presents a hardware and media
+;   independent interface for sending and receiving network packets.
+;
+;   This version is specific to the ZeroG ZG2100 and ZG2101 WiFi modules.  It
+;   is assumed these are connected to this processor via SPI, driven by the MSSP
+;   module.  Other devices may also be connected to the same SPI bus, each with
+;   its own chip select line.  FLAG_SPI is used as a mutex so that only one
+;   task can acquire the SPI hardware at a time.  The pin driving the ZeroG
+;   module must be called CS_ZEROG, and must be declared to have negative
+;   polarity.
+;
+;   All direct access to the ZeroG hardware is encapsulated in the NET_ZEROG
+;   module.  That module presents direct access to the ZeroG registers and the
+;   like, and hides the details of exactly how the SPI bus is used to read and
+;   write particular data.
+;
+;   This is a large file, so the external subroutines are listed here.  This
+;   section is only meant to give a quick idea of what is available.  The
+;   details are described in the comments at the beginning of each subroutine.
+;
+;     NET_PACKET_INIT
+;
+;       One-time module initialization.
+;
+;     NETP_SETUP
+;
+;       Reset state and hardware and set it up for normal use.  Starts reception
+;       if MAC address is known.
+;
+;
+;
+;     NETP_RECV_CHECK
+;
+;       Check for new received packet available.
+;
+;     NETP_RECV_OPEN
+;
+;       Open the next received packet for access and get its payload size.
+;
+;     NETP_RECV_DEST
+;
+;       Get destination address of currently open received packet.
+;
+;     NETP_RECV_SRC
+;
+;       Get source address of currently open received packet.
+;
+;     NETP_RECV_TYPE
+;
+;       Get the packet type/length word.
+;
+;     NETP_RECV_OFS
+;
+;       Set the offset into the payload for subsequent reads from the currently
+;       open received packet.
+;
+;     NETP_RECV_READ
+;
+;       Read the next byte of the currently open received packet and advance
+;       the address to the next byte.
+;
+;     NETP_RECV_READBUF
+;
+;       Read sequential bytes into a buffer.
+;
+;     NETP_RECV_CLOSE
+;
+;       Close access to the currently open received packet and discard the
+;       packet.
+;
+;
+;
+;     NETP_XMIT_ALLOC
+;
+;       Allocate a transmit buffer.
+;
+;     NETP_XMIT_DEST
+;
+;       Write destination address into a transmit packet.
+;
+;     NETP_XMIT_BCAST
+;
+;       Make transmit packet a broadcast packet (sets dest adr to all 1s).
+;
+;     NETP_XMIT_SRC
+;
+;       Write source address into a transmit packet.
+;
+;     NETP_XMIT_TYPE
+;
+;       Write type/length word into a transmit packet.
+;
+;     NETP_XMIT_OFS
+;
+;       Set the offset into the packet payload for the next read or write.
+;
+;     NETP_XMIT_WRITE
+;
+;       Write packet payload byte, increment offset by one.
+;
+;     NETP_XMIT_READ
+;
+;       Read packet payload byte, increment offset by one.
+;
+;     NETP_XMIT_DEF
+;
+;       Set default packet contents that wasn't explicitly set.
+;
+;     NETP_XMIT_SEND
+;
+;       Send a network packet.
+;
+;     NETP_XMIT_RELEASE
+;
+;       Release a transmit buffer.
+;
+;
+;
+;     NETP_CHECKLINK
+;
+;       Check the network link status and update FLAG_LINK accordingly.
+;
+;     NETP_TASK_RESET
+;
+;       Release all resources allocated to the current task.
+;
+/show "  Configured for ZeroG ZG2100 external WiFi module"
+
+         extern  our_mac     ;our MAC address, high to low byte order
+         extern  our_ip      ;out IP address, high to low byte order
+         extern  currtask    ;0-N ID of the currently running task
+         extern  mac_locktsk ;ID of task that has MAC/PHY locked
+         extern  tick100ms   ;incremented every 100ms
+         extern  seconds     ;incremented every 1 second
+         extern  eeflags     ;non-volatile flags from the EEPROM
+         extern_flags        ;declare global flag bits EXTERN
+
+/var new ii integer          ;temp preprocessor integer variable
+;
+;   Configuration values.
+;
+/const   arpt    real = 2.0  ;gratuitous ARP period, minutes
+stacksz  equ     80          ;size of ZeroG task data stack
+
+;
+;   Static constants.  These reflect external realities or other fixed values
+;   that are not user-configurable.  You should think of them as part of the
+;   code of this module and leave them alone unless you are performing software
+;   maintainence and know exactly what you're doing.
+;
+rdofs_dest equ   4           ;RAW window offset for received dest address
+rdofs_src equ    10          ;RAW window offset for received source address
+rdofs_datlen equ 20          ;RAW window offset for received data length
+rdofs_tylen equ  28          ;RAW window offset for received type/length word
+rdofs_data equ   30          ;RAW window offset for start of received payload
+
+wrofs_id equ     2           ;offset into transmit buffer of ID
+wrofs_dest equ   4           ;offset into transmit buffer of destination address
+wrofs_tylen equ  16          ;offset into transmit buffer of type/length word
+wrofs_data equ   18          ;offset into transmit buffer of payload data
+
+maxpsize equ     1500        ;max allowed transmit payload size
+;
+;   Derived constants.
+;
+/const   lbank   integer = lbank_packet ;bank number for local state
+
+/var new arpsec_k integer = [rnd [* arpt 60]] ;gratuitous ARP period, seconds
+/set arpsec_k [if [> arpsec_k 255] 255 arpsec_k] ;clip to max possible period
+arpsec_k equ     [v arpsec_k]
+n_xmitdesc equ   [v n_xmitdesc]
+lbank    equ     [v lbank]
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+/show "  Gratuitous ARP every " [fp [/ arpsec_k 60] "sig 0 rit 1"] " minutes"
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+zgtask   res     1           ;ID of our private task, FF = none
+recv_len res     2           ;payload size of received packet
+recv_rdofs res   2           ;user read offset from payload start of curr packet
+tsktick  res     1           ;last 100ms tick ZeroG task updated to
+cntsec   res     1           ;ticks until next 1 second
+arpsec   res     1           ;seconds until send gratuitous ARP
+
+  if debug_icd
+         global  zgtask, recv_len, recv_rdofs
+    endif
+;
+;   Local flags.  These are in the access bank.
+;
+.netpflags udata_acs
+
+flags0   res     1
+flags1   res     1
+
+#define flg_join flags0, 0   ;in joined state
+#define flg_auth flags0, 1   ;in authenticated state
+#define flg_assoc flags0, 2  ;in associated state
+#define flg_scan flags0, 3   ;got scan result, data in NETPBUF
+#define flg_mac flags0, 4    ;MAC address set from ZeroG module value
+#define flg_cpsk flags0, 5   ;PSK calculated and saved in non-volatile memory
+#define flg_key flags0, 6    ;security key installed successfully
+#define flg_arp flags0, 7    ;send gratuitous ARP next opportunity
+#define flg_macset flags1, 0 ;MAC parameter set confirmed
+
+  if debug_icd
+         global  flags0, flags1
+    endif
+;
+;   Scratch buffer.  This is used temporarily in various ways.  It is generally
+;   accessed indirectly, so is put in its own linker section to allow greater
+;   placement flexibility.
+;
+;   Other variables are defined here also.  These must immediately follow
+;   NETPBUF because sometimes NETPBUF is used as one large buffer, trashing the
+;   variables following it.
+;
+.netpbuf udata
+
+netpbuf  res     6           ;min data needed for authenticate
+seckey   res     32          ;max size needed for security key
+bssid    res     6           ;BSSID (MAC address) of the access point
+         res     21          ;additional needed when NETPBUF holds password
+ssidlen  res     1           ;SSID length, must be immediately before SSID
+ssid     res     32          ;SSID (name) of the access point
+
+  if debug_icd
+         global  netpbuf, seckey, bssid, ssidlen, ssid
+    endif
+;
+;   Transmit buffer descriptors.  Each descriptor keeps the current state of
+;   one transmit buffer.  The number of descriptors is set by the user constant
+;   N_XMITDESC defined above.  This is the maximum number of transmit buffers
+;   that can be allocated at a time, regardless of whether more would fit in
+;   memory.
+;
+;   The CBLOCK below defines names and sizes of the individual fields, and
+;   thereby implicitly defines the size of a whole descriptor.  Parts of the
+;   code may make assumptions about the layout of a descriptor.  This can not be
+;   changed without inspecting and likely adjusting other code in this module.
+;
+;   The transmit buffer descriptors are always accessed via pointers, so we
+;   don't need to know the bank they end up in at assembly time.  They are put
+;   in their own section so the linker can place them anywhere it sees fit.
+;
+;   2048 bytes is used for each transmit buffer in the ZeroG's scratch memory.
+;   The first 2048 byte block contains the last received packet, and remaining
+;   blocks contain the partially built messages to be transmitted eventually.
+;   The starting address of a buffer can therefore be directly computed from the
+;   buffer number.  Transmit buffer 0 starts at 2048 (0800h), buffer 1 at 4096
+;   (1000h), etc.
+;
+  cblock 0                   ;define transmit buffer descriptor fields
+         xb_flags: 1         ;flags byte, see XBFL_xxx constants below
+         xb_next: 2          ;offset into user payload of next user read/write
+         xb_len: 2           ;actual user payload data length
+
+         sz_xbdesc: 0        ;size of transmit buffer descriptor
+    endc
+         ;
+         ;   Flag bits in the XB_FLAGS field.  Each symbol here is the bit
+         ;   number for the particular flag within the XB_FLAGS byte.  The sense
+         ;   of all bits has been chosen so that 0 is the default or unused
+         ;   value.
+         ;
+         ;   The upper 4 bits hold the ID of the task that owns the buffer.
+         ;
+xbfl_inuse equ   0           ;descriptor is in use
+xbfl_tywr equ    1           ;packet type field written, don't fill in length
+
+.xbdesc  udata               ;separate section for the transmit buffer descriptors
+xbdesc   res     0           ;start address of the transmit buffer descriptors
+/set ii 0
+/block
+  /if [>= ii n_xmitdesc] then
+    /quit
+    /endif
+xb[v ii]_flags res 1         ;flags byte
+xb[v ii]_next res 2          ;payload offset for next read/write
+xb[v ii]_len res 2           ;actual user payload length used
+  /if debug_icd then
+         global  xb[v ii]_flags, xb[v ii]_next, xb[v ii]_len
+    /endif
+  /set ii [+ ii 1]
+  /repeat
+  /endblock
+
+.netp_stack udata
+netp_stack res   stacksz     ;data stack for the ZeroG receiving task
+
+
+.netp    code                ;start of executable code for this module
+
+;*******************************************************************************
+;
+;   Macro MAC_LOCK
+;
+;   Lock the MAC/PHY for exclusive access.  If it is already locked, then this
+;   will stall until it is available.
+;
+mac_lock macro
+         gcall   zerog_lock
+         endm
+
+;*******************************************************************************
+;
+;   Macro MAC_UNLOCK
+;
+;   Release the lock on the MAC/PHY.  This macro must only be used when the
+;   current thread holds the lock, although this is not checked.
+;
+mac_unlock macro
+         gcall   zerog_unlock
+         endm
+
+;*******************************************************************************
+;
+;   Macro ADDOFS ofs
+;
+;   Add the fixed offset OFS to the unsigned value in REG1:REG0.
+;
+addofs   macro   ofs
+  if (ofs)
+         movlw   low (ofs)
+         addwf   reg0
+         movlw   high (ofs)
+         addwfc  reg1
+    endif
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine NET_PACKET_INIT
+;
+;   Initialize the state managed by this module.  This routine is called once
+;   during system startup before multi-tasking is enabled and before any other
+;   routine in this module is called.
+;
+         glbsub  net_packet_init, noregs
+
+         dbankif lbankadr
+         setf    zgtask      ;init to our private task not running
+
+         gcall   zerog_init  ;init low level ZeroG interface module
+
+         dbankif gbankadr
+         bcf     flag_macready ;init to MAC/PHY not ready for use
+         bsf     flag_macpack ;packet layer will supply MAC address
+
+         clrf    flags0      ;init all local flags to off
+
+         mcall   tbuf_freeall ;init all transmit buffers to unused
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro WRITE8 val
+;
+;   Write the 8 bit value VAL as the next byte to the ZeroG FIFO.  REG0 is
+;   trashed.
+;
+write8   macro   val
+         loadk8  reg0, (val)
+         gcall   zerog_write
+         endm
+
+;*******************************************************************************
+;
+;   Macro WRITE16 val
+;
+;   Write the 16 bit value VAL as the next two bytes to the ZeroG FIFO.  REG0
+;   and REG1 are trashed.  The word is written in high to low byte order, as
+;   expected by the ZeroG module.
+;
+write16  macro   val
+         loadk16 reg0, (val)
+         gcall   zerog_write16
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine WRITE_IND
+;
+;   Write bytes to the ZeroG FIFO indirectly from memory.  FSR0 is passed in
+;   pointing to the first byte to write.  It is returned pointing to the first
+;   byte after the last one written.  REG0 contains the number of bytes to
+;   write.
+;
+         locsub  write_ind, regf0 | regf1
+
+         movf    reg0, w
+         bz      wrind_leave ;no bytes to write ?
+         movwf   reg1        ;init number of bytes left to do
+
+wrind_loop unbank
+         movff   postinc0, reg0 ;get the byte from the source buffer
+         gcall   zerog_write ;write it to the FIFO
+         decfsz  reg1        ;count one less byte left to do
+         jump    wrind_loop  ;back to do the next byte
+
+wrind_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_SETUP
+;
+;   Reset all the state managed by this module and set up the MAC/PHY for use
+;   by this module.  The current state is irrelevant, so this routine can be
+;   called in any state.  However, state kept in various tasks may not be valid
+;   after this call.
+;
+;   This version of the packet routines uses the unique MAC address assigned to
+;   the ZeroG module.  The MAC address will be inquired from the ZeroG module,
+;   saved in OUR_MAC, and FLAG_MACADR set to indicate the MAC address is known.
+;   Any previous MAC address in OUR_MAC is overwritten, whether it was valid
+;   (FLAG_MACADR set) or not.
+;
+         glbsub  netp_setup, regf0 | regf1 | regf2 | regf3 | regf4
+
+         dbankif gbankadr
+         bcf     flag_macready ;init to hardware MAC/PHY not ready for use
+         bcf     flag_macadr ;init to MAC address is not known
+
+         clrf    flags0      ;reset all local flags to off
+         mcall   tbuf_freeall ;init all transmit buffers to unused
+
+         mac_lock
+         gcall   zerog_reset
+         mac_unlock
+         dbankif gbankadr
+         bsf     flag_macready ;MAC is ready for communication with it
+
+         task_create netp_task, netp_stack ;start ZeroG receive task
+
+nset_retry unbank            ;back here to retry network connect operation
+         dbankif gbankadr
+         bcf     flag_link   ;not connected to a network
+         bcf     flag_netready ;network is not ready for application use
+         clrf    flags0      ;reset all flags internal to this module
+;
+;   Get the MAC address from the ZeroG module and save it in our system state.
+;
+nset_getmac unbank
+         status0 stat_net_smac ;requesting MAC address event
+         mac_lock
+         gcall   zerog_write_mgmt ;start MAC parameter request message
+         write8  2           ;preamble type
+         write8  16          ;preamble subtype
+         write16 1           ;ID for the MAC address
+         write16 0           ;flags word, not documented, send 0
+         gcall   zerog_write_end ;end the message
+         mac_unlock
+         ;
+         ;   Wait for the mac result message to be received.  If nothing is
+         ;   received within a reasonable time, then abort.
+         ;
+         loadk8  reg0, 2     ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wmac unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_mac
+         jump    nset_dmac   ;got the result, all done
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wmac   ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wmac   ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_dmac unbank             ;mac result has been received
+         dbankif gbankadr
+         bsf     flag_macadr ;indicate MAC address in OUR_MAC is now valid
+;
+;   Scan for our expected access point.
+;
+nset_scan unbank             ;back here to retry scan
+         status0 stat_net_sscan ;indicate sending scan request
+         lfsr    0, ssidlen
+         gcall   get_ssid    ;get access point name length and name into buffer
+
+         mac_lock
+         gcall   zerog_write_mgmt ;start the scan request message
+         write8  2           ;preamble type
+         write8  1           ;preamble subtype
+         write16 0           ;probe delay time, not used
+         write16 210         ;min channel time, units of 1.024ms
+         write16 315         ;max channel time, units of 1.024mS
+         ;
+         ;   Set BSSID to FF:FF:FF:FF:FF:FF to indicate not used.
+         ;
+         loadk8  reg1, 6     ;number of bytes to write
+         loadk8  reg0, h'FF' ;the byte value to write
+nset_bssid unbank
+         gcall   zerog_write
+         decfsz  reg1
+         jump    nset_bssid
+
+         write8  3           ;accept either infrastructure or ad-hoc
+         write8  2           ;passive scan
+         movff   ssidlen, reg0 ;number of valid chars in SSID name
+         gcall   zerog_write
+         write8  11          ;number of channels in the list to scan
+         ;
+         ;   Set access point (SSID) name.  This field is always 32 characters
+         ;   regardless of how many are valid.
+         ;
+         lfsr    0, ssid     ;indicate where to get the data from
+         loadk8  reg0, 32    ;indicate number of bytes to write
+         mcall   write_ind   ;write data from buffer to FIFO
+         ;
+         ;   Write the list of RF channels to try.  This field is always 14
+         ;   bytes long, one for each possible channel.  We write all the WiFi
+         ;   channels (1-14).  The actual number of channels to scan was already
+         ;   set earlier.
+         ;
+         ;   Note that only channels 1-11 are used in the U.S.
+         ;
+         loadk8  reg1, 14    ;init number of bytes left to write
+         loadk8  reg0, 1     ;init next channel number to write
+nset_chan unbank
+         gcall   zerog_write
+         incf    reg0        ;make next channel number to write
+         decfsz  reg1
+         jump    nset_chan
+
+         gcall   zerog_write_end ;end the scan request message
+         mac_unlock
+         ;
+         ;   Wait for the scan result message to be received.  If nothing is
+         ;   received, then we do another scan request.
+         ;
+         loadk8  reg0, 50    ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wscan unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_scan
+         jump    nset_dscan  ;got scan result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wscan  ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wscan  ;no, go back and wait some more
+         jump    nset_scan   ;yes, retry sending scan request
+
+nset_dscan unbank            ;scan result has been received
+;
+;   Join the access point from the scan result.  BSSID has been set from the
+;   scan result.  The following additional information has been saved in
+;   NETPBUF:
+;
+;     0: Beacon period, 16 bits, units of 1.024ms.
+;
+;     2: Channel number, can be 1-14 but only 1-11 is used in the U.S.
+;
+         status0 stat_net_sjoin ;sending join request event
+         mac_lock
+         gcall   zerog_write_mgmt ;start the join request message
+
+         write8  2           ;preamble type
+         write8  2           ;preamble subtype
+         write16 5           ;give up after this many beacon intervals
+
+         movff   netpbuf+0, reg1 ;beacon period, units of 1.024ms
+         movff   netpbuf+1, reg0
+         gcall   zerog_write16
+
+         lfsr    0, bssid    ;write BSSID (access point MAC address)
+         loadk8  reg0, 6
+         mcall   write_ind
+
+         movff   netpbuf+2, reg0 ;WiFi channel number
+         gcall   zerog_write
+
+         movff   ssidlen, reg0 ;name string length
+         gcall   zerog_write
+
+         lfsr    0, ssid     ;write SSID (access point name string)
+         loadk8  reg0, 32
+         mcall   write_ind
+
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         ;
+         ;   Wait for the join result message to be received.  If nothing is
+         ;   received within a reasonable time, then abort.
+         ;
+         loadk8  reg0, 20    ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wjoin unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_join
+         jump    nset_djoin  ;done getting result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wjoin  ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wjoin  ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_djoin unbank            ;join result has been received
+;
+;   Set the broadcast address (FF-FF-FF-FF-FF-FF) in a acceptance filter in the
+;   MAC.  Broadcast reception is not enabled by default.
+;
+         status0 stat_net_sbcast ;setting up MAC to accept broadcast packets
+         mac_lock
+         gcall   zerog_write_mgmt ;start the management message
+
+         write8  2           ;preamble type
+         write8  15          ;preamble subtype
+         write16 19          ;compare address MAC parameter ID
+         write8  0           ;reserved
+         write8  4           ;0-5 filter slot number
+         write8  6           ;filter type ID
+         loadk16 reg0, h'FFFF'
+         gcall   zerog_write16 ;broadcast address
+         gcall   zerog_write16
+         gcall   zerog_write16
+
+         bcf     flg_macset  ;reset to MAC parameter set confirm not received
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         ;
+         ;   Wait for the MAC parameter set confirm message to be received.  If
+         ;   nothing is received within a reasonable time, then abort.
+         ;
+         loadk8  reg0, 5     ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wbcast unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_macset
+         jump    nset_dbcast ;done getting result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wbcast ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wbcast ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_dbcast unbank           ;bcast result has been received
+         status0 stat_net_rbcast ;MAC setting confirmed
+;
+;   Install whatever security information is required by the selected security
+;   method.  The data in NETPBUF currently is:
+;
+;     0:  Capability word as returned in the join confirm message, 2 bytes.
+;
+;     2:  WPA security info from join confirm message, 2 bytes.
+;
+;     4:  WPA2 security info from join confirm message, 2 bytes.
+;
+;   The security method to use is selected in the non-volatile configuration.
+;   If this doesn't match one of the capabilities of the WiFi access point, then
+;   either authentication or association will fail.
+;
+         gcall   get_wsec    ;get the WiFi security method ID into REG0
+         dispatch wsec_table ;to different code depending on security method
+;
+;   Install security key, security method is NONE.
+;
+nset_wsnone unbank
+         status0 stat_net_wsec_none ;send status to indicate security method
+         loadk8  reg4, 0     ;use open authentication
+         jump    nset_auth   ;nothing to install, skip to authenticate
+;
+;   Install security key, security method is WEP 64.
+;
+nset_wswep64 unbank
+         status0 stat_net_wsec_wep64 ;send status to indicate security method
+         loadk8  reg4, 5     ;number of bytes in WEP key
+         jump    nset_wswep  ;to common code with WEP128
+
+;
+;   Install security key, security method is WEP 128.
+;
+nset_wswep128 unbank
+         status0 stat_net_wsec_wep128 ;send status to indicate security method
+         loadk8  reg4, 13    ;number of bytes in WEP key
+
+nset_wswep unbank            ;common code with WEP 64 case
+         lfsr    0, seckey   ;point to where to write the security key
+         loadk8  reg0, 14    ;number of key bytes to return
+         gcall   get_wifikey ;get the WEP key number and key bytes into SECKEY
+         ;
+         ;   Install the WEP keys.  We only store one key, so we install that
+         ;   key in all four WEP key slots.
+         ;
+         status0 stat_net_swepk ;sending WEP keys event
+         mac_lock
+         gcall   zerog_write_mgmt ;start the message
+         write8  2           ;preamble type
+         write8  10          ;preamble subtype
+         write8  3           ;0-3 ZeroG slot number, 3 used for WEP by default
+         movff   reg4, reg0  ;number of bytes in key (5 or 13)
+         gcall   zerog_write
+         movff   seckey+0, reg0 ;0-3 WEP key number
+         gcall   zerog_write
+
+         lfsr    0, ssidlen
+         loadk8  reg0, 33
+         mcall   write_ind   ;write SSID length and characters
+
+         loadk8  reg0, 13    ;number of bytes to send in each WEP key
+         lfsr    0, seckey+1
+         mcall   write_ind   ;set WEP key 0
+         lfsr    0, seckey+1
+         mcall   write_ind   ;set WEP key 1
+         lfsr    0, seckey+1
+         mcall   write_ind   ;set WEP key 2
+         lfsr    0, seckey+1
+         mcall   write_ind   ;set WEP key 3
+
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         ;
+         ;   Wait for the WEP key result message to be received.  If nothing is
+         ;   received within a reasonable time, then abort.
+         ;
+         loadk8  reg0, 5     ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wwepkey unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_key
+         jump    nset_dwepkey ;done getting result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wwepkey ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wwepkey ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_dwepkey unbank          ;wepkey result has been received
+
+         loadk8  reg4, 1     ;use shared key authentication
+         jump    nset_auth   ;go try to authenticate
+;
+;   Install security key, security method is WPA.
+;
+nset_wswpa unbank
+         status0 stat_net_wsec_wpa ;send status to indicate security method
+         jump    nset_wswpa_com ;too common code with WPA2
+;
+;   Install security key, security method is WPA2.
+;
+nset_wswpa2 unbank
+         status0 stat_net_wsec_wpa2 ;send status to indicate security method
+nset_wswpa_com unbank        ;common code with WPA
+         gcall   get_wkey_upd ;is the binary key up to date with the password ?
+         skip_z              ;not up to date ?
+         jump    nset_key_wpa2 ;is up to date, skip this section
+         ;
+         ;   Send request to calculate a PSK.
+         ;
+         status0 stat_net_cpsk ;sending request to compute PSK
+         lfsr    0, netpbuf  ;point to where to write the password string
+         gcall   get_wpswd   ;get the password length and chars into NETPBUF
+
+         mac_lock
+         gcall   zerog_write_mgmt ;start the message
+
+         write8  2           ;preamble type
+         write8  12          ;preamble subtype
+         write8  0           ;reserved
+         movff   netpbuf+0, reg0 ;password length, characters
+         gcall   zerog_write
+         movff   ssidlen, reg0 ;SSID length
+         gcall   zerog_write
+         write8  0           ;reserved
+
+         lfsr    0, ssid
+         loadk8  reg0, 32
+         mcall   write_ind   ;write SSID bytes
+
+         lfsr    0, netpbuf+1
+         loadk8  reg0, 64
+         mcall   write_ind   ;write password bytes
+
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         ;
+         ;   Wait for the confirm message to be received.  Since sending the
+         ;   request to calculate a PSK wipes out state received from the join
+         ;   confirm, execution is restarted at NSET_RETRY on success.
+         ;
+         loadk8  reg0, 120   ;max wait time, seconds
+         movff   seconds, reg1 ;grab starting time value
+nset_wcpsk unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_cpsk
+         jump    nset_retry  ;done getting result
+         dbankif gbankadr
+         movf    seconds, w  ;get current time
+         xorwf   reg1, w
+         bz      nset_wcpsk  ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wcpsk  ;no, go back and wait some more
+         jump    nset_leave  ;abort
+         ;
+         ;   The stored security key is up to date, meaning it does not need to
+         ;   be calculated from the password and the SSID.
+         ;
+         ;   Now install the security key.
+         ;
+nset_key_wpa2 unbank
+         status0 stat_net_skey ;sending WiFi security key info
+         lfsr    0, seckey   ;point to where to write the key
+         loadk8  reg0, 32    ;number of key bytes to get
+         gcall   get_wifikey ;get the key into NETPBUF
+
+         mac_lock
+         gcall   zerog_write_mgmt ;start the message
+
+         write8  2           ;preamble type
+         write8  8           ;preamble subtype
+         write8  0           ;0-2 slot number
+
+         lfsr    0, ssidlen
+         loadk8  reg0, 33
+         mcall   write_ind   ;SSID length and string
+
+         lfsr    0, seckey
+         loadk8  reg0, 32
+         mcall   write_ind   ;key bytes
+
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         loadk8  reg4, 0     ;use open authentication
+         jump    nset_wait_key
+;
+;   Wait for the key result message to be received.  If nothing is received
+;   within a reasonable time, then abort.
+;
+nset_wait_key unbank
+         loadk8  reg0, 3     ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wkey unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_key
+         jump    nset_dkey   ;done getting result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wkey   ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wkey   ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_dkey unbank             ;key result has been received
+;
+;   Authenticate.  NETPBUF contains the following:
+;
+;     0:  Capability word as returned in the join confirm message, 2 bytes.
+;
+;     2:  WPA security info from join confirm message, 2 bytes.
+;
+;     4:  WPA2 security info from join confirm message, 2 bytes.
+;
+;   The SSID and BSSID variables are also set.
+;
+;   REG4 contains the algorithm ID to pass in the authentication request.  0
+;   selects open authentication, which is for non-WEP security.  1 selects
+;   shared key authentication, which is only used for WEP security.
+;
+nset_auth unbank
+         status0 stat_net_sauth ;sending authenticate request
+
+         mac_lock
+         gcall   zerog_write_mgmt ;start the message
+
+         write8  2           ;preamble type
+         write8  3           ;preamble subtype
+
+         lfsr    0, bssid
+         loadk8  reg0, 6
+         mcall   write_ind   ;write the BSSID
+
+         write16 32          ;timeout, units of 10ms
+         movff   reg4, reg0
+         gcall   zerog_write ;algorithm ID
+         write8  0           ;reserved byte
+
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         ;
+         ;   Wait for the authenticate result message to be received.  If
+         ;   nothing is received within a reasonable time, then abort.
+         ;
+         loadk8  reg0, 5     ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wauth unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_auth
+         jump    nset_dauth  ;done getting result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wauth  ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wauth  ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_dauth unbank            ;auth result has been received
+;
+;   Associate.  NETPBUF contains the following:
+;
+;     0,1:  Capability word as returned in the join confirm message, 2 bytes.
+;
+;     2,3:  WPA security info from join confirm message, 2 bytes.
+;
+;     4,5:  WPA2 security info from join confirm message, 2 bytes.
+;
+;   The SSID and BSSID variable are also set.
+;
+         status0 stat_net_sassoc ;sending associate request
+
+         mac_lock
+         gcall   zerog_write_mgmt ;start the message
+         write8  2           ;preamble type
+         write8  4           ;preamble subtype
+
+         lfsr    0, bssid
+         loadk8  reg0, 6
+         mcall   write_ind   ;BSSID (access point MAC address)
+
+         write8  0           ;reserved
+
+         banksel netpbuf
+         clrf    reg0        ;init security request byte to all flags off
+         btfsc   netpbuf+3, 0
+         bsf     reg0, 0     ;WPA TKIP
+         btfsc   netpbuf+2, 0
+         bsf     reg0, 0     ;WPA TKIP
+         btfsc   netpbuf+3, 1
+         bsf     reg0, 1     ;WPA CCMP
+         btfsc   netpbuf+2, 1
+         bsf     reg0, 1     ;WPA CCMP
+         btfsc   netpbuf+5, 0
+         bsf     reg0, 4     ;WPA2 TKIP
+         btfsc   netpbuf+4, 0
+         bsf     reg0, 4     ;WPA2 TKIP
+         btfsc   netpbuf+5, 1
+         bsf     reg0, 5     ;WPA2 CCMP
+         btfsc   netpbuf+4, 1
+         bsf     reg0, 5     ;WPA2 CCMP
+         gcall   zerog_write ;security request byte
+
+         write16 400         ;timeout, units of 10ms
+
+         movff   netpbuf+0, reg0
+         gcall   zerog_write ;capability word high byte
+         movff   netpbuf+1, reg0
+         gcall   zerog_write ;capability word low byte
+
+         write16 0           ;listen interval
+         write16 0           ;length of optional additional information
+
+         gcall   zerog_write_end ;end the message and send it
+         mac_unlock
+         ;
+         ;   Wait for the associate result message to be received.  If nothing
+         ;   is received within a reasonable time, then abort.
+         ;
+         loadk8  reg0, 50    ;max wait time, units of 100ms
+         movff   tick100ms, reg1 ;grab starting time value
+nset_wassoc unbank
+         gcall   task_yield_save ;give other tasks a chance to run
+         btfsc   flg_assoc
+         jump    nset_dassoc ;done getting result
+         dbankif gbankadr
+         movf    tick100ms, w ;get current time
+         xorwf   reg1, w
+         bz      nset_wassoc ;no new tick ?
+         incf    reg1        ;time value now updated to
+         decfsz  reg0        ;wait time now elapsed ?
+         jump    nset_wassoc ;no, go back and wait some more
+         jump    nset_leave  ;abort
+
+nset_dassoc unbank           ;assoc result has been received
+         dbankif gbankadr
+         bsf     flag_link   ;indicate now linked to the network
+
+nset_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_CHECK
+;
+;   Check for received packet available.  The carry flag is set if a packet is
+;   available and cleared if not.
+;
+         glbsub  netp_recv_check, noregs
+
+         dbankif gbankadr
+         btfss   flag_netp_recv
+         bcf     status, c   ;no received packet
+         btfsc   flag_netp_recv
+         bsf     status, c   ;a received packet is available
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_OPEN
+;
+;   Initialize for reading the next received packet.  This routine must only be
+;   called when it is known a unread received packet is sitting in the receive
+;   buffer.  REG1:REG0 will be returned the number of payload bytes in the
+;   packet.
+;
+;   In this implementation, incoming data packets are discovered by the FIFO
+;   reading task.  When such a packet it found, it is copied into the first slot
+;   of scratch RAM and the FIFO entry is cleared.  The packet has therefore
+;   already been "opened", so we just return the number of payload bytes.
+;
+         glbsub  netp_recv_open, noregs
+
+         movff   recv_len+0, reg0
+         movff   recv_len+1, reg1
+
+         dbankif lbankadr
+         clrf    recv_rdofs+0 ;init the payload read offset
+         clrf    recv_rdofs+1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_DEST
+;
+;   Get the destination address of the currently open receive packet.  The 6
+;   byte destination address will be written to where FSR0 is pointing.  The
+;   address will be written in most to least significant byte order.  FSR0 is
+;   trashed.
+;
+         glbsub  netp_recv_dest, regf0 | regf1
+
+         mac_lock
+         loadk16 reg0, rdofs_dest ;set index to start of destination address
+         gcall   zerog_raw1ofs
+
+         loadk8  reg1, 6     ;number of bytes to copy
+rcvd_loop unbank
+         gcall   zerog_raw1get ;read this byte
+         movff   reg0, postinc0 ;write it to the caller's buffer
+         decfsz  reg1        ;count one less byte left
+         jump    rcvd_loop   ;back to do next byte
+
+         mac_unlock
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_SRC
+;
+;   Get the source address of the currently open receive packet.  The 6 byte
+;   source address will be written to where FSR0 is pointing.  The address will
+;   be written in most to least significant byte order.  FSR0 is trashed.
+;
+         glbsub  netp_recv_src, regf0 | regf1
+
+         mac_lock
+         loadk16 reg0, rdofs_src ;set index to start of source address
+         gcall   zerog_raw1ofs
+
+         loadk8  reg1, 6     ;number of bytes to copy
+rcvsrc_loop unbank
+         gcall   zerog_raw1get ;read this byte
+         movff   reg0, postinc0 ;write it to the caller's buffer
+         decfsz  reg1        ;count one less byte left
+         jump    rcvsrc_loop ;back to do next byte
+
+         mac_unlock
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_TYPE
+;
+;   Get the packet type/length word and return it in REG1:REG0.
+;
+         glbsub  netp_recv_type, noregs
+
+         mac_lock
+         loadk16 reg0, rdofs_tylen ;set index to type/length word
+         gcall   zerog_raw1ofs
+         gcall   zerog_raw1get ;get high byte
+         movff   reg0, reg1
+         gcall   zerog_raw1get ;get low byte
+         mac_unlock
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_OFS
+;
+;   Sets which packet payload byte will be read next.  The offset from the first
+;   payload byte is passed in REG1:REG0.  The next read will return the byte
+;   at this offset.  The first payload byte is at offset 0.  The read offset is
+;   initialized to 0 by NETP_RECV_OPEN.
+;
+         glbsub  netp_recv_ofs, noregs
+
+         movff   reg0, recv_rdofs+0 ;set payload offset for next read
+         movff   reg1, recv_rdofs+1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_READ
+;
+;   Read the next payload byte from the currently open receive packet, then
+;   advance to the next byte.  Successive calls to this routine will return
+;   successive packet bytes.  The data byte is returned in REG0.
+;
+         glbsub  netp_recv_read, regf1
+
+         mac_lock
+
+         movff   recv_rdofs+0, reg0 ;get payload read offset into REG1:REG0
+         movff   recv_rdofs+1, reg1
+         movlw   low rdofs_data ;make offset into RAW window
+         addwf   reg0
+         movlw   high rdofs_data
+         addwfc  reg1
+         gcall   zerog_raw1ofs ;set offset of byte to read
+         gcall   zerog_raw1get ;read the byte into REG0
+
+         dbankif lbankadr
+         incf    recv_rdofs+0 ;update payload read offset for next time
+         skip_ncarr
+         incf    recv_rdofs+1
+
+         mac_unlock
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_READBUF
+;
+;   Read sequential bytes from the currently open receive packet into a buffer.
+;   REG0 contains the number of bytes to read, and FSR0 points to the start of
+;   the buffer.  REG0 may contain 0, in which case nothing is read.  FSR0 is
+;   preserved.  The read index will be left at the next byte after the last one
+;   read.
+;
+;   This routine may be used to read data into sequential REGn general registers
+;   except for REG0 or REG1.
+;
+         glbsub  netp_recv_readbuf, regf0 | regf1
+
+         movf    reg0
+         bz      rcvrdbuf_leave ;no bytes requested, nothing to do ?
+
+         mac_lock            ;acquire exclusive access to the MAC
+
+         pushreg reg0        ;temp save number of bytes to read
+         movff   recv_rdofs+0, reg0 ;get payload read offset into REG1:REG0
+         movff   recv_rdofs+1, reg1
+         movlw   low rdofs_data ;make offset into RAW window
+         addwf   reg0
+         movlw   high rdofs_data
+         addwfc  reg1
+         gcall   zerog_raw1ofs ;set offset to the first byte to read
+         popreg  reg1        ;restore number of bytes to read into REG1
+
+         dbankif lbankadr
+         movf    reg1, w     ;update user read offset for next time
+         addwf   recv_rdofs+0
+         movlw   0
+         addwfc  recv_rdofs+1
+
+         pushreg fsr0l       ;temp save buffer pointer on stack
+         pushreg fsr0h
+rcvrdbuf_loop unbank         ;back here each new byte to read
+         gcall   zerog_raw1get ;get this data byte
+         movff   reg0, postinc0 ;write it into the caller's buffer
+         decfsz  reg1        ;count one less byte left to do
+         jump    rcvrdbuf_loop ;back to do next byte
+
+         popreg  fsr0h       ;restore buffer pointer from stack
+         popreg  fsr0l
+         mac_unlock          ;release lock on the MAC
+
+rcvrdbuf_leave unbank        ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_RECV_CLOSE
+;
+;   Close the currently open receive packet.  A receive packet must be currently
+;   open, although this is not checked.  The receive packet can no longer be
+;   accessed after this call.  The packet will be discarded and the hardware
+;   allowed to overwrite it with new received data.
+;
+         glbsub  netp_recv_close, noregs
+
+         dbankif gbankadr
+         bcf     flag_netp_recv ;indicate done with received packet in scratch RAM
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine TBUF_FREEALL
+;
+;   Free all transmit buffers.
+;
+         locsub  tbuf_freeall, regf0
+
+/if [> n_xmitdesc 0] then
+         lfsr    0, xbdesc   ;init pointer to first descriptor
+         loadk8  reg0, sz_xbdesc * n_xmitdesc ;init loop counter
+tbfa_xb  unbank              ;back here to init each new byte
+         clrf    postinc0    ;init this descriptor byte
+         decfsz  reg0        ;count one less byte left to do
+         jump    tbfa_xb     ;back to init the next byte
+  /endif
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro BUFPNT0 ofs
+;
+;   Point FSR0 to OFS bytes into the buffer descriptor identified by REG8.
+;
+bufpnt0  macro   ofs
+         lfsr    0, xbdesc + (ofs) ;point to selected byte in descriptor 0
+         movf    reg8, w     ;get the 0-N descriptor index
+         mullw   sz_xbdesc   ;make offset for selected descriptor in PRODH:PRODL
+         movf    prodl, w    ;add the offset into the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine XMIT_POINT
+;
+;   Point FSR0 to the transmit buffer descriptor given its index in REG8.  This
+;   is a low level internal routine, and the index is not checked for validity.
+;   Valid indexes are in the range of 0 to N_XMITDESC-1.
+;
+         locsub  xmit_point, noregs
+
+         bufpnt0 0           ;point FSR0 to the start of the buffer descriptor
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro XMIT_ADR ofs
+;
+;   Computes the ZeroG module scratch memory address for offset OFS into the
+;   transmit buffer indicated by REG8.  REG8 must be 0 to N_XMITDESC-1, although
+;   this is not checked.  The address is returned in REG1:REG0.
+;
+;   Each buffer gets a fixed 2048 bytes in the scratch memory, with the first
+;   starting at address 2048 (800h).
+;
+xmit_adr macro   ofs
+         incf    reg8, w     ;make memory block number
+         movwf   reg1        ;make upper byte of block start address
+         rlncf   reg1
+         rlncf   reg1
+         rlncf   reg1
+         clrf    reg0        ;lower byte of block start address
+         addofs  ofs         ;add the offset into this transmit buffer
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_ALLOC
+;
+;   Allocate a new transmit buffer.  The maximum data payload size to configure
+;   the buffer to is in REG1:REG0.  A smaller packet can be sent using the
+;   buffer, but the unused transmit buffer memory will not be available for
+;   other uses.  The maximum allowed payload size is 1500 bytes.  A request for
+;   a larger buffer always fails.
+;
+;   The buffer index for the new buffer is returned in REG8.  The value of this
+;   index has no meaning to the caller, except that it must be passed to other
+;   NETP_XMIT_xxx routines to identify the buffer.  If the requested buffer
+;   could not be allocated, then REG8 is returned with the high bit set.  In
+;   that case the remaining bits in REG8 are undefined.  Valid buffer indexes
+;   are in the 0-127 range.
+;
+;   This implementation allocates a fixed region of 2048 bytes in the scratch
+;   memory area for each transmit buffer.  The first 2048 bytes is reserved for
+;   the last received packet, and subsequent blocks for the transmit buffers.
+;   In this version, there is no penalty for requesting the maximum allowed size
+;   of 1500 bytes.  The requested size is actually ignored as long as it does
+;   not exceed the limit set by the constant MAXPSIZE.
+;
+;   The RAW1 window is permanently mapped to the scratch memory.
+;
+/if [= n_xmitdesc 0]
+  /then                      ;no transmit buffer descriptors exist
+         glbsub  netp_xmit_alloc, noregs
+         setf    reg8        ;indicate buffer not allocated
+         leaverest
+  /else                      ;configured for transmit buffer allocation
+         glbsub  netp_xmit_alloc, regf0 | regf1
+;
+;   Validate the requested data payload size.  The maximum allowed network
+;   packet payload size is set by the constant MAXPSIZE.
+;
+         movf    reg0, w     ;compute MAX - REQUESTED
+         sublw   low maxpsize
+         movlw   high maxpsize
+         subfwb  reg1, w
+         bn      xma_no      ;more than max requested ?
+;
+;   Find the first unused buffer descriptor.
+;
+         lfsr    0, xbdesc   ;init pointer to first descriptor
+         loadk8  reg8, n_xmitdesc ;init loop counter
+xma_look unbank              ;back here to check next descriptor
+         btfss   indf0, xbfl_inuse ;this descriptor is in use ?
+         jump    xma_fnd     ;found available descriptor
+         dcfsnz  reg8        ;count one less descriptor left to check
+         jump    xma_no      ;no descriptor is available
+         movlw   low sz_xbdesc ;update pointer to next descriptor
+         addwf   fsr0l
+         movlw   high sz_xbdesc
+         addwfc  fsr0h
+         jump    xma_look    ;back to check this new descriptor
+
+xma_no   unbank              ;unable to allocate the buffer
+         setf    reg8        ;indicate buffer not allocated
+         jump    xma_leave
+
+xma_fnd  unbank              ;found unused buffer descriptor
+         movf    reg8, w     ;get count of descriptors from here to end
+         sublw   n_xmitdesc  ;make index of this descriptor
+         movwf   reg8
+;
+;   A unused transmit buffer descriptor has been found, FSR0 is pointing to it,
+;   and REG8 has been set to its index.
+;
+;   Initialize the transmit buffer descriptor.
+;
+         swapf   currtask, w ;get current task ID in high nibble
+         andlw   b'11110000' ;mask in only the task ID field
+         iorlw   1 << xbfl_inuse ;set flag for this descriptor is in use
+         movwf   postinc0    ;write the flags byte
+
+         addfsr0 xb_next - (xb_flags+1) ;point to NEXT field
+         clrf    postinc0    ;init read/write offset into user payload
+         clrf    postinc0
+
+         addfsr0 xb_len - (xb_next+2) ;point to LEN field
+         clrf    postinc0    ;init to no data bytes in packet
+         clrf    postinc0
+;
+;   Initialize the packet bookeeping and wrapper data in the scratch memory.
+;
+         mac_lock            ;acquire exclusive access to the MAC
+
+         xmit_adr 0          ;get buffer address into REG1:REG0
+         gcall   zerog_raw1ofs ;next write will be start of this transmit buffer
+
+         loadk8  reg0, 1
+         gcall   zerog_raw1put ;preamble type = 1
+         gcall   zerog_raw1put ;preamble subtype = 1
+         loadk8  reg0, 0
+         gcall   zerog_raw1put ;init arbitrary packet ID to 0
+         gcall   zerog_raw1put ;set reserved byte to 0
+
+         gcall   zerog_raw1put ;init destination address to invalid
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+
+         loadk8  reg0, h'AA' ;write the SNAP header
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+         loadk8  reg0, 3
+         gcall   zerog_raw1put
+         loadk8  reg0, 0
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+         gcall   zerog_raw1put
+
+         mac_unlock          ;release lock on the MAC
+
+xma_leave unbank             ;common exit point
+         leaverest
+  /endif
+
+;*******************************************************************************
+;
+;   Macro BUFID_SETUP abort
+;
+;   Set up for dealing with the transmit buffer identified by REG8.  The abort
+;   address is jumped to if the transmit buffer index in REG8 is invalid or the
+;   buffer is not in use.  Otherwise, execution continues after this macro and
+;   FSR0 is left pointing to the XB_FLAGS byte of the buffer descriptor.
+;
+bufid_setup macro abort
+         movf    reg8, w     ;get the buffer index number
+         sublw   n_xmitdesc-1 ;compare to max valid value
+         skip_wle            ;index is within range ?
+         jump    abort       ;no
+
+         bufpnt0 xb_flags    ;point FSR0 to the descriptor flags byte
+         btfss   indf0, xbfl_inuse ;this descriptor is in use ?
+         jump    abort       ;no
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_DEST
+;
+;   Write the destination address into the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently allocated transmit buffer.  The
+;   address is passed by pointing FSR0 to it, and must be stored in high to low
+;   byte order.  FSR0 is trashed.
+;
+         glbsub  netp_xmit_dest, regf0 | regf1 | regf2 | regf3
+
+         movff   fsr0l, reg2 ;save pointer to source data in REG3:REG2
+         movff   fsr0h, reg3
+         bufid_setup xdst_leave ;validate buffer ID, point FSR0 to descriptor
+
+         xmit_adr wrofs_dest ;get target address into REG1:REG0
+         mac_lock            ;acquire exclusive access to the MAC
+         gcall   zerog_raw1ofs ;address to write to
+
+         movff   reg2, fsr0l
+         movff   reg3, fsr0h
+         loadk8  reg1, 6     ;init number of bytes to do
+xdst_loop unbank
+         movff   postinc0, reg0 ;get this data byte
+         gcall   zerog_raw1put ;write it to the transmit buffer
+         decfsz  reg1        ;count one less byte left to do
+         jump    xdst_loop   ;back to do the next byte
+
+         mac_unlock          ;release lock on the MAC
+
+xdst_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_BCAST
+;
+;   Set the transmit packet identified by REG8 as being a broadcast packet.  The
+;   ID in REG8 must be of a currently allocated transmit  buffer.
+;
+         glbsub  netp_xmit_bcast, regf0 | regf1
+
+         bufid_setup xbcst_leave ;validate buffer ID, point FSR0 to descriptor
+         xmit_adr wrofs_dest ;get target address into REG1:REG0
+
+         mac_lock            ;acquire exclusive access to the MAC
+         gcall   zerog_raw1ofs ;address to write to
+
+         loadk8  reg1, 6     ;init number of bytes to do
+         loadk8  reg0, h'FF' ;get the data byte value to write
+xbcst_loop unbank
+         gcall   zerog_raw1put ;write this byte into the transmit buffer
+         decfsz  reg1        ;count one less byte left to do
+         jump    xbcst_loop  ;back to do the next byte
+
+         mac_unlock          ;release lock on the MAC
+
+xbcst_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_SRC
+;
+;   Write the source address into the transmit packet identified by REG8.  The
+;   ID in REG8 must be of a currently allocated transmit buffer.  The address is
+;   passed by pointing FSR0 to it, and must be stored in high to low byte order.
+;
+;   In this implementation, the source address is automatically filled in by the
+;   ZeroG module and is not under out control.  This routine does nothing.
+;
+         glbsub  netp_xmit_src, noregs
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_TYPE
+;
+;   Write the type/length word into the transmit packet identified by REG8.
+;   The ID in REG8 must be of a currently allocated transmit buffer.  The 16 bit
+;   value to write is passed in REG1:REG0.
+;
+         glbsub  netp_xmit_type, noregs
+
+         bufid_setup xtyp_leave ;validate buffer ID, point FSR0 to descriptor
+         bsf     indf0, xbfl_tywr ;indicate type/length word explicitly written
+
+         mac_lock            ;acquire exclusive access to the MAC
+
+         pushreg reg0        ;save type/length word low byte
+         pushreg reg1        ;save type/length word high byte
+         xmit_adr wrofs_tylen ;get target address into REG1:REG0
+         gcall   zerog_raw1ofs ;set address to write to
+         popreg  reg1        ;restore type/length word high byte
+         movff   reg1, reg0
+         gcall   zerog_raw1put ;write high byte
+         popreg  reg0
+         gcall   zerog_raw1put ;write low byte
+
+         mac_unlock          ;release lock on the MAC
+
+xtyp_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_OFS
+;
+;   Sets which payload byte of the transmit packet identified by REG8 will be
+;   accessed next.  The offset from the first payload byte is passed in
+;   REG1:REG0.  The first payload byte is at offset 0.  This read/write offset
+;   is initialized to 0 when the transmit buffer is allocated.
+;
+         glbsub  netp_xmit_ofs, noregs
+
+         bufid_setup xofs_leave ;validate buffer ID, point FSR0 to descriptor
+         addfsr0 xb_next     ;point to start of NEXT field
+         movff   reg0, postinc0 ;update the next read/write offset
+         movff   reg1, postinc0
+
+xofs_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_WRITE
+;
+;   Write a payload byte to the transmit packet identified by REG8.  The offset
+;   into the payload of the next access is advanced by 1.  Therefore successive
+;   calls to this routine will write successive payload bytes.  The data byte
+;   to write is in REG0.
+;
+;   The used payload size is updated, if necessary, to include the new written
+;   byte.  The used payload size is initialized to 0 when the transmit buffer is
+;   allocated.  It is grown to include any valid payload bytes written via this
+;   routine.  This length is sent in the type/length field of the packet unless
+;   that value is explicitly set with a call to NETP_XMIT_TYPE.
+;
+         glbsub  netp_xmit_write, regf0 | regf1 | regf2 | regf3 | regf4
+
+         bufid_setup xwr_leave ;validate buffer ID, point FSR0 to descriptor
+         addfsr0 xb_next     ;point to NEXT field in descriptor
+         movff   postinc0, reg2 ;save offset to write to in REG3:REG2
+         movff   postinc0, reg3
+         btfsc   reg3, 7     ;current offset is not negative ?
+         jump    xwr_inc     ;is negative, increment the offset and leave
+         ;
+         ;   Compute NEXT minus max allowed length.  The high byte of the
+         ;   result is left in W.
+         ;
+         movlw   low maxpsize
+         subwf   reg2, w
+         movlw   high maxpsize
+         subwfb  reg3, w
+         bnn     xwr_leave   ;NEXT is currently past end of buffer ?
+;
+;   The write offset is within the payload buffer region, so the write will be
+;   performed.  The current register contents is:
+;
+;     REG0  -  Data byte to write.
+;
+;     REG1  -  Unused.
+;
+;     REG3:REG2  -  Offset into payload region of byte to write.
+;
+;     REG4  -  Unused.
+;
+;     FSR0  -  Pointing to LEN field of descriptor.
+;
+         movff   reg0, reg4  ;save the data byte in REG4
+         xmit_adr wrofs_data ;make ZeroG address of data start in REG1:REG0
+         movf    reg2, w     ;add offset to make address to write to
+         addwf   reg0
+         movf    reg3, w
+         addwfc  reg1
+
+         mac_lock
+         gcall   zerog_raw1ofs ;set address to write to
+         movff   reg4, reg0  ;get the data byte back into REG0
+         gcall   zerog_raw1put ;write the byte into the buffer
+         mac_unlock
+;
+;   Make sure the used payload length includes this byte.
+;
+         incf    reg2        ;make minimum required LEN value in REG3:REG2
+         skip_ncarr
+         incf    reg3
+
+         bufpnt0 xb_len      ;point FSR0 to the LEN field in the buffer descriptor
+
+         movf    reg2, w     ;compute (curr len)-(new len) high byte into W
+         subwf   postinc0, w
+         movf    reg3, w
+         subwfb  postdec0, w
+         bnn     xwr_inc     ;current LEN already covers this byte ?
+
+         movff   reg2, postinc0 ;update LEN to cover this byte
+         movff   reg3, indf0
+;
+;   Increment the NEXT address by 1 and leave.  FSR0 is not assumed to be
+;   pointing to a particular location.  REG8 must be preserved from entry and
+;   therefore contain the 0-N index of the buffer descriptor.
+;
+xwr_inc  unbank
+         bufpnt0 xb_next     ;point FSR0 to the NEXT field
+         incf    postinc0    ;increment the low byte
+         skip_ncarr
+         incf    indf0       ;propagate the carry
+
+xwr_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_READ
+;
+;   Read the next payload byte from the transmit packet identified by REG8.  The
+;   offset into the payload of the next access is advanced by 1.  Therefore
+;   successive calls to this routine will return successive payload bytes.  The
+;   data byte is returned in REG0.
+;
+;   The returned value is undefined on a attempt to read past the end of the
+;   payload, as defined when the transmit buffer was allocated.
+;
+         glbsub  netp_xmit_read, regf1
+
+         bufid_setup xrd_leave ;validate buffer ID, point FSR0 to descriptor
+         addfsr0 xb_next     ;point to NEXT field in descriptor
+
+         mac_lock
+         xmit_adr wrofs_data ;get ZeroG adr of data start in REG1:REG0
+         movf    postinc0, w ;add offset into data area to make final address
+         addwf   reg0
+         movf    postdec0, w
+         addwfc  reg1
+         gcall   zerog_raw1ofs ;set address to read from
+         gcall   zerog_raw1get ;read the data byte
+         mac_unlock
+;
+;   Increment the NEXT address by 1.  FSR0 is pointing to the start of the NEXT
+;   field.
+;
+         incf    postinc0    ;increment the low byte
+         skip_ncarr
+         incf    indf0       ;propagate the carry
+
+xrd_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_DEF
+;
+;   Fill in default values for transmit packet fields that have not been
+;   explicitly set and for which there is a reasonable default.  The following
+;   fields have default values:
+;
+;     Type/length  -  The default is the actual size of the payload region
+;       written to.  Note that this will be smaller than the size the transmit
+;       buffer was originally allocated with if the last byte of the payload
+;       region was not written to.  The type/length field can be set explicitly
+;       with NETP_XMIT_TYPE, in which case it will not be altered by this
+;       routine.
+;
+;   After this call, the fields above will be considered explicitly set.  This
+;   routine will therefore only fill in defaults for the fields at most once
+;   per transmit buffer.
+;
+         glbsub  netp_xmit_def, regf0 | regf1
+
+         bufid_setup xdef_leave ;validate buffer ID, point FSR0 to descriptor
+;
+;   Make sure the type/length word is set.
+;
+         btfsc   indf0, xbfl_tywr ;type/length not already set ?
+         jump    xdef_donetylen ;already set, skip this section
+
+         addfsr0 xb_len - xb_flags ;point to LEN field
+         movff   postinc0, reg0 ;get data length into REG1:REG0
+         movff   indf0, reg1
+         mcall   netp_xmit_type ;set type/length to the value in REG1:REG0
+
+xdef_donetylen unbank        ;done with type/length field
+
+xdef_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_SEND
+;
+;   Send the packet in the transmit buffer identified by REG8.  The ID in REG8
+;   must be of a currently allocated transmit buffer.  This call does not
+;   deallocate the transmit buffer.  The packet can be sent any number of times
+;   until the transmit buffer is released by calling NETP_XMIT_RELEASE.
+;
+;   This implementation keeps transmit packets in the ZeroG scratch memory until
+;   transmission.  This allows multiple packets to be built and kept
+;   simultaneously by seperate tasks.  A fixed region of scratch memory is
+;   associated with every transmit descriptor, so no dynamic allocation of
+;   memory is required.  The RAW 1 window is permanently mounted to the scratch
+;   memory.
+;
+;   To transmit a packet, it is first copied to the data pool, since packets
+;   can't be transmitted from scratch memory.
+;
+         glbsub  netp_xmit_send, regf0 | regf1 | regf2 | regf3
+
+         bufid_setup xmit_leave ;validate buffer ID, point FSR0 to descriptor
+         mcall   netp_xmit_def ;fill in any defaults not explicitly set
+
+         bufpnt0 xb_len      ;point FSR0 to payload length in transmit descriptor
+         movlw   low wrofs_data ;make ZeroG size in REG1:REG0 and REG3:REG2
+         addwf   postinc0, w
+         movwf   reg0
+         movwf   reg2
+         movlw   high wrofs_data
+         addwfc  postdec0, w
+         movwf   reg1
+         movwf   reg3
+
+         mac_lock            ;acquire exclusive access to the ZeroG module
+         movlw   h'A0'       ;make opcode to allocate data pool memory
+         iorwf   reg1
+         gcall   zerog_raw0cmd ;allocate data pool mem and mount RAW 0 to it
+
+         xmit_adr 0          ;get scratch mem address of the packet in REG1:REG0
+         gcall   zerog_raw1ofs ;set RAW 1 index to start of packet
+         movf    reg2, w     ;make copy opcode with data length in REG1:REG0
+         movwf   reg0
+         movf    reg3, w
+         iorlw   h'F0'
+         movwf   reg1
+         gcall   zerog_raw0cmd ;copy the packet into the data pool at RAW 0
+
+         movff   reg2, reg0  ;make command to send packet (opcode = 0)
+         movff   reg3, reg1
+         gcall   zerog_raw0cmd ;transmit packet, deallocate data pool memory
+         mac_unlock          ;release lock on the ZeroG module
+
+xmit_leave unbank
+         leaverest           ;end of subroutine NETP_XMIT_SEND
+
+;*******************************************************************************
+;
+;   Subroutine NETP_XMIT_RELEASE
+;
+;   Release the network transmit buffer allocated with NETP_XMIT_ALLOC.  REG8
+;   must contain the buffer index returned by NETP_XMIT_ALLOC.  The transmit
+;   buffer will be available for re-use by subsequent calls to NETP_XMIT_ALLOC.
+;   No attempt must be made to use the buffer after it has been released.
+;
+         glbsub  netp_xmit_release, regf0 | regf1
+
+         bufid_setup xmr_leave ;validate buffer ID, point FSR0 to descriptor
+         clrf    indf0       ;mark the descriptor as unused
+
+xmr_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_TASK_RESET
+;
+;   Deallocate any resources the current task may have allocated here.  The
+;   MAC/PHY is unlocked if this task has it locked and all dynamic memory
+;   allocated by this task is released.
+;
+         glbsub  netp_task_reset, regf2 | regf8
+;
+;   Release the lock on the MAC/PHY if this task has it locked.
+;
+         dbankif gbankadr
+         btfss   flag_maclock ;some task has it locked ?
+         jump    ntr_unlk    ;no task has it locked, skip this section
+         movf    currtask, w ;get the ID of this task
+         xorwf   mac_locktsk, w ;compare to the locking task's ID
+         bnz     ntr_unlk    ;not us ?
+         mac_unlock          ;release the lock on the MAC/PHY
+ntr_unlk unbank              ;this tasks doesn't have the MAC/PHY locked
+;
+;   Release all the transmit buffers this task has allocated.
+;
+/if [> n_xmitdesc 0] then    ;configured for dynamic transmit buffer allocation ?
+         loadk8  reg8, 0     ;init ID of current buffer descriptor
+         loadk8  reg2, n_xmitdesc ;init loop counter
+ntr_xmbloop unbank           ;back here to check each new transmit buffer
+         mcall   xmit_point  ;point FSR0 to the buffer descriptor indexed by REG8
+         btfss   indf0, xbfl_inuse ;this descriptor is in use ?
+         jump    ntr_xmbnext ;no, skip it
+         dbankif gbankadr
+         swapf   currtask, w ;get the ID of this task in high nibble
+         xorwf   indf0, w    ;compare to ID of task that owns this buffer
+         andlw   b'11110000' ;mask in only task ID
+         bnz     ntr_xmbnext ;not us ?
+         mcall   netp_xmit_release ;release this buffer
+ntr_xmbnext unbank           ;advance to next descriptor
+         incf    reg8        ;make 0-N index of next descriptor
+         decfsz  reg2        ;count one less descriptor left to do
+         jump    ntr_xmbloop ;back to do the next descriptor
+  /endif
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NETP_CHECKLINK
+;
+;   Check the network link status and update FLAG_LINK accordingly.  FLAG_LINK
+;   is set if we have network link and reset if not.
+;
+;   WARNING:  Any registers not preserved by a task swap may be trashed.
+;
+;   This implementation does nothing because FLAG_LINK is maintained by the
+;   task that reads messages from the ZeroG module.
+;
+         glbsub  netp_checklink, noregs
+
+         leaverest
+
+;*******************************************************************************
+;
+;   ZeroG receiving task.
+;
+;   This task handles and interprets the data packets received from the ZeroG
+;   module.
+;
+netp_task                    ;task start point
+         movff   tick100ms, tsktick ;init last clock tick updated to
+         dbankif lbankadr
+         loadk8  cntsec, 10  ;init 100ms ticks until next 1 second tick
+         loadk8  arpsec, arpsec_k ;init to max time to send gratuitous ARP
+
+recvt_loop unbank            ;start of task main event loop
+         gcall   task_yield  ;give other tasks a chance to run
+         mac_lock            ;acquire exclusive access to the MAC
+;
+;   Read the host interrupt register and save its value in REG7.
+;
+         loadk8  reg2, 1     ;HOST_INTR register address
+         gcall   zerog_get8  ;read it into REG0
+         movff   reg0, reg7  ;save host interrupt conditions in REG7
+;
+;   Handle a data packet if one is available.  The ZeroG module is locked, and
+;   REG7 contains the value just read from the HOST_INTR register.
+;
+;   Data packets are copied from the FIFO to the special region in the ZeroG
+;   scratch memory we reserve for that purpose.  The rest of the system will
+;   read the data packet from the scratch memory.  This allows other messages to
+;   be received via the FIFO while the data packet is being processed.
+;
+;   Flag NETP_RECV is used to indicate when a data packet is available for
+;   processing in the scratch buffer.  This flag is set here when a new packet
+;   is read into the scratch buffer, and cleared by other tasks when done
+;   processing that packet.  A new packet can't be copied into the scratch
+;   buffer until the previous one has been fully processed.
+;
+         btfss   reg7, 6     ;a data packet is available ?
+         jump    no_data     ;no, skip this section
+         btfsc   flag_netp_recv ;have place to put new data packet ?
+         jump    no_data     ;no, skip this section
+         ;
+         ;   Mount RAW window 0 to the MAC.  This copies the received packet
+         ;   from the FIFO to memory where it can be accessed via RAW 0.  This
+         ;   also consumes the FIFO message so that the next message will be
+         ;   available via the FIFO.
+         ;
+         loadk16 reg0, h'8000' ;command for MAC --> RAW
+         gcall   zerog_raw0cmd ;do the copy, wait for completion
+
+         loadk8  reg2, 1     ;address of HOST_INTR register
+         loadk8  reg0, b'01000000' ;DATA MESSAGE READY bit
+         gcall   zerog_put8  ;clear the received packet event condition
+         ;
+         ;   Verify this is a Receive Data Inidication message, which has a
+         ;   preamble type of 3 and subtype of 1.  If not, discard the message.
+         ;
+         ;   The RAW 0 window index is at 0.
+         ;
+         gcall   zerog_raw0get ;get preamble type into REG0
+         movlw   3
+         xorwf   reg0, w
+         movwf   reg2
+         gcall   zerog_raw0get ;get preamble subtype into REG0
+         movlw   1
+         xorwf   reg0, w
+         iorwf   reg2, w
+         bz      data_is     ;this really is a new data packet ?
+
+         mac_unlock          ;release lock on the MAC
+         jump    recvt_loop  ;done handling this evetn
+
+data_is  unbank              ;this is a new data packet
+         ;
+         ;   Copy the packet data from RAW 0 to RAW 1.  RAW 1 is permanently
+         ;   mounted to the scratch RAM.  We reserve the beginning of this RAM
+         ;   for the last received data packet.  The data packet can't be left
+         ;   at RAW 0, because RAW 0 is also needed temporarily for transmitting
+         ;   packets.
+         ;
+         ;   The RAW0_BYTE_COUNT register indicates the size of the data that
+         ;   was copied to RAW 0, and must now be copied to RAW 1.
+         ;
+         loadk16 reg0, 0
+         gcall   zerog_raw0ofs ;set copy source start index
+         gcall   zerog_raw1ofs ;set copy destination start index
+         loadk8  reg2, h'26' ;read RAW0_BYTE_COUNT into REG1:REG0
+         gcall   zerog_get16
+         movlw   b'11110000' ;opcode for copy to RAW window
+         iorwf   reg1        ;make RAW command in REG1:REG0
+         gcall   zerog_raw1cmd ;copy packet from RAW 0 to RAW 1
+         ;
+         ;   Set up the local received packet state.
+         ;
+         loadk16 reg0, rdofs_datlen ;set index to the data length word
+         gcall   zerog_raw1ofs
+         gcall   zerog_raw1get ;get data length high byte
+         movff   reg0, reg1
+         gcall   zerog_raw1get ;get data length low byte
+         mac_unlock          ;done with the ZeroG module
+
+         movlw   low 8       ;subtract SNAP header and type/length word size
+         subwf   reg0
+         movlw   high 8
+         subwfb  reg1
+         btfsc   reg1, 7     ;length didn't go negative ?
+         jump    recvt_loop  ;length too low for valid packet, ignore it
+         movff   reg0, recv_len+0 ;set data length of the received packet
+         movff   reg1, recv_len+1
+         dbankif lbankadr
+         loadk16 recv_rdofs, 0 ;init read offset to first data byte
+         dbankif gbankadr
+         bsf     flag_netp_recv ;indicate a new received packet is available
+
+         jump    recvt_loop  ;done handling this event
+
+no_data  unbank              ;no new received data packet available
+;
+;   Process the management message if one is available.  The ZeroG module is
+;   locked, and REG7 contains the value just read from the HOST_INTR register.
+;
+         btfss   reg7, 7     ;a management message is available ?
+         jump    no_mgmt     ;no, skip this section
+
+         gcall   zerog_read_mgmt ;start message read, byte count into REG4:REG3
+         movlw   low 2       ;compute byte count - 2
+         subwf   reg3, w
+         movlw   high 2
+         subwfb  reg4, w
+         bn      mgmt_done   ;not even enough for type bytes, discard
+
+         gcall   zerog_read  ;get preamble type byte
+         movff   reg0, reg1
+         gcall   zerog_read  ;get preamble subtype byte
+         swapf   reg1        ;move type into high 4 bits
+         rlncf   reg1, w     ;get type shifted 5 bits left
+         iorwf   reg0        ;make combined type/subtype opcode
+         dispatch mgmsg_table ;dispatch to specific handler routine
+
+mgh_none unbank              ;dispatch routine to take no action
+mgmt_done unbank             ;done with this management message
+         mcall   done_messg  ;done with the message, release ZeroG module
+         jump    recvt_loop  ;done handling this event
+
+no_mgmt  unbank              ;no management message in FIFO
+;
+;   Check for new clock ticks and set event flags accordingly.
+;
+         dbankif lbankadr
+         movff   tick100ms, reg0 ;get current clock snapshot
+         movf    tsktick, w  ;get last clock value updated to
+         xorwf   reg0, w     ;compare to new clock value
+         bz      done_tick   ;no new clock tick ?
+         incf    tsktick     ;update last clock value current with
+         ;
+         ;   New 100ms clock tick.
+         ;
+         dbankif lbankadr
+         decfsz  cntsec      ;one less 100ms tick until 1 second tick
+         jump    done_tick
+         ;
+         ;   New 1 second clock tick.
+         ;
+         dbankif lbankadr
+         loadk8  cntsec, 10  ;reset 100ms ticks until next 1 second tick
+         ;
+         ;   Set flag to send ARP if we are fully connected to the network and
+         ;   ARP timer has expired.
+         ;
+         btfss   flg_assoc   ;associated (fully connected to the network) ?
+         jump    no_newarp   ;no, skip this section
+         dbankif lbankadr
+         decfsz  arpsec      ;one less second until send next ARP
+         jump    no_newarp   ;not time for another ARP yet
+         loadk8  arpsec, arpsec_k ;reset ARP send timer
+         bsf     flg_arp     ;indicate to send a ARP soon
+no_newarp                    ;skip to here on new new ARP required
+
+done_tick unbank             ;done with clock tick processing
+;
+;   Send gratuitous ARP if this has been flagged.  A ARP packet is sent
+;   periodically to keep the access point from timing out our connection.  It
+;   also lets other nodes on this segment know we exist.  For some reason, ARP
+;   requests don't seem to get to us initially, so other nodes can't find us
+;   until we send a ARP resolution with our address.
+;
+;   The ZeroG module is currently locked.
+;
+         btfss   flg_arp     ;need to send ARP ?
+         jump    no_arp      ;no
+         bcf     flg_arp     ;clear the event condition
+         ;
+         ;   Send the ARP packet.  A ARP packet is rather simple, so it will be
+         ;   sent by writing it directly to the output FIFO.
+         ;
+         gcall   zerog_write_data ;set up for writing data packet to the FIFO
+         write8  1           ;preamble type
+         write8  1           ;preamble subtype
+         write8  0           ;arbitrary packet ID, not used
+         write8  0           ;reserved byte
+
+         loadk16 reg0, h'FFFF' ;destination MAC address (broadcast)
+         gcall   zerog_write16
+         gcall   zerog_write16
+         gcall   zerog_write16
+
+         write8  h'AA'       ;SNAP header, required by ZeroG module
+         write8  h'AA'
+         write8  3
+         write8  0
+         write8  0
+         write8  0
+
+         write16 h'0806'     ;ARP packet protocol ID
+         write16 1           ;hardware address space type, ethernet
+         write16 h'0800'     ;protocol address space type, IP
+         write8  6           ;hardware address size
+         write8  4           ;protocol address size
+         write16 2           ;opcode, response
+
+         lfsr    0, our_mac
+         loadk8  reg0, 6
+         mcalll  write_ind   ;send our hardware address
+
+         lfsr    0, our_ip
+         loadk8  reg0, 4
+         mcalll  write_ind   ;send our protocol address
+
+         lfsr    0, our_mac
+         loadk8  reg0, 6
+         mcalll  write_ind   ;send target hardware address
+
+         lfsr    0, our_ip
+         loadk8  reg0, 4
+         mcalll  write_ind   ;send target protocol address
+
+         gcall   zerog_write_end ;done writing the packet, transmit it
+         mac_unlock          ;release lock on the ZeroG module
+         jump    recvt_loop  ;done handling this event
+
+no_arp   unbank
+;
+;   No event was found that needed handling.
+;
+         mac_unlock          ;release lock on the ZeroG module
+         jump    recvt_loop
+;
+;   Received management message handler routines.  These routines are jumped to
+;   via the dispatch table, which has a separate entry for each message type and
+;   subtype.
+;
+;   On entry, REG4:REG3 contains the total number of bytes in the message.  The
+;   message has been opened for reading from the FIFO, with the first two bytes
+;   (preamble type, preamble subtype) already read.  The next byte will be
+;   immediately after the preamble subtype.  The ZeroG module is locked.
+;
+;   Each of these routines must complete "quickly", and then jump to MGMT_DONE
+;   when done.  The code at this location will end the FIFO read, clear the
+;   message from the queue, and release the lock on the ZeroG module.
+;
+;*****************************
+;
+;   Local subroutine DONE_MESSG
+;
+;   This routine must be called when done with the current message being read
+;   from the FIFO.  It closes the message so that the next FIFO message, if any,
+;   becomes available.  The lock on the ZeroG module is also released.
+;
+         locsub  done_messg, regf0 | regf1
+
+         gcall   zerog_read_end ;end reading the message
+
+         loadk8  reg2, 1     ;address of HOST_INTR register
+         loadk8  reg0, b'10000000' ;MANAGEMENT MESSAGE READY bit
+         gcall   zerog_put8  ;clear the received packet event condition
+
+         mac_unlock          ;release lock on the ZeroG module
+
+         leaverest
+;
+;*****************************
+;
+;   Local subroutine RESULT_ABORT
+;
+;   Read the next byte from the FIFO, interpret it as a result code, and abort
+;   the message processing if the result is other than success (1).  This
+;   routine does not return if the result code indicates failure.
+;
+         locsub  result_abort, noregs
+
+         gcall   zerog_read  ;read the result code into REG0
+         dcfsnz  reg0, w     ;result indicates failure ?
+         return              ;indicates success, return to caller
+;
+;   Send response to indicate the failure and end processing of this event.
+;
+         clrf    stkptr      ;not returning, reset call stack to empty
+         mcall   done_messg  ;end reading message, release ZeroG module
+         gcall   send_mgmt_fail ;send notification of management request failure
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Local subroutine DISCARDN
+;
+;   Read and discard a number of sequential bytes from the FIFO.  REG0 contains
+;   the number of bytes to discard, and will be trashed.
+;
+         locsub  discardn, regf1
+
+         movf    reg0, w
+         skip_nz
+         return              ;no bytes to discard, nothing to do ?
+         movwf   reg1        ;init number of bytes left to read
+dscn_loop unbank
+         gcall   zerog_read  ;read one byte
+         decfsz  reg1        ;count one less byte left to do
+         jump    dscn_loop
+
+         leaverest
+;
+;*****************************
+;
+;   Macro DISCARD n
+;
+;   Read and discard the next N bytes from the FIFO.  REG0 is trashed.
+;
+discard  macro   n
+  if (n)==0                  ;nothing to do ?
+         exitm
+    endif
+  if (n)==1                  ;just one byte ?
+         gcall   zerog_read
+         exitm
+    endif
+         ;
+         ;   Multiple bytes.
+         ;
+         movlw   (n)
+         movwf   reg0
+         mcall   discardn
+         endm
+;
+;*****************************
+;
+;   Subroutine SAVEBN
+;
+;   Save the next N bytes from the FIFO in memory starting at where FSR0 is
+;   pointing.  FSR0 will be updated to point the next byte after the last saved.
+;   The number of bytes to to save is passed in REG0, which will be trahsed.
+;
+         locsub  savebn, regf1
+
+         movf    reg0, w
+         skip_nz
+         return              ;no bytes to discard, nothing to do ?
+         movwf   reg1        ;init number of bytes left to read
+saven_loop unbank
+         gcall   zerog_read  ;get this byte into REG0
+         movff   reg0, postinc0 ;stuff it into the target buffer
+         decfsz  reg1        ;count one less byte left to do
+         jump    saven_loop
+
+         leaverest
+;
+;*****************************
+;
+;   Macro SAVEB n
+;
+;   Read the next N bytes from the FIFO and save them in memory starting at
+;   where FSR0 is pointing.  FSR0 will be updated to point to the next byte
+;   after the last saved.  REG0 is trashed.
+;
+saveb    macro   n
+  if (n)==0                  ;nothing to do ?
+         exitm
+    endif
+  if (n)==1                  ;just one byte ?
+         gcall   zerog_read
+         movff   reg0, postinc0
+         exitm
+    endif
+         ;
+         ;   Multiple bytes
+         ;
+         movlw   (n)
+         movwf   reg0
+         mcall   savebn
+         endm
+;
+;*****************************
+;
+;   Get MAC parameter result.
+;
+;   The only MAC parameter we request is the MAC address, so this is assumed to
+;   be the response.  The message is discarded if anything makes it not look a
+;   MAC address response.
+;
+mgh_gmac unbank
+         mcall   result_abort ;abort on failure indication
+         discard 1           ;reserved byte
+
+         gcall   zerog_read  ;get the number of data bytes into REG0
+         movlw   6           ;the expected value
+         xorwf   reg0, w
+         skip_z
+         jump    mgmt_done   ;not the expected number of bytes, discard message
+         discard 1           ;reserved byte
+
+         lfsr    0, our_mac  ;set pointer where to write
+         saveb   6           ;set our system MAC address from the ZeroG value
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_macext ;MAC address set from externally
+         bsf     flg_mac     ;indicate ZeroG MAC address has been received
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Scan confirm.
+;
+;   We assume the scan was performed with a specific access point name, so there
+;   should be only a single scan result.  Even if multiple, only the information
+;   from the first result is used.  The returned access point name is not saved
+;   since it should be the same as the requested.
+;
+mgh_scan unbank
+         mcall   result_abort ;abort on failure indication
+         discard 2           ;reserved byte, last channel number
+         gcall   zerog_read  ;number of access point results returned
+         movf    reg0
+         skip_nz
+         jump    mgmt_done   ;no access points found ?
+;
+;   Save the information from the first access point result.  This fills in
+;   the BSSID and a additional 3 bytes in NETPBUF.
+;
+         lfsr    0, bssid    ;save the BSSID (access point MAC address)
+         saveb   6           ;BSSID (access point MAC address)
+
+         lfsr    0, netpbuf  ;set where to write subsequent data
+         discard 34          ;SSID characters, capabilities info
+         saveb   2           ;beacon period, units of 1.024ms
+         discard 14          ;various fields we don't need
+         saveb   1           ;channel number
+         discard 1           ;SSID length
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_rscan ;a valid scan result received
+         bsf     flg_scan    ;indicate scan result in scratch buffer
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Join confirm.
+;
+mgh_join unbank
+         mcall   result_abort ;abort on failure indication
+         discard 1           ;reserved byte
+
+         lfsr    0, netpbuf  ;init pointer to where to write the next byte
+         saveb   6           ;capability, WPA security, RSN security
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_rjoin ;successfully joined access point
+         bsf     flg_join    ;indicate joined
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Install WEP keys confirm.
+;
+mgh_wepk unbank
+         mcall   result_abort ;abort on failure indication
+         discard 1           ;reserved byte
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_rwepk ;WEP keys successfully installed
+         bsf     flg_key     ;indicate security key installed
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Calculated PSK result received.
+;
+mgh_cpsk unbank
+         mcall   result_abort ;abort on failure indication
+         discard 1           ;reserved byte
+
+         gcall   zerog_read  ;get the key returned indication byte
+         movlw   1           ;the expected value
+         xorwf   reg0, w
+         skip_z              ;is the expected value ?
+         jump    mgmt_done   ;no, discard this message
+
+         discard 1           ;reserved byte
+
+         lfsr    0, netpbuf  ;read the new PSK into NETBUF
+         saveb   32
+         mcall   done_messg  ;done with this message, release ZeroG module
+         status0 stat_net_gpsk ;received new computed PSK
+
+         lfsr    0, netpbuf  ;point where to get data from
+         loadk8  reg0, 32    ;number of bytes
+         gcall   set_wifikey ;write key to non-volatile memory, indicate up to date
+
+         bsf     flg_cpsk    ;indicate new PSK received and stored
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Install PMK confirm.
+;
+mgh_pmk  unbank
+         mcall   result_abort ;abort on failure indication
+         discard 1           ;reserved byte
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_rkey ;security key installed event
+         bsf     flg_key     ;indicate security key successfully installed
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Authenticate confirm.  The remaining bytes after the result byte appear not
+;   to be as documented in the manual, so we just assume authentication
+;   succeeded when the result code is 1, meaning operation succeeded normally.
+;
+mgh_auth unbank
+         mcall   result_abort ;abort on failure indication
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_rauth ;authentication confirmed event
+         bsf     flg_auth    ;indicate now in authenticated state
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   Associate confirm.
+;
+mgh_assoc unbank
+         mcall   result_abort ;abort on failure indication
+         mcall   done_messg  ;done with this message, release ZeroG module
+
+         status0 stat_net_rassoc ;associate confirm event
+         bsf     flg_assoc   ;indicate now in associated state
+         bsf     flg_arp     ;send ARP next opportunity
+         jump    recvt_loop  ;done handling this event
+;
+;*****************************
+;
+;   MAC parameter set confirm.
+;
+mgh_macc unbank
+         mcall   result_abort ;abort on failure indication
+         mcall   done_messg  ;done with this message, release ZeroG module
+         bsf     flg_macset  ;indicate received MAC parameter set confirm
+         jump    recvt_loop  ;done handling this event
+;
+;*******************************************************************************
+;
+;   Dispatch tables.  All the dispatch tables used by this module are grouped
+;   together here because they need to be in a separeate CODE_PACK section, as
+;   apposed to a CODE section for the executable code.
+;
+.netp_tbl code_pack
+;
+;*******************
+;
+;   WiFi security method dispatch table.  This is used in NETP_SETUP to run
+;   different code to authenticate depending on the WiFi security method.
+;
+         dsp_start wsec_table
+
+         dsp_entry [v net_wsec_none], nset_wsnone
+         dsp_entry [v net_wsec_wep64], nset_wswep64
+         dsp_entry [v net_wsec_wep128], nset_wswep128
+         dsp_entry [v net_wsec_wpa], nset_wswpa
+         dsp_entry [v net_wsec_wpa2], nset_wswpa2
+
+         dsp_end wsec_table
+;
+;*******************
+;
+;   Received management messages dispatch table.  The table index is the
+;   combined value with the preable type in the high 3 bits and the preamble
+;   subtype in the low 5 bits.  Messages that do not have a table entry are
+;   silently discarded.
+;
+         dsp_start mgmsg_table ;start of management messages dispatch table
+         ;
+         ;   Management confirm messages.
+         ;
+         dsp_entry (2 << 5) | 1, mgh_scan ;scan confirm
+         dsp_entry (2 << 5) | 2, mgh_join ;join confirm
+         dsp_entry (2 << 5) | 3, mgh_auth ;authenticate confirm
+         dsp_entry (2 << 5) | 4, mgh_assoc ;associate confirm
+         dsp_entry (2 << 5) | 5, mgh_none ;deauthenticate confirm
+         dsp_entry (2 << 5) | 6, mgh_none ;disassociate confirm
+         dsp_entry (2 << 5) | 7, mgh_none ;power management confirm
+         dsp_entry (2 << 5) | 8, mgh_pmk ;install PMK confirm
+         dsp_entry (2 << 5) | 9, mgh_none ;install WEP map confirm
+         dsp_entry (2 << 5) | 10, mgh_wepk ;install WEP default confirm
+         dsp_entry (2 << 5) | 11, mgh_none ;install temporal key confirm
+         dsp_entry (2 << 5) | 12, mgh_cpsk ;calculate PSK result
+         dsp_entry (2 << 5) | 13, mgh_none ;set WEP key ID confirm
+         dsp_entry (2 << 5) | 15, mgh_macc ;set MAC parameter confirm
+         dsp_entry (2 << 5) | 16, mgh_gmac ;get MAC parameter result
+         ;
+         ;   Management indicate messages.
+         ;
+         dsp_entry (4 << 5) | 1, mgh_none ;asynchronous disassociate
+         dsp_entry (4 << 5) | 2, mgh_none ;asynchronous deauthenticate
+         dsp_entry (4 << 5) | 3, mgh_none ;asynchronous authenticate
+         dsp_entry (4 << 5) | 4, mgh_none ;asynchronous connect status
+
+         dsp_end mgmsg_table

@@ -1,0 +1,52 @@
+;   General register definitions.  See STD.INS.ASPIC for a description
+;   of the general registers.
+;
+
+;
+;   Temporary W save area.  The variable TEMPW is used implicitly by some
+;   macros, and is assumed to be in bank 0.
+;
+  if create_tempw
+         defram  bankadr(0)
+tempw    res     1
+    endif
+;
+;   The "real" register names are REGn, and are declared
+;   as symbolic constants in STD.INS.ASPIC.  This allows their value to
+;   be known at assembly time.  Unfotunately, the debugger can't see
+;   symbolic constants, so separate global names are declared for the
+;   registers, called GREGn.  These symbols are not used in the source code
+;   and therefore never declared EXTERN.  They are only provided to aid
+;   in symbolically viewing the register values in the debugger.
+;
+  if fam_18
+.regs    udata_acs reg0
+    else
+.regs    udata_shr reg0
+    endif
+
+regs                         ;must be referenced in main routine
+         global  regs
+
+reg      set     0           ;init register number loop counter
+  while reg < numregs
+adr      set     reg0 + reg  ;make address of this register
+
+    if fam_17 && (adr == h'20') ;switch to non-global memory on 17C family ?
+.regs2   udata   adr
+      endif
+
+greg#v(reg) res  1
+         global  greg#v(reg)
+reg      set     reg + 1
+    endw
+
+adr      set     reg0 + reg  ;make address of this register
+  if fam_17 && (adr == h'20') ;switch to non-global memory on 17C family ?
+.regs    udata   adr
+    endif
+
+  if create_flags
+gflags   res     1           ;reserve space for FLAGS
+         global  gflags
+    endif

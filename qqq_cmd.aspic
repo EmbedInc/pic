@@ -1,0 +1,380 @@
+;   ***************************************************************
+;   * Copyright (C) 2015, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Command processor for a byte stream protocol.  Commands are received in
+;   packets starting with a opcode byte and followed by data bytes defined
+;   separately for each command.  A bi-directional stream of bytes is assumed,
+;   with wrapper routines and macros in this module that can be customized to
+;   receive from and write to the streams actually in use.  The Embed
+;   multi-tasking system is required by this module.
+;
+/include "qq2.ins.aspic"
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   name    string = "" ;unique name added to CMD<name>_xxx entry points
+/const   drain_startup bool = true ;draing and discard all input bytes at startup
+/const   nnop    integer = 16 ;number of NOP responses to send on startup
+stacksz  equ     32 + ntsksave ;task data stack size
+lbank    equ     1           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+lock_rsp res     1           ;mutex state for writing to response stream
+;
+;   Task data stack.  This is in its own linker section so that it can be placed
+;   separately.
+;
+.cmd[chars name]_stack udata
+cmd_stack res    stacksz     ;CMD_TASK private data stack
+
+/if debug then
+         global  lock_rsp
+  /endif
+
+
+.cmd[chars name] code
+;*******************************************************************************
+;
+;   Customizable routines and macros.  This section is the low level interface
+;   to the actual command and response streams.  The rest of the command
+;   processor only accesses the streams thru the code in this section.
+;
+
+;***************************************
+;
+;   Subroutine CMD_INIT
+;
+;   Initialize the state managed by this module.
+;
+         glbsub  cmd[chars name]_init, noregs
+
+         mutex_init rsp      ;init single-threaded lock for the response stream
+
+         popregs savedregs   ;restore registers saved on entry to routine
+         extern  cmds[chars name]_init
+         gjump   cmds[chars name]_init ;init command routines module, return to caller
+
+;***************************************
+;
+;   Subroutine CMD_GET8
+;
+;   Get the next command stream byte into REG0.
+;
+         glbsub  cmd[chars name]_get8
+         extern  uart_get
+         goto    uart_get    ;call get-byte routine and return to caller
+
+;***************************************
+;
+;   Subroutine CMD_PUT8
+;
+;   Send the byte in REG0 out the response stream.  Nothing is done if the
+;   caller is not holding the response stream lock.
+;
+         glbsub  cmd[chars name]_put8
+
+         mutex_skip_lock_us rsp ;we are holding the response stream lock ?
+         jump    put8_leave  ;no, ignore the request
+         gcall   uart_put    ;send the byte
+
+put8_leave unbank
+         leaverest
+
+;***************************************
+;
+;   Macro SKIP_CMDBYTE
+;
+;   Skip the next instruction if a command stream byte is immediately available.
+;
+skip_cmdbyte macro
+         skip_flag sin
+         endm
+
+;***************************************
+;
+;   Subroutine CMD_LOCK_OUT
+;
+;   Lock the response stream for exclusive access by this task.  This routine
+;   waits indefinitely until the lock is available.
+;
+         glbsub  cmd[chars name]_lock_out
+         mutex_lock rsp
+         leaverest
+
+;***************************************
+;
+;   Subroutine CMD_UNLOCK_OUT
+;
+;   Release the lock on the response stream, if held by this task.
+;
+         glbsub  cmd[chars name]_unlock_out
+         mutex_unlock rsp
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_START
+;
+;   Start the command stream processing task.  This routine is called during
+;   system initialization after all the modules have been individually
+;   initialized.
+;
+         glbsub  cmd[chars name]_start, regf0 | regf1 | regf2 | regf3 | regf4
+
+         task_create cmd_task, cmd_stack ;create command processing task
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_GET16
+;
+;   Get the next two bytes from the command stream as a 16 bit integer into
+;   REG1:REG0.  The bytes are assumed to be sent in most to least significant
+;   order.
+;
+         glbsub  cmd[chars name]_get16
+
+         mcall   cmd[chars name]_get8    ;get the high byte
+         movff   reg0, reg1
+         mcall   cmd[chars name]_get8    ;get the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_GET24
+;
+;   Get the next three bytes from the command stream as a 24 bit integer into
+;   REG2:REG1:REG0.  The bytes are assumed to be sent in most to least
+;   significant order.
+;
+         glbsub  cmd[chars name]_get24
+
+         mcall   cmd[chars name]_get8    ;get the high byte
+         movff   reg0, reg2
+         mcall   cmd[chars name]_get8
+         movff   reg0, reg1
+         mcall   cmd[chars name]_get8    ;get the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_GET32
+;
+;   Get the next four bytes from the command stream as a 32 bit integer into
+;   REG3:REG2:REG1:REG0.  The bytes are assumed to be sent in most to least
+;   significant order.
+;
+         glbsub  cmd[chars name]_get32
+
+         mcall   cmd[chars name]_get8    ;get the high byte
+         movff   reg0, reg3
+         mcall   cmd[chars name]_get8
+         movff   reg0, reg2
+         mcall   cmd[chars name]_get8
+         movff   reg0, reg1
+         mcall   cmd[chars name]_get8    ;get the low byte
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_PUT16
+;
+;   Send the 16 bits in REG1:REG0 over the response stream.  The bytes are sent
+;   in most to least significant order.
+;
+         glbsub  cmd[chars name]_put16
+
+         pushreg reg0        ;save REG0 (contains the low byte)
+
+         movff   reg1, reg0
+         mcall   cmd[chars name]_put8
+         popreg  reg0        ;restore the low byte into REG0
+         mcall   cmd[chars name]_put8
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_PUT24
+;
+;   Send the 24 bits in REG2:REG1:REG0 over the response stream.  The bytes are
+;   sent in most to least significant order.
+;
+         glbsub  cmd[chars name]_put24
+
+         pushreg reg0        ;save REG0 (contains the low byte)
+
+         movff   reg2, reg0
+         mcall   cmd[chars name]_put8
+         movff   reg1, reg0
+         mcall   cmd[chars name]_put8
+         popreg  reg0        ;restore the low byte into REG0
+         mcall   cmd[chars name]_put8
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_PUT32
+;
+;   Send the 32 bits in REG3:REG2:REG1:REG0 over the response stream.  The bytes
+;   are sent in most to least significant order.
+;
+         glbsub  cmd[chars name]_put32
+
+         pushreg reg0        ;save REG0 (contains the low byte)
+
+         movff   reg3, reg0
+         mcall   cmd[chars name]_put8
+         movff   reg2, reg0
+         mcall   cmd[chars name]_put8
+         movff   reg1, reg0
+         mcall   cmd[chars name]_put8
+         popreg  reg0        ;restore the low byte into REG0
+         mcall   cmd[chars name]_put8
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine CMD_TASK
+;
+;   This routines runs in a separate task.  It receives bytes from the command
+;   stream and processes them accordingly.  A task swap is performed explicitly
+;   when waiting on external conditions.  Most task swaps are done implicitly
+;   from CMD_GET8 and CMD_PUT8.
+;
+cmd_task unbank              ;task initial start point
+;
+;   Drain the input FIFO.  Startup glitches may have looked like valid data.
+;   This is only done if DRAIN_STARTUP is set to TRUE, which is a configuration
+;   constant defined at the start of this module.
+;
+/if drain_startup then
+
+loop_drain unbank
+         dbankif gbankadr
+         skip_cmdbyte        ;a input byte is immediately available ?
+         jump    done_drain  ;no, all buffered input bytes have been drained
+         mcall   cmd[chars name]_get8    ;read the buffered input byte
+         jump    loop_drain  ;back to check the buffer again
+done_drain dbankis gbankadr  ;input buffer has been completely drained
+
+  /endif
+;
+;   Send a bunch of NOP responses.  This is to ensure that the host is in sync
+;   with our reponse stream.  The number of NOP responses to send is set by the
+;   configuration constant NNOP at the top of this module.  This code is removed
+;   completely when NNOP is 0 or less.
+;
+/if [> nnop 0] then          ;configured to send at least one NOP ?
+         mcall   cmd[chars name]_lock_out ;get exclusive lock on the response stream
+         loadk8  reg1, [v nnop] ;init number of NOPs left to send
+         loadk8  reg0, rsp_nop ;get the opcode to send
+loop_nop unbank
+         mcall   cmd[chars name]_put8    ;send this NOP response
+         decfsz  reg1        ;count one less NOP left to do
+         jump    loop_nop    ;back to send next NOP
+         mcall   cmd[chars name]_unlock_out ;release lock on the response stream
+
+         gcall   task_yield  ;give other tasks a chance to run
+  /endif
+;
+;   Send a initial FWINFO response.  This calls the FWINFO command routine
+;   directly, which may trash all the REGn general registers.
+;
+         gcall   cm[chars name]_fwinfo ;call FINFO command routine directly
+;
+;   Get the next command and process it.  The call and data stacks are empty.
+;
+cmd_next unbank
+         mcall   cmd[chars name]_get8    ;get the opcode byte into REG0
+         ;
+         ;   Push the address of CMD_DONE onto the call stack.  This allows
+         ;   command routines to be implemented as subroutines.
+         ;
+         push                ;create new call stack level
+         movlw   low cmd[chars name]_done ;set the new entry to address of CMD_DONE
+         movwf   tosl
+         movlw   high cmd[chars name]_done
+         movwf   tosh
+         movlw   upper cmd[chars name]_done
+         movwf   tosu
+
+         dispatch cmd_table  ;jump to address for this command in dispatch table
+;
+;   Execution ends up here after done processing each command or if the command
+;   opcode was invalid.
+;
+cmd[chars name]_done unbank
+         clrf    stkptr      ;reset the call stack to empty
+         stack_set cmd_stack ;reset the data stack to empty
+         mcall   cmd[chars name]_unlock_out ;make sure we are not holding response stream lock
+         jump    cmd_next    ;back to get and process the next command
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro CMD_ENTRY n, command
+//
+//   Defines one dispatch table entry.  N is the 0-255 command opcode of this
+//   entry.  COMMAND defines the name of the external routine that executes the
+//   command.  The actual name of the external routine is CM<name>_<command>.
+//   Dispatch table entries must be defined in ascending opcode order.
+//
+/macro cmd_entry
+         extern  cm[chars name]_[arg 2]
+         dsp_entry [arg 1], cm[chars name]_[arg 2]
+  /endmac
+
+;*******************************************************************************
+;
+;   Commands dispatch table.
+;
+.cmd_table code_pack
+         dsp_start cmd_table
+         dsp_entry 0, cmd[chars name]_done ;NOP
+
+         cmd_entry 1, ping   ;send PONG
+         cmd_entry 2, fwinfo ;send FWINFO response
+
+         dsp_end cmd_table
+
+         end

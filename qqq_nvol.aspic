@@ -1,0 +1,98 @@
+;   ***************************************************************
+;   * Copyright (C) 2012, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module manages the non-volatile memory.  Actual access to the memory
+;   is performed thru the PROM module.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     0           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+
+;*******************************************************************************
+;
+;   EEPROM data layout and initial values.
+;
+.eedata  code_pack ee_start
+
+ee_xxx   db      27          ;example EEPROM byte with initial value
+
+
+.nvol    code
+;*******************************************************************************
+;
+;   Macro SET_PROMADR eeadr
+;
+;   Sets the PROM routines address to location corresponding to the address
+;   EEADR in the initial EEPROM data section.  The initial EEPROM data section
+;   is mapped to some out of the way place in program memory space in the HEX
+;   file.  The first byte of the EEPROM is defined at program memory address
+;   EE_START.  The PROM routines, however, work on a address scheme where the
+;   first byte is at 0.  This macro subtracts off the program memory offset and
+;   passes the appropriate value to PROM_ADR.
+;
+;   The PROM lock must be held when this macro in invoked.
+;
+;   Trashes REG1, REG2
+;
+set_promadr macro eeadr
+         movlw   low (eeadr - ee_start)
+         movwf   reg1
+         movlw   high (eeadr - ee_start)
+         movwf   reg2
+         gcall   prom_adr
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine NVOL_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  nvol_init, regf0 | regf1 | regf2
+
+         gcall   prom_lock   ;acquire exclusive access to the PROM routines
+
+         set_promadr ee_xxx
+         gcall   prom_read   ;read remaining lamp activations into LAMPLIFE
+
+         gcall   prom_unlock ;release lock on PROM routines
+
+         leaverest
+
+         end

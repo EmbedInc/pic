@@ -1,0 +1,19 @@
+;   Define global symbols and possibly additional build-time setup required by
+;   the EMCAN library file.  This file is intended to be included from the main
+;   include file of a project using the EMCAN library module.
+;
+/include "emcan_defs.ins.aspic" ;general definitions for EmCan
+
+/flag    emcan_appon         ;EmCan application-specific actions are enabled
+/flag    emcmd_ext           ;frame ID in EMCMD_ID is for extended frame
+/flag    emcan_rel           ;received frame has been released
+/flag    emcan_others        ;other device than this one seen on the bus
+/flag    emcan_ack           ;ACK already sent in response to current frame
+/flag    emcan_nack          ;send negative acknowledge (NACK) instead of ACK
+/flag    emcan_inbyte        ;at least one byte from host stream is available
+/flag    emcan_show          ;user-visible device identification is active
+/flag    emcan_cfgreq        ;config mode is requested by host
+/flag    emcan_cfgallow      ;allowed to enter config state if requested now
+/flag    emcan_config        ;in configuration mode, nvol changes allowed
+/flag    emcan_offline       ;operating off line, not requesting address
+/flag    emcan_reset         ;reset processor after orderly EmCan shutdown

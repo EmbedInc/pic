@@ -1,0 +1,96 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Subroutine FP24MAX
+;
+;   Find the larger of the two 24 bit floating point numbers in the low 24
+;   bits of REGA and REGB, and write the result to the low 24 bits of REGA.
+;
+;   See the comments in FP24FLT for a description of the floating point
+;   format.
+;
+.fp24max code
+         glbsub  fp24max, noregs
+;
+;   Compare the two numbers.  If REGA >= REGB then return, else jump
+;   to RET_B to return the value in REGB.
+;
+         btfsc   rega+2, 7   ;REGA is positive or zero ?
+         goto    rega_neg    ;REGA is negative
+         btfsc   regb+2, 7   ;REGB is positive or zero ?
+         return              ;REGA is positive, REGB negative, nothing to do
+         ;
+         ;   REGA and REGB are both positive or zero.  They can be compared
+         ;   as unsigned integers.
+         ;
+         movf    regb+2, w
+         subwf   rega+2, w   ;compare byte 2
+         skip_wle
+         goto    ret_b
+         skip_z
+         return
+
+         movf    regb+1, w
+         subwf   rega+1, w   ;compare byte 1
+         skip_wle
+         goto    ret_b
+         skip_z
+         return
+
+         movf    regb+0, w
+         subwf   rega+0, w   ;compare byte 0
+         skip_wle
+         goto    ret_b
+
+         return              ;REGA >= REGB, leave REGA untouched
+
+rega_neg                     ;REGA is negative
+         btfss   regb+2, 7   ;REGB is also negative ?
+         goto    ret_b       ;no, REGB definitely greater than REGA
+         ;
+         ;   Both numbers are negative.  They can be compared as unsigned
+         ;   integers but with the reverse sense of the result when the
+         ;   two numbers are not equal.
+         ;
+         movf    rega+2, w
+         subwf   regb+2, w   ;compare byte 2
+         skip_wle
+         goto    ret_b
+         skip_z
+         return
+
+         movf    rega+1, w
+         subwf   regb+1, w   ;compare byte 1
+         skip_wle
+         goto    ret_b
+         skip_z
+         return
+
+         movf    rega+0, w
+         subwf   regb+0, w   ;compare byte 0
+         skip_wgt
+         return
+;
+;   REGB is greater then REGA.  Copy REGB into REGA and return.
+;
+ret_b
+         movf    regb+0, w
+         movwf   rega+0
+         movf    regb+1, w
+         movwf   rega+1
+         movf    regb+2, w
+         movwf   rega+2
+         return

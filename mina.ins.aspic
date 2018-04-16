@@ -1,0 +1,26 @@
+;   Subroutine MINA
+;
+;   Set REGA to the minimum of REGA and REGB.
+;
+         extern  compa
+
+.mina    code
+         glbsub  mina, regff
+
+         gcall   compa       ;compare REGA to REGB
+         skip_fgt            ;A > B ?
+         goto    mina_leave
+;
+;   A is greater than B.  Copy B into A.
+;
+         movf    regb+0, w
+         movwf   rega+0
+         movf    regb+1, w
+         movwf   rega+1
+         movf    regb+2, w
+         movwf   rega+2
+         movf    regb+3, w
+         movwf   rega+3
+
+mina_leave                   ;common exit point
+         leave   regff

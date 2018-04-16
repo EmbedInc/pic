@@ -1,0 +1,508 @@
+;   ***************************************************************
+;   * Copyright (C) 2012, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Non-volatile memory implemented by program memory.
+;
+
+;*******************************************************************************
+;
+;   Check for invalid parameters.
+;
+/block
+  /var local ii integer
+  /var local jj integer
+
+  /set ii [rnd [log2 prog_writesz]]
+  /if [<> prog_writesz [exp 2 ii]] then
+    /show "  PROG_WRITESZ is not a power of 2."
+         error   PROG_WRITESZ
+         end
+    /stop
+    /endif
+
+  /set jj [rnd [log2 prog_erasesz]]
+  /if [<> prog_erasesz [exp 2 jj]] then
+    /show "  PROG_ERASESZ is not a power of 2."
+         error   PROG_ERASESZ
+         end
+    /stop
+    /endif
+
+  /if [> jj 8] then
+    /show "  Erase block size is too large."
+         error   PROG_ERASESZ
+         end
+    /stop
+    /endif
+
+  /if [> ii jj] then
+    /show "  Write block size is larger than erase block size."
+         error   PROG_WRITESZ
+         end
+    /stop
+    /endif
+  /endblock
+;
+;   Derived constants.
+;
+/var new ii integer          ;temp scratch for computing derived values
+
+/const   endpad  integer = [if debug_icd 1024 0] ;padding to add at end of prog mem
+/const   cachesz integer = [max prog_erasesz prog_writesz] ;size of the local cache
+/const   ofsmask integer = [- cachesz 1] ;make mask for cache address offset bits
+/const   cachmsk integer = [~ ofsmask] ;mask for cache chunk address bits
+/const   nblocks integer = [div [+ nvolsz cachesz -1] cachesz] ;N cache blocks
+/const   nvsize  integer = [* nblocks cachesz] ;total size of non-volatile memory
+/set ii [- [+ proglast 1] nvsize] ;raw nvol start address
+/set ii [and ii cachmsk]     ;snap it to block boundary
+/set ii [- ii endpad]        ;leave room for padding at end of memory
+/const   startadr integer = ii ;set final nvol mem region start address
+/const   nwblock integer = [div prog_erasesz prog_writesz] ;write blocks per erase block
+
+cachesz  equ     [v prog_erasesz]
+ofsmask  equ     [v ofsmask]
+cachmsk  equ     [v cachmsk]
+nwblock  equ     [v nwblock]
+
+/del ii                      ;delete temp scratch integer
+
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+cachadr  res     2           ;nvol address for start of cached data
+nvcache  res     cachesz     ;local copy of one minimum erasable/writeable chunk
+;
+;   Local flags in the access bank.
+;
+         defram  0
+nvol_flg res     1           ;individual flag bits, use FLG_xxx bit macros
+
+#define flg_cache nvol_flg, 0 ;the cache contains valid data
+#define flg_dirty nvol_flg, 1 ;the cached data has been altered since read
+
+
+.nvol_prog code
+;*******************************************************************************
+;
+;   Subroutine NVOL_INIT
+;
+;   Init the state managed by this module.
+;
+nvol_init glbsub
+
+         clrf    nvol_flg    ;init all flags to off
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NVOL_READ
+;
+;   Read the non-volatile byte at the address in REG2:REG1 into REG0.  Results
+;   are undefined when the address is past the end of the non-volatile memory.
+;   REG2:REG1 is incremented by one.  Successive calls to this routine therefore
+;   return successive non-volatile bytes.
+;
+nvol_read glbsub regf3
+;
+;   Check for whether the requested byte is in the cache or not.
+;
+         btfss   flg_cache   ;there is data in the cache ?
+         jump    rd_ncache   ;no
+         ;
+         ;   Make address offset into the cache in REG3.
+         ;
+         dbankif lbankadr
+         movf    cachadr+0, w
+         subwf   reg1, w
+         movwf   reg3
+         movf    cachadr+1, w
+         subwfb  reg2, w
+         skip_nborr          ;no borrow, adr is at or after cache start ?
+         jump    rd_ncache   ;target address is before cache start
+         ;
+         ;   Not in the cache if the address offset is greater than or equal to
+         ;   the cache size.  The cache size is guaranteed to fit in a byte.  W
+         ;   contains the high byte of the offset into the cache.
+         ;
+         addlw   0
+         bnz     rd_ncache   ;high byte non-zero, definitely past end of cache ?
+         movf    reg3, w     ;get offset into the cache
+         sublw   cachesz-1   ;compare to last valid offset
+         skip_wle            ;within the cache ?
+         jump    rd_ncache   ;no
+;
+;   The requested byte is in the cache, and REG3 contains the offset into the
+;   cache.
+;
+         lfsr    0, nvcache  ;init pointer to the start of the cache
+         movf    reg3, w     ;get offset into the cache
+         movff   plusw0, reg0 ;fetch the byte and return it in REG0
+         jump    rd_leave
+;
+;   The requested byte is not in our cache.  Go read it directly from the
+;   program memory.
+;
+rd_ncache unbank
+         clrf    tblptru
+         movlw   low nvol_base ;compute prog mem target address in TBLPTR
+         addwf   reg1, w
+         movwf   tblptrl
+         movlw   high nvol_base
+         addwfc  reg2, w
+         movwf   tblptrh
+         movlw   upper nvol_base
+         addwfc  tblptru
+
+         tblrd*              ;read the addressed byte into TABLAT
+         movff   tablat, reg0 ;return the byte in REG0
+
+rd_leave unbank              ;common exit point
+         incf    reg1        ;increment the address
+         movlw   0
+         addwfc  reg2
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NVOL_WRITE
+;
+;   Write the byte in REG0 to the non-volatile address in REG2:REG1.  REG2:REG1
+;   will be incremented by one.  Successive calls to this routine therefore
+;   write to successive non-volatile bytes.  The write is not performed if the
+;   address is past the end of the non-volatile memory.
+;
+;   Data written with this routine may be cached.  Cached data is not guaranteed
+;   to be written to the physical non-volatile memory until NVOL_FLUSH is
+;   called.
+;
+nvol_write glbsub regf3
+;
+;   Determine whether the addressed byte is currently in the cache or not.
+;
+         btfss   flg_cache   ;there is data in the cache ?
+         jump    wr_rdcache  ;no, go read it into the cache
+         ;
+         ;   Make address offset into the cache in REG3.  Jump to WR_NCACHE if
+         ;   it can be determined the addressed byte is not in the cache.
+         ;
+         dbankif lbankadr
+         movf    cachadr+0, w
+         subwf   reg1, w
+         movwf   reg3
+         movf    cachadr+1, w
+         subwfb  reg2, w
+         skip_nborr          ;no borrow, adr is at or after cache start ?
+         jump    wr_ncache   ;target address is before cache start
+         ;
+         ;   Not in the cache if the address offset is greater than or equal to
+         ;   the cache size.  The cache size is guaranteed to fit in a byte.  W
+         ;   contains the high byte of the offset into the cache.
+         ;
+         addlw   0
+         bnz     wr_ncache   ;high byte non-zero, definitely past end of cache ?
+         movf    reg3, w     ;get offset into the cache
+         sublw   cachesz-1   ;compare to last valid offset
+         skip_wgt            ;past the end of the cache ?
+         jump    wr_write    ;the address is within the cache
+
+wr_ncache unbank             ;the addressed byte is not in the cache
+         btfss   flg_dirty   ;the cached data has been altered ?
+         jump    wr_rdcache  ;no, ignore it
+
+         mcall   nvol_flush  ;write the cache data back to non-volatile memory
+;
+;   Read the block of non-volatile memory containing the addressed byte into the
+;   cache.
+;
+wr_rdcache unbank
+         ;
+         ;   Set CACHADR to the non-volatile memory start address of what will
+         ;   be in the cache.
+         ;
+         dbankif lbankadr
+         movf    reg1, w
+         andlw   low cachmsk ;set the cache block offset bits to 0
+         movwf   cachadr+0
+         movff   reg2, cachadr+1
+         ;
+         ;   Init TBLPTR to point to the program memory byte that will be in the
+         ;   first cache byte.
+         ;
+         dbankif lbankadr
+         clrf    tblptru
+         movlw   low nvol_base ;compute prog mem target address in TBLPTR
+         addwf   cachadr+0, w
+         movwf   tblptrl
+         movlw   high nvol_base
+         addwfc  cachadr+1, w
+         movwf   tblptrh
+         movlw   upper nvol_base
+         addwfc  tblptru
+
+         lfsr    0, nvcache  ;init pointer where to write the next byte
+         loadk8  reg3, cachesz ;init number of bytes left to do
+wr_rdbyte unbank             ;back here to read each new byte into the cache
+         tblrd*+             ;get this byte into TABLAT, advance source pointer
+         movff   tablat, postinc0 ;write the byte into the cache, advance write pointer
+         decfsz  reg3        ;count one less byte left to do
+         jump    wr_rdbyte   ;back to read the next byte into the cache
+
+         bsf     flg_cache   ;indicate there is now valid data in the cache
+;
+;   Write the byte into the cache, but don't set the dirty flag unless the byte
+;   is actually being changed.
+;
+wr_write unbank
+         lfsr    0, nvcache  ;point to first byte of the cache
+         movf    reg1, w     ;get low byte of nvol address
+         andlw   ofsmask     ;mask in only the cache address offset bits
+         addwf   fsr0l       ;point to the byte being addressed
+
+         movf    reg0, w     ;get the new byte value
+         xorwf   indf0, w    ;compare to the existing byte value
+         bz      wr_leave    ;not being changed, nothing more to do ?
+         ;
+         ;   The byte value is being changed.
+         ;
+         movff   reg0, indf0 ;write the new byte value into the cache
+         bsf     flg_dirty   ;cache has been changed from prog mem copy
+
+wr_leave unbank              ;common exit point
+         incf    reg1        ;increment the address
+         movlw   0
+         addwfc  reg2
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine NVOL_FLUSH
+;
+;   Write any cached and changed non-volatile data to the physical non-volatile
+;   memory.  Writes performed with NVOL_WRITE may be cached transparently to
+;   the caller.  The new data will be returned by NVOL_READ whether it is cached
+;   or not.  However, the new data will not survive a power down unless it is
+;   physically written to the non-volatile memory.  The only way to guarantee
+;   that is to call this routine.
+;
+;   No physical write is performed if there is no cached changed data.
+;
+nvol_flush glbsub regf1 | regf2
+
+         btfss   flg_cache   ;there is valid data in the cache ?
+         jump    fl_leave    ;no
+         btfss   flg_dirty   ;that data has been changed ?
+         jump    fl_leave    ;no
+;
+;   Erase the program memory covered by the cache.
+;
+         ;
+         ;   Put the program memory address corresponding to the first byte of
+         ;   the cache into TBLPTR.
+         ;
+         dbankif lbankadr
+         clrf    tblptru
+         movlw   low nvol_base
+         addwf   cachadr+0, w
+         movwf   tblptrl
+         movlw   high nvol_base
+         addwfc  cachadr+1, w
+         movwf   tblptrh
+         movlw   upper nvol_base
+         addwfc  tblptru
+         ;
+         ;   Do the erase.
+         ;
+         setreg  b'10010100', eecon1
+                 ; 1-------  select flash memory, not data EEPROM
+                 ; -0------  normal address space, not configuration space
+                 ; --X-----  unused
+                 ; ---1----  select flash erase function
+                 ; ----0---  clear any previous write error condition
+                 ; -----1--  enable writing and erasing
+                 ; ------0-  don't try to start write now
+                 ; -------0  don't start read now
+         intr_off            ;temp disable interrupts
+         movlw   h'55'       ;perform the unlock sequence
+         movwf   eecon2
+         movlw   h'AA'
+         movwf   eecon2
+         bsf     eecon1, wr  ;start the erase
+         nop
+         nop
+         intr_on             ;re-enable interrupts
+;
+;   Write the cache data to the newly erased program memory block.  TBLPTR is
+;   pointing to where to write the first byte.
+;
+;   Register usage in this section:
+;
+;     REG1  -  Number of write blocks left to do.
+;
+;     REG2  -  Number of bytes left in the current write block.
+;
+         tblrd*-             ;init destination pointer to last byte written
+         lfsr    0, nvcache  ;init source pointer to the first byte
+         loadk8  reg1, nwblock ;init number of write blocks left to do
+fl_wblock unbank             ;back here each new write block
+
+         loadk8  reg2, [v prog_writesz] ;init number of bytes left in this write block
+fl_wbyte unbank              ;back here each new byte to write
+         movff   postinc0, tablat ;fetch the data byte, update source pointer
+         tblwt+*             ;advance write pointer, write the data byte
+         decfsz  reg2        ;count one less byte left in this write block
+         jump    fl_wbyte    ;back to write next byte
+         ;
+         ;   Do the write for this write block.  TBLPTR is pointing to the last
+         ;   byte of the block.
+         ;
+         setreg  b'10000100', eecon1
+                 ; 1-------  select flash memory, not data EEPROM
+                 ; -0------  normal address space, not configuration space
+                 ; --X-----  unused
+                 ; ---0----  select write, not erase
+                 ; ----0---  clear any previous write error condition
+                 ; -----1--  enable writing and erasing
+                 ; ------0-  don't try to start write now
+                 ; -------0  don't start read now
+         intr_off            ;temp disable interrupts
+         movlw   h'55'       ;perform the unlock sequence
+         movwf   eecon2
+         movlw   h'AA'
+         movwf   eecon2
+         bsf     eecon1, wr  ;start the write
+         nop
+         nop
+         intr_on             ;re-enable interrupts
+
+         decfsz  reg1        ;count one less write block left to do
+         jump    fl_wblock   ;back to do the next write block
+
+         bcf     flg_dirty   ;no changes between cache contents and the nvol memory
+
+fl_leave unbank              ;common exit point
+         leaverest
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine NVOL_FINISH
+//
+//   This preprocessor subroutine should be called after all the initial values
+//   for the non-volatile memory have been defined in the main module.  These
+//   definitions immediately follow this module.
+//
+//   This routine defines any remaining bytes to the erased value.  This pads
+//   the block of non-volatile memory to its full size.
+//
+//   This routine also writes the NVOL_ADR.INS.ASPIC file, which contains the
+//   non-volatile memory addresses of any labels defined here.  These labels
+//   can't be defined normally since they would have the program memory address,
+//   not the offset from the start of the non-volatile memory.
+//
+/subroutine nvol_finish
+  /var local pcent real      ;percent of non-volatile memory used
+  /var local ii integer      ;scratch integer
+  /var local name string     ;label name and offset constant
+  /var local lab string      ;label name
+  /var local ofs integer     ;offset for the label
+  /var local p integer       ;parse index
+  /var local tk string       ;scratch token or string
+
+  /call pbyte_finish         ;write out any partially defined line
+  /const nused integer = pbyte_offset ;save number of used nvol bytes
+
+  /block                     ;define the remaining bytes to the erased value
+    /if [< pbyte_offset nvsize] then
+         pbyte   16#FF
+      /repeat
+      /endif
+    /endblock
+  /call pbyte_finish
+  //
+  //   Show the memory usage.
+  //
+  /set tk [str nvsize " non-voltile bytes defined"]
+  /set pcent [* 100.0 [/ nused nvsize]]
+  /set tk [str tk ", " nused " used (" [fp pcent "sig 0 mxl 3 rit 1"] "%)"]
+  /set ii [- nvsize nused]
+  /set pcent [* 100.0 [/ ii nvsize]]
+  /set tk [str tk ", " ii " left (" [fp pcent "sig 0 mxl 3 rit 1"] "%)"]
+  /show "  " tk
+  //
+  //   Write the NVOL_ADR.INS.ASPIC file.
+  //
+  /writepush "nvol_adr.ins.aspic" ;writes now go to this file
+  /set ii 1                  ;init sequential number of next label to write
+  /block
+    /if [> ii pbyte_labeln] then
+      /quit
+      /endif
+    /set name [str "pbyte_labofs" ii] ;name of this label and offset constant
+    /set p 1                 ;init parse index to start of string
+    /call string_token [chars name] p lab
+    /call string_token [chars name] p tk
+    /set ofs [chars tk]
+
+    /set tk lab              ;init output line with label name
+    /call tabopcode tk
+    /set tk [str tk "equ"]
+    /call taboperand tk
+    /set tk [str tk ofs]
+    /write tk                ;write this line to the file
+
+    /set ii [+ ii 1]
+    /repeat
+    /endblock
+  /writepop                  ;pop back to writing the previous output file
+
+  /if [> endpad 0] then      ;end of memory is left unused ?
+;
+;   Unused space deliberately left at the end of program memory.  The RealIce,
+;   for example, uses this space.
+;
+    /set ii endpad           ;init number of bytes left to define
+    /block                   ;back here until all remaining bytes are defined
+      /if [<= ii 0] then
+        /quit
+        /endif
+         pbyte   16#FF
+      /set ii [- ii 1]
+      /repeat
+      /endblock
+    /call pbyte_finish
+    /endif                   ;end of non-zero padding case
+  /endsub
+
+;*******************************************************************************
+;
+;   Start the allocation of the non-volatile memory in program memory.
+;
+/call pbyte_finish           ;make sure all previously defined values are written
+/var exist pbyte_offset integer
+/var exist pbyte_memlab bool
+/var exist pbyte_saveofs bool
+/set pbyte_offset 0          ;track byte offset from start of nvol region
+/set pbyte_memlab false      ;don't define labels in memory
+/set pbyte_saveofs true      ;save offsets of all labels
+
+.nvol_dat code_pack [chars "h'" [int startadr "base 16 usin"] "'"]
+
+nvol_base                    ;start address of non-volatile memory in prog mem

@@ -1,0 +1,528 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Task handler.
+;
+
+;*******************************************************************************
+;
+;   Derived constants.
+;
+maxtask  equ     ntasks - 1  ;highest possible 0-N task number
+cssize   equ     cslev * progadrb ;bytes required for call stack data per task
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+  if fsrstack == 0
+         error   FSR0 as data stack pointer not supported by this module
+    endif
+
+;*******************************************************************************
+;
+;   Global state.
+;
+         defram  0           ;this state goes in the access bank
+
+currtask res     1           ;0-N number of the current task
+
+         global  currtask
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+;
+;   Task state pointers array.  This array has one entry for each possible task.
+;   The array index is the 0-MAXTASK number of the task.  Each entry is 2 bytes
+;   long and gives the starting address of the control state for that task.
+;   This data is initialized once and then not altered.
+;
+;   This state is assumed to be wholly in a single bank.
+;
+tasksp   res     0           ;start of task state pointers array
+ii       set     0
+  while ii <= maxtask
+task#v(ii)p res  2
+    if debug
+         global  task#v(ii)p
+      endif
+ii       set     ii + 1
+    endw
+;
+;   Per-task state.  Three distinct RAM areas are allocated for each
+;   task.  There is a two byte pointer in TASKSP (above) for each task.
+;   This pointer provides the start address of the per-task control
+;   state TASKnCTRL, where N is the 0-MAXTASK task number.  The third
+;   piece of per-task state is the data stack for that task.  These are
+;   allocated in the individual modules for each task, and can be
+;   different sizes between tasks.
+;
+;   TASKnCTRL per-task control state.  Each of these is fairly large
+;   since they must be able to save a complete copy of the hardware
+;   call stack.  Due to their size, each is allocated in a separate
+;   linker section .TASKnCTRL to allow the linker to place each
+;   individually.  They can be placed anywhere in memory regardless
+;   of page boundaries because the code here only accesses them
+;   indirectly via FSRs.
+;
+;   Byte offsets of the fields in each task control state.  These can not
+;   be altered without adjusting the code.  Some code makes implicit assumptions
+;   about the order of the fields in the task control state.
+;
+ncstack  equ     0           ;1-31 number of call stack entries, 0 = unused task slot
+f0       equ     1           ;FSR0 save area
+f1       equ     3           ;FSR1 save area
+f2       equ     5           ;FSR2 save area
+cstack   equ     7           ;start of call stack save area
+tcssz    equ     cstack + cssize ;size of whole task control state
+
+ii       set     0
+  while ii <= maxtask        ;loop once for each task slot
+
+.task#v(ii)ctrl udata
+task#v(ii)ctrl res 1         ;allocate the save area for this task
+task#v(ii)fsr0 res 2
+task#v(ii)fsr1 res 2
+task#v(ii)fsr2 res 2
+task#v(ii)cstack res cssize
+    if debug
+         global  task#v(ii)ctrl, task#v(ii)fsr0, task#v(ii)fsr1
+         global  task#v(ii)fsr2, task#v(ii)cstack
+      endif
+ii       set     ii + 1
+    endw
+
+
+.task    code
+;
+;*******************************************************************************
+;
+;   Subroutine TASK_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  task_init, noregs
+
+         clrf    currtask    ;this task will be task 0
+
+         dbankif lbankadr
+ii       set     0
+  while ii <= maxtask        ;loop once for each task slot
+
+         movlw   low task#v(ii)ctrl ;get low address byte of task save area
+         movwf   tasksp + (ii * 2) ;save in task pointer
+         movlw   high task#v(ii)ctrl ;get high address byte of task save area
+         movwf   tasksp + ((ii * 2) + 1) ;save it in task pointer
+    if ii == 0
+         movlw   1           ;get value to flag this task exists
+      else
+         movlw   0           ;get value to indicate this task does not exist
+      endif
+         movff   wreg, task#v(ii)ctrl ;init control byte for this task
+ii       set     ii + 1
+    endw
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TASK_NEW
+;
+;   Create a new task.  The address of the first byte of the new task's data
+;   stack is passed in REG1:REG0.  The task's initial start address is passed
+;   in REG4:REG3:REG2.  The new task will be initialized to have an empty
+;   call stack and data stack.  REG4 is ignored on processors with only
+;   64Kb of program memory or less (when PROGADRB is 2 instead of 3).
+;
+;   For the set of registers listed in TSKSAVE, their initial values in the new
+;   task will be whatever they are on entry to this routine.  This means that
+;   any registers listed in TSKSAVE and not used to pass values to this routine
+;   can be used to pass startup values to the new task.  The registers other
+;   than those listed in TSKSAVE will be initially undefined in the new task.
+;
+;   The existing task will continue to run.  The new task will not be run
+;   until TASK_YIELD is called at least once.
+;
+;   The processor is restarted on an attempt to create a new task if all
+;   task slots are already in use.  This would be a serious firmware bug from
+;   which there is no reasonable recovery.
+;
+         glbsub  task_new, regf0 | regf1
+
+  if fsrsc2_save
+         pushreg fsr#v(fsrsc2)l
+         pushreg fsr#v(fsrsc2)h
+    endif
+;
+;   Set FSR0 pointing to the first unused task save area.
+;
+         pushreg reg5        ;temp save REG5 so it can be used here
+
+         movlw   ntasks      ;init max number of save areas left to check
+         movwf   reg5
+         lfsr    fsrsc2, tasksp ;init to first task pointer
+tkn_loop unbank              ;back here to check out each new task save area
+         movff   postinc#v(fsrsc2), fsr0l ;point FSR0 to this task save area
+         movff   postinc#v(fsrsc2), fsr0h
+         movf    indf0
+         bz      tkn_fnd     ;found empty task save area ?
+         decfsz  reg5        ;count one less save area left to check
+         jump    tkn_loop    ;back to check next save area
+
+         reset               ;no empty save areas, fatal error
+
+tkn_fnd  unbank              ;found empty save area.
+         popreg  reg5        ;restore the original REG5
+;
+;   FSR0 is pointing to the start of the save area for this new task, and all
+;   REGn general registers are as they were when this routine was called.
+;
+;   Init the data stack of the new task.  It will contain all the registers
+;   listed in TSKSAVE pushed in forwards order.  The second scratch FSR will be
+;   left pointing to the first free byte on the new task stack.
+;
+         movff   reg0, fsr#v(fsrsc2)l ;point the second scatch FSR to task data stack
+         movff   reg1, fsr#v(fsrsc2)h
+
+iireg    set     0           ;init REGn register number
+  while iireg < numregs      ;once for each possible register
+    if tsksave & regf#v(iireg) ;this register saved on task swaps ?
+         movff   reg#v(iireg), postinc#v(fsrsc2) ;push this reg onto task stack
+      endif
+iireg    set     iireg + 1   ;advance to next register number
+    endw                     ;back to process new register number
+
+  if tsksave & regff         ;FLAGS register saved on task swaps ?
+         movff   flags, postinc#v(fsrsc2) ;push FLAGS onto new task stack
+    endif
+;
+;   Initialize the new task's save area.
+;
+         ;
+         ;   The first byte is the number of call stack entries.  This byte is
+         ;   currently 0 since that is the indicator this save area is unused.
+         ;   It will be 1 since the task start address will be the only entry
+         ;   for a newly created task.
+         ;
+         incf    postinc0    ;the start address will be the only call stack entry
+         ;
+         ;   Initialize all the task's FSRs to be set up as the data stack pointer.
+         ;   Currently the second scratch FSR is pointing to the first unused byte
+         ;   of the new task's data stack, and REG1:REG0 is pointing to the first
+         ;   byte of the stack.
+         ;
+         ;   The data stack pointer must be initialized to where it would be
+         ;   after the state saved accross a task swap has been pushed onto the
+         ;   empty stack.  The remaining FSRs are set up as if they were stack
+         ;   pointers for the empty stack.  This is compatible with the frame
+         ;   pointer mechanism used by C18.
+         ;
+         ;   If using the normal Embed Inc stack convention, then the stack pointer
+         ;   address for an empty stack is one address before the first stack byte.
+         ;   If C18 compatibility is enabled, then this will be the first stack
+         ;   byte.
+         ;
+  if c18comp == 0
+         movlw   0
+         decf    reg0        ;make stack pointer for empty stack in REG1:REG0
+         subwfb  reg1
+         movf    postdec#v(fsrsc2) ;current stack pointer in second FSR
+    endif
+
+         movff   reg0, postinc0 ;set FSR0 initial value
+         movff   reg1, postinc0
+
+  if fsrstack == 1           ;set FSR1 initial value
+         movff   fsr#v(fsrsc2)l, postinc0
+         movff   fsr#v(fsrsc2)h, postinc0
+    else
+         movff   reg0, postinc0
+         movff   reg1, postinc0
+    endif
+
+  if fsrstack == 2           ;set FSR2 initial value
+         movff   fsr#v(fsrsc2)l, postinc0
+         movff   fsr#v(fsrsc2)h, postinc0
+    else
+         movff   reg0, postinc0
+         movff   reg1, postinc0
+    endif
+         ;
+         ;   Initialize the call stack save area of the new task.  For a new
+         ;   task, this only contains the restart address, which is the initial
+         ;   execution start address that was passed in REG4:REG3:REG2.  REG4 is
+         ;   not used on machines that have little enough program memory so that
+         ;   only 2 address bytes are needed.
+         ;
+         movff   reg2, postinc0 ;set restart address as the task start address
+         movff   reg3, postinc0
+  if progadrb >= 3
+         movff   reg4, postinc0
+    endif
+;
+;   Restore the second scratch FSR if the calling convention in use requires
+;   it.  In that case, the value of this FSR was saved on the data stack on
+;   entry.
+;
+  if fsrsc2_save
+         popreg  fsr#v(fsrsc2)h
+         popreg  fsr#v(fsrsc2)l
+    endif
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine TASK_YIELD_SAVE
+;
+;   Like TASK_YIELD except that all the general registers REG0 - REGn are
+;   preserved.
+;
+;   TASK_YIELD_SAVE is only implemented as a separate routine if it saves more
+;   state than TASK_YIELD.  TSKSAVE is the mask of registers to always save,
+;   which is what TASK_YIELD saves.  TSKNSAVE are the flags for the remaining
+;   state that TASK_YIELD does not save.  If TASK_YIELD is configured to save
+;   everything, then TSKNSAVE is zero and TASK_YIELD_SAVE is implemented above
+;   as a synonim for TASK_YIELD.
+;
+         glbsub  task_yield_save, tsknsave
+
+  if tsknsave
+         mcall   task_yield
+         leaverest
+    endif
+;
+;   Subroutine TASK_YIELD must immediately follow here.
+;
+;*******************************************************************************
+;
+;   Subroutine TASK_YIELD
+;
+;   End the time slice of the current task, run all other tasks for a time
+;   slice, then resume the caller's task and return.  Only those general
+;   registers REG0-REGn indicated by TSKSAVE will be preserved.  All the FSRs
+;   are preserved.
+;
+;   The stack full and underflow flags will be reset unless the stack is
+;   actually full after entry to this routine.
+;
+         glbsub  task_yield, noregs
+;
+;   Save the state of the existing task.
+;
+         pushregs tsksave    ;save the registers to preserve on the old task stack
+         ;
+         ;   All the REGn general register can be trashed now.
+         ;
+         ;   Save the original FSR0 into REG1:REG0, then point FSR0 to the save
+         ;   are of the current task.
+         ;
+         movff   fsr0l, reg0 ;temp save FSR0 in REG1:REG0
+         movff   fsr0h, reg1
+
+         lfsr    0, tasksp   ;point to start of task table
+         rlncf   currtask, w ;get offset into task table for this task
+         addwf   fsr0l       ;point to task table entry for this task
+         movf    postinc0, w ;get task state address low byte
+         movff   indf0, fsr0h ;set high byte of pointer to task state
+         movwf   fsr0l       ;set low byte of pointer to task state
+         ;
+         ;   Save current task state in the explicit fields of the task save
+         ;   area.
+         ;
+         movf    stkptr, w   ;get the current call stack index and status bits
+         andlw   31          ;mask in only the call stack index
+         movwf   reg2        ;save number of call stack entries
+         movwf   postinc0    ;save hardware call stack index in task state
+         movff   reg0, postinc0 ;save original FSR0
+         movff   reg1, postinc0
+         movff   fsr1l, postinc0 ;save FSR1
+         movff   fsr1h, postinc0
+         movff   fsr2l, postinc0 ;save FSR2
+         movff   fsr2h, postinc0
+         ;
+         ;   Save the entries on the hardware call stack from the top of the
+         ;   stack to the bottom.  There is guaranteed to be at least one
+         ;   entry on the stack, which is the return address from this subroutine
+         ;   and will be the task restart address.  FSR0 is pointing to the
+         ;   start of the call stack save area for this task.  REG2 contains
+         ;   the number of call stack entries.
+         ;
+cs_save  unbank              ;back here to save each new call stack entry
+         movf    tosl, w     ;save the current stack entry in the save area
+         movwf   postinc0
+         movf    tosh, w
+         movwf   postinc0
+  if progadrb >= 3           ;all three program memory address bytes needed ?
+         movf    tosu, w
+         movwf   postinc0
+    endif
+         pop                 ;remove top level from stack, make next current
+         decfsz  reg2        ;count one less level left to save
+         jump    cs_save     ;back to save the next call stack entry
+;
+;   The old task state has been completely saved.  All state is trashable
+;   at this point.
+;
+
+;*****************************
+;
+;   Run the next task.
+;
+;   This entry point is jumped to from various locations in this module to run
+;   the next task in sequence after the one indicated by CURRTASK.
+;
+run_next unbank
+;
+;   Find the next used task save area and point FSR0 to it.  FSR0 can be used as
+;   a general pointer in this routine without disabling interrupts.  FSR1 or
+;   FSR2 could be the stack pointer and therefore need to be in a consistent
+;   state when an interrupt could occur.
+;
+ty_next  unbank              ;back here to try each new task slot
+         incf    currtask    ;make next sequential task number
+         movf    currtask, w ;get the next task number
+         sublw   maxtask     ;compare to last valid task number
+         skip_wle            ;new task number is within range ?
+         clrf    currtask    ;no, wrap back to task 0
+
+         lfsr    0, tasksp   ;point to start of task table
+         rlncf   currtask, w ;get offset into task table for this task
+         addwf   fsr0l       ;point to task table entry for this task
+         movf    postinc0, w ;get task state address low byte
+         movff   indf0, fsr0h ;set high byte of pointer to task state
+         movwf   fsr0l       ;set low byte of pointer to task state
+
+         movf    indf0       ;set Z if this task save area is unused
+         bz      ty_next     ;no task here, go back and try next ?
+;
+;   Restore the new task.  FSR0 is pointing to the state for that task.
+;
+         movff   postinc0, reg1 ;get number of call stack levels to restore
+         movff   postinc0, reg2 ;get FSR0 restore value into REG3:REG2
+         movff   postinc0, reg3
+         intr_off            ;disable interrupts while changing stack pointer
+         clrf    stkptr      ;init call stack of new task to empty
+         movff   postinc0, fsr1l ;restore FSR1
+         movff   postinc0, fsr1h
+         movff   postinc0, fsr2l ;restore FSR2
+         movff   postinc0, fsr2h
+         intr_on             ;re-enable interrupts
+         ;
+         ;   Restore the hardware call stack.  FSR0 is pointing to the first
+         ;   saved call stack entry, which must end up on the bottom of the
+         ;   restored call stack.  Since call stack entries will be restored
+         ;   by starting with an empty stack and pushing new values onto it,
+         ;   the entries must be restored in reverse memory order from the
+         ;   way they are stored in the task save area.
+         ;
+         ;   STKPTR is 0.
+         ;
+         ;     REG1  -  Number of call stack levels to restore, at least 1.
+         ;
+         ;     REG3:REG2  -  Value to restore FSR0 to.
+         ;
+         rlncf   reg1, w     ;get offset of last stack entry for 2 bytes/entry
+  if progadrb >= 3           ;using 3 bytes per stack entry ?
+         addwf   reg1, w     ;update byte offset for 3 bytes/entry
+    endif
+         addlw   h'FF'       ;make offset to last byte of last entry in W
+         addwf   fsr0l       ;point FSR0 to last byte of last saved call stack entry
+         movlw   0           ;propagate carry, save area can cross page boundary
+         addwfc  fsr0h
+
+cs_rest  unbank              ;back here to restore each new call stack entry
+         push                ;create new call stack entry
+  if progadrb >= 3           ;all three program memory address bytes needed ?
+         movf    postdec0, w
+         movwf   tosu
+    endif
+         movf    postdec0, w
+         movwf   tosh
+         movf    postdec0, w
+         movwf   tosl
+         decfsz  reg1        ;count one less entry left to restore
+         jump    cs_rest     ;back to restore next call stack entry
+
+         movff   reg2, fsr0l ;restore FSR0
+         movff   reg3, fsr0h
+
+         popregs tsksave     ;restore saved general registers from data stack
+
+         return              ;restart the new task
+
+;*******************************************************************************
+;
+;   Subroutine TASK_END
+;
+;   End the task identified by the 0-N task ID in REG0.  The ID of a task is in
+;   CURRTASK when it is running.
+;
+;   This routine returns, and the current task therefore continues to run,
+;   unless the current task is being ended.  In that case the next task will be
+;   run immediately and this routine will not return.
+;
+;   Nothing is done if REG0 is not a valid task ID.
+;
+         glbsub  task_end, noregs
+
+         movf    reg0, w     ;get the ID of the task to end
+         sublw   maxtask     ;compare to max possible task ID
+         skip_wle            ;task ID is within range ?
+         jump    te_leave    ;no, nothing to do
+;
+;   Point FSR0 to the task save area for the selected task.
+;
+         lfsr    0, tasksp   ;point to start of task table
+         rlncf   reg0, w     ;get offset into task table for this task
+         addwf   fsr0l       ;point to task table entry for this task
+         movf    postinc0, w ;get task state address low byte
+         movff   indf0, fsr0h ;set high byte of pointer to task state
+         movwf   fsr0l       ;set low byte of pointer to task state
+
+         clrf    indf0       ;mark this task save area as unused
+;
+;   The selected task has been deleted.  Run the next task if we just deleted
+;   the current task, otherwise return to the caller.
+;
+         movf    reg0, w     ;get the number of the deleted task
+         subwf   currtask, w ;compare to the current task
+         skip_nz             ;didn't just delete the current task ?
+         jump    run_next    ;did delete current task, go run next task
+
+te_leave unbank              ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine TASK_EXIT
+;
+;   End the current task.  This routine can be jumped to instead of called since
+;   it never returns and the state of the call stack on entry is irrelevant.
+;
+         glbent  task_exit
+;
+;   Point FSR0 to the task save area for the current task.
+;
+         lfsr    0, tasksp   ;point to start of task table
+         rlncf   currtask, w ;get offset into task table for this task
+         addwf   fsr0l       ;point to task table entry for this task
+         movf    postinc0, w ;get task state address low byte
+         movff   indf0, fsr0h ;set high byte of pointer to task state
+         movwf   fsr0l       ;set low byte of pointer to task state
+
+         clrf    indf0       ;mark this task save area as unused
+         jump    run_next    ;go run the next task

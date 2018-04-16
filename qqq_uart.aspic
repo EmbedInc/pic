@@ -1,0 +1,140 @@
+;   Low level handler for the UART.
+;
+;   *** Insert description here of the purpose of this UART and what it is
+;       connected to. ***
+;
+;   The following must be previously defined:
+;
+;     FLAG_SIN  -  Flag that indicates the UART has a input byte available.
+;       When this flag is set, UART_GET is guaranteed to return quickly with a
+;       byte without waiting.  This flag is not guaranteed to be up to date
+;       until UART_GET_CHECK is called.
+;
+;     FLAG_SOUT  -  Flag that indicates the UART and its output FIFO (when
+;       applicable) can immediately accept another byte.  When this flag is set,
+;       UART_PUT is guaranteed to return quickly without waiting.  This flag is
+;       not guaranteed to be up to date until UART_PUT_CHECK is called.
+;
+;   A set of preprocessor constants are used to configure this UART driver at
+;   build time.  This module defines these configuration constants, then
+;   includes the generic UART driver code in UART.INS.ASPIC, which configures
+;   itself according to the constants.  The preprocessor configuration constants
+;   are:
+;
+;     UN (integer)  -  UART number.  1-N indicates a particular UART on a
+;       processor with multiple UARTS.  0 indicates this is the single UART of
+;       this processor.  Default = 0.
+;
+;     BAUD (real)  -  Desired baud rate.  Default = 115200.
+;
+;     SHOW_BAUD (bool)  -  Show the actual baud rate during build.  Default =
+;       FALSE.
+;
+;     FINSZ (integer)  -  Number of data bytes the interrupt driven input FIFO
+;       must be able to hold.  A value of 0 causes no FIFO and interrupt service
+;       code to be created.  In that case polling and programmed I/O will be
+;       used to read from the UART.  Default = 0.
+;
+;     FOUSZ (integer)  -  Number of data bytes the interrupt driven output FIFO
+;       must be able to hold.  A vaue of 0 causes no FIFO and interrupt service
+;       code to be created.  In that case polling and programmed I/O will be
+;       used to write to the UART.  Default = 0.
+;
+;     USING_TXIE (bool)  -  UART transmit interrupt is switched on and off as
+;       appropriate by this module.  This is normal and the default when a
+;       output FIFO is in use.  This switch has no meaning when not using a
+;       output FIFO (FOUSZ = 0).
+;
+;       In some projects, it may be desirable to not have the UART transmitter
+;       ready cause a separate interrupt.  The transmit ready interrupt routine
+;       in this module may be called periodically by a foreground task, or it
+;       may be called periodically by another interrupt.  This can be useful to
+;       keep the latency of the other interrupt low.  The UART output checking
+;       routine is then called from the low latency interrupt after the high
+;       priority task is performed.  In that case the UART output ready
+;       must never be separately enabled, which is what this switch does when
+;       set to FALSE.  Default = TRUE iff output FIFO is in use (FOUSZ > 0).
+;
+;     TASKING (bool)  -  The Embed multi-tasking system is in use.  TASK_YIELD
+;       will be called inside any wait loops.  Default = FALSE.
+;
+;     LBANK (integer)  -  0-N number of the bank used for local state of this
+;       module.  Default = 1.
+;
+;     ENAB_IN (bool)  -  Enables UART receiving code.  Default = TRUE.
+;
+;     ENAB_OUT (bool)  -  Enables UART transmitting code.  Default = TRUE.
+;
+;     ENAB_INFLAG (bool)  -  Enables code to manage FLAG_SIN, which is then
+;       required to be defined externally.  Default = TRUE.
+;
+;     ENAB_OUTFLAG (bool)  -  Enables code to manage FLAG_SOUT, which is then
+;       required to be defined externally.  Default = TRUE.
+;
+;     USE_TXMT (bool)  -  Forces use of TXMT instead of TXIF to decide whether
+;       the UART is ready to accept another output byte.  This is exactly what
+;       TXIF is for, but some PICs have a bug where a NULL byte is inserted into
+;       the output stream if a new byte is written just as the previous is being
+;       promoted from the hardware output FIFO to the output shift register.  In
+;       that case, TXMT is the only reliable indication that a new byte can be
+;       written to the UART.  This bug is known to exist in some versions of the
+;       18F2550, for example.  The default is FALSE, which is the normal case.
+;
+;     RECV_READY (string)  -  Name of the output pin to assert when ready to
+;       receive another byte, and deassert when not.  This is used for flow
+;       control so that the sender can stop sending if our input FIFO gets near
+;       full and it might be overrun.  This signal is de-asserted when there is
+;       room for a few more bytes in the input FIFO to give the sender a chance
+;       to stop sending.  The empty string disables this feature, meaning no
+;       output line is controlled.  A receive FIFO must be defined when this
+;       feature is enabled.  Default is the empty string (feature disabled).
+;
+;     RECV_NREADY (integer)  -  De-assert the RECV_READY signal when the input
+;       FIFO has room for this many bytes or less.  The default is 4.  This
+;       setting is irrelevant when receiver flow control is disable (RECV_READY
+;       not defined or set to empty string).
+;
+;     NSEND_NAME (string)  -  Name of the input pin that is low when we are
+;       allowed to send and high when not.  This signal is used for flow
+;       control, and must be mapped to one of the INTn inputs.  The empty string
+;       disables this feature, meaning a byte will always be sent when one is
+;       available.  The default is the empty string (feature disabled).
+;
+;     NSEND_INT (integer)  -  The number of the INTn input identified by
+;       NSEND_NAME.  The value of this constant is irrelevant when NSEND_NAME is
+;       the empty string.  The default is 0.
+;
+;       When this feature is enabled (NSEND_NAME not empty string), then routine
+;       UART_INTR_NSEND must be jumped to from the INTn interrupt handler.
+;       UART_INTR_NSEND will jump to INTR_RET_UART when done.
+;
+/include "qq2.ins.aspic"
+;
+;   General UART configuration.
+;
+/const   un      integer = 0 ;1-N number of this UART, 0 = only
+/const   baud    real = 115200 ;desired baud rate
+/const   show_baud bool = false ;show actual baud rate during assembly
+/const   tasking bool = false ;using the multi-tasking system, PIC 18 only
+/const   lbank   integer = 1 ;bank for local state, FIFOs get their own sections
+;
+;   Receiver configuration.
+;
+/const   enab_in bool = true ;enable the receiver
+/const   enab_inflag bool = true ;maintain FLAG_SIN
+/const   finsz   integer = 16 ;input FIFO size, 0 disables FIFO and interrupt
+/const   recv_ready string = "" ;name of pin to drive low on recv ready
+/const   recv_nready integer = 4 ;de-assert RECV_READY this much room in FIFO
+;
+;   Transmitter configuration.
+;
+/const   enab_out bool = true ;enable the transmitter
+/const   enab_outflag bool = true ;maintain FLAG_SOUT
+/const   fousz   integer = 16 ;output FIFO size, 0 disables FIFO and interrupt
+/const   use_txmt bool = false ;disable transmit ready bug workaround using TXMT
+/const   nsend_name string = "" ;name of input pin that allows sending when low
+/const   nsend_int integer = 0 ;INTn input number NSEND_NAME is connected to
+
+/include "(cog)src/pic/uart.ins.aspic"
+
+         end

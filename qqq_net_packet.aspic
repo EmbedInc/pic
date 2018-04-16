@@ -1,0 +1,3 @@
+/include "qq2.ins.aspic"
+/include [str "(cog)src/pic/net_netp_" [lcase mactype] ".ins.aspic"]
+         end

@@ -1,0 +1,473 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Low level UART handler.
+;
+;   This version assumes multi-tasking is in use.  Therefore any wait loop
+;   includes a call to TASK_YIELD.
+;
+;   The following system state must be defined externally:
+;
+;     FLAG_SIN  -  Set by interrupt routine to indicate at least one byte is in
+;       the input FIFO.  This flag is not used if programmed I/O is used for
+;       input (FINSZ set to 0).
+;
+;     FLAG_SOUT  -  Set to indicate that there is room for at least one more
+;       byte in the output FIFO.  This flag is not used if programmed I/O is
+;       used for output (FOUSZ set to 0).
+;
+;     FLAG_UARTLOCK  -  Indicates that the UART output stream is locked by a
+;       task.
+;
+;     INTR_RET_UART  -  Jump point for interrupt routines to return to.  This
+;       external label is required when interrupts are used for at least one of
+;       the transfer directions (FINSZ and FOUSZ not both 0).
+;
+;   The interrupts must be low priority, if any.
+;
+/include "qq2.ins.aspic"
+
+         extern_flags        ;declare global flag bits EXTERN
+;
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+;   Setting a FIFO size to 0 causes programmed I/O to be used instead of
+;   interrupt driven I/O with FIFOs.
+;
+baud     equ     115200      ;serial line baud rate
+/const   finsz   integer = 16 ;data bytes input FIFO size, 0 = programmed I/O
+/const   fousz   integer = 8 ;data bytes output FIFO size, 0 = programmed I/O
+lbank    equ     1           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+finsz    equ     [v finsz]
+fousz    equ     [v fousz]
+/const   in_intr bool = [> finsz 0] ;using interrupts for input
+/const   out_intr bool = [> fousz 0] ;using interrupts for output
+/const   uart_intr bool = [or in_intr out_intr] ;any interrupts in use
+
+         uart_baud baud      ;set asm constants for UART configuration
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+/if uart_intr then
+         extern  intr_ret_uart ;interrupt routines jump here when done
+  /endif
+/var new s string
+
+/if in_intr
+  /then
+    /set s [str "Interrupt with " finsz " byte FIFO"]
+  /else
+    /set s [str "Programmed I/O"]
+  /endif
+/show "  UART input: " s
+
+/if out_intr
+  /then
+    /set s [str "Interrupt with " fousz " byte FIFO"]
+  /else
+    /set s [str "Programmed I/O"]
+  /endif
+/show "  UART output: " s
+;
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+;
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+/if in_intr then
+         fifo_define fifo_in, finsz ;define input FIFO
+  /endif
+
+/if out_intr then
+         fifo_define fifo_ou, fousz ;define output FIFO
+  /endif
+
+/if uart_intr then
+uart_itmp1 res   1           ;temp scratch for use by interrupt routine
+uart_itmp2 res   1
+  /endif
+
+
+.uart    code
+;
+;*******************************************************************************
+;
+;   Subroutine UART_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  uart_init, noregs
+;
+;   Initialize the local state.
+;
+/if in_intr then
+         dbankif lbankadr
+         fifo_init fifo_in   ;init input stream FIFO
+  /endif
+
+/if out_intr then
+         dbankif lbankadr
+         fifo_init fifo_ou   ;init output stream FIFO
+         dbankif gbankadr
+         bsf     flag_sout   ;indicate output FIFO can accept a byte
+  /endif
+;
+;   Set up the UART hardware.
+;
+         uart_setup          ;init to config from UART_BAUD, above
+;
+;   Enable the UART receive interrupt if interrupts are to be used for
+;   receiving.  The transmit interrupt (if used) is enabled whenever a byte is
+;   pushed onto the transmit FIFO.  Since the transmit FIFO (if in use) is now
+;   empty, the transmit interrupt is not enabled.
+;
+/if in_intr then
+         dbankif pie1
+         bsf     pie1, rcie  ;enable UART receive interrupts
+  /endif
+;
+;   Initialize global state.
+;
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Routine UART_INTR_RECV
+;
+;   This routine is jumped to from the interrupt handler during an interrupt
+;   when the UART has received a new byte.  This routine must jump back to
+;   INTR_RET_UART when done handling the interrupt condition.
+;
+;   Since this routine is running during an interrupt, it must not modify
+;   the general registers and other global state.  Any call stack locations
+;   used here will not be available to the foreground code.
+;
+/if in_intr then
+         glbent  uart_intr_recv ;UART receive interrupt handler
+;
+;   Save the original RCSTA register value in UART_ITMP1, then save the
+;   data byte in UART_ITMP2.  The UART incoming data register must be
+;   read to clear the interrupt condition, but the framing error bit
+;   is only valid before the data byte is read.
+;
+         dbankif rcsta
+         movf    rcsta, w    ;save snapshot of receive status reg in UART_ITMP1
+         dbankif lbankadr
+         movwf   uart_itmp1
+
+         dbankif rcreg
+         movf    rcreg, w    ;save data byte in UART_ITMP2, clear intr condition
+         dbankif lbankadr
+         movwf   uart_itmp2
+;
+;   Reset the receiver if an overrun occurred.  This is the only way to
+;   clear an overrun condition.
+;
+         dbankif rcsta
+         btfss   rcsta, oerr ;input overrun condition ?
+         jump    recv_derrov ;no overrun condition
+         bcf     rcsta, cren ;disable then enable receiver to clear the error
+         bsf     rcsta, cren ;re-enable the receiver
+recv_derrov                  ;done dealing with overrun error condition
+;
+;   Ignore the data byte if it was not properly followed by the stop bit.
+;   This is called a "framing error".
+;
+         dbankif lbankadr
+         btfsc   uart_itmp1, ferr ;no framing error with this data byte ?
+         jump    intr_leave  ;framing error, don't process this byte further
+;
+;   Stuff the received byte into the FIFO if there is room for it.
+;
+         dbankif lbankadr
+         ibankif lbankadr
+         fifo_skip_nfull fifo_in, finsz ;FIFO has room for another byte ?
+         jump    intr_leave  ;FIFO is full, ignore the new byte
+         fifo_put fifo_in, finsz, uart_itmp2 ;stuff the new data byte into the FIFO
+
+         dbankif gbankadr
+         bsf     flag_sin    ;indicate a serial line input byte is available
+
+intr_leave unbank            ;common code to return to interrupt handler
+         gjump   intr_ret_uart ;done handling this interrupt
+  /endif                     ;end of input interrupts in use
+;
+;*******************************************************************************
+;
+;   Subroutine UART_GET
+;
+;   Return the next serial line input byte in REG0.  If no input byte is
+;   available, this routine will continually call TASK_YIELD until one is.
+;
+;   WARNING: Registers not listed in TSKSAVE may be trashed.
+;
+//
+//********************
+//
+//   Interrupt version.
+//
+/if in_intr
+  /then
+         glbsub  uart_get, noregs
+;
+;   Wait until input byte is available.
+;
+get_wait unbank
+         dbankif gbankadr
+         btfsc   flag_sin    ;no input byte available ?
+         jump    get_dwait   ;a input byte is available
+         gcall   task_yield  ;let other tasks run for one time slice
+         jump    get_wait    ;no, go back and check again
+
+get_dwait dbankis gbankadr
+;
+;   The FIFO contains at least one input byte.
+;
+         dbankif lbankadr
+         ibankif lbankadr
+         intr_off_low        ;temp disable interrupts
+         fifo_get fifo_in, finsz, reg0 ;get the byte from the FIFO into REG0
+         fifo_skip_empty fifo_in ;no more input bytes available ?
+         jump    get_nemt    ;FIFO is not completely empty
+         dbankif gbankadr
+         bcf     flag_sin    ;indicate no input byte immediately available
+get_nemt dbank?              ;skip to here if FIFO is not completely empty
+         intr_on_low         ;re-enable interrupts
+
+         leaverest
+//
+//********************
+//
+//   Programmed I/O version
+//
+  /else
+         glbsub  uart_get, regf1
+;
+;   Wait until input byte is available.
+;
+get_wait unbank
+         dbankif pir1
+         btfsc   pir1, rcif  ;no input byte available ?
+         jump    get_dwait   ;a input byte is available
+         gcall   task_yield  ;let other tasks run for one time slice
+         jump    get_wait    ;no, go back and check again
+
+get_dwait dbankis gbankadr
+         movff   rcsta, reg1 ;save receive status of this byte
+         movff   rcreg, reg0 ;read the data byte
+;
+;   Reset the receiver if an overrun occurred.  This is the only way to clear an
+;   overrun condition.
+;
+         btfss   reg1, oerr  ;overrun condition ?
+         jump    recv_derrov ;no overrun condition
+
+         dbankif rcsta
+         bcf     rcsta, cren ;disable then enable receiver to clear the error
+         bsf     rcsta, cren
+         jump    get_wait    ;back to wait for next input byte
+
+recv_derrov unbank           ;done dealing with overrun error condition
+;
+;   Ignore the data byte if it was not properly followed by the stop bit.
+;   This is called a "framing error".
+;
+         btfsc   reg1, ferr  ;no framing error ?
+         jump    get_wait    ;fraing error, ignore this data byte
+
+         leaverest
+  /endif
+;
+;*******************************************************************************
+;
+;   Subroutine UART_LOCK
+;
+;   Lock the UART output for exclusive access to this task.  If the UART output
+;   is already locked, then TASK_YIELD will be called continually until it is
+;   unlocked before it is locked for this task.  This routine must not be called
+;   by a task that already has the UART locked, since that would hang the task
+;   indefinitely.
+;
+;   Data may only be sent via the UART with the UART output lock held, and the
+;   lock must be held continuously during sending of any one complete response.
+;   This guarantees that the response bytes from one task do not get interleaved
+;   with the response bytes from other tasks.
+;
+;   WARNING: Registers not listed in TSKSAVE may be trashed.
+;
+         glbsub  uart_lock, noregs
+
+lock_wait unbank
+         dbankif gbankadr
+         btfss   flag_uartlock ;UART is locked by a task ?
+         jump    lock_avail  ;no
+         gcall   task_yield  ;let all other tasks run for one time slice
+         jump    lock_wait   ;back to check the lock again
+
+lock_avail dbankis gbankadr  ;the UART is not locked
+         bsf     flag_uartlock ;indicate the UART output is now locked
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine UART_UNLOCK
+;
+;   Release the lock on the UART so that other tasks can use it.  This routine
+;   must only be called by the task that has the UART locked.
+;
+         glbsub  uart_unlock, noregs
+
+         dbankif gbankadr
+         bcf     flag_uartlock ;release UART output for use by other tasks
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine UART_PUT
+;
+;   Send the byte in REG0 over the serial line.  This routine waits until the
+;   UART is ready to accept a new data byte.  If not, then TASK_YIELD is called
+;   continually until the UART is ready.
+;
+;   WARNING: Registers not listed in TSKSAVE may be trashed.
+;
+//
+//********************
+//
+//   Interrupt version.
+//
+/if out_intr
+  /then
+         glbsub  uart_put, noregs
+;
+;   Wait until there is room in the output FIFO.  This FIFO is emptied by
+;   the interrupt routine, which sets FLAG_SOUT when the FIFO is not full.
+;
+put_wait
+         dbankif gbankadr
+         btfsc   flag_sout   ;no room in output FIFO ?
+         jump    put_dwait   ;there is room in the FIFO
+         gcall   task_yield  ;let other tasks run for one time slice
+         jump    put_wait    ;FIFO is full, go back and check again
+
+put_dwait dbankis gbankadr
+;
+;   The FIFO has room for at least one more byte.
+;
+         dbankif lbankadr
+         ibankif lbankadr
+         intr_off_low        ;temp disable interrupts
+         fifo_put fifo_ou, fousz, reg0 ;stuff the byte into the output FIFO
+         dbankif pie1
+         bsf     pie1, txie  ;make sure UART transmit interrupt is enabled
+;
+;   Clear FLAG_SOUT if the FIFO is full.  FLAG_SOUT is currently set.
+;
+         dbankif lbankadr
+         fifo_skip_full fifo_ou, fousz ;FIFO is completely full ?
+         jump    put_nfull   ;FIFO still has room, done with FLAG_SOUT
+         dbankif gbankadr
+         bcf     flag_sout   ;indicate serial line output FIFO is full
+put_nfull unbank             ;skip to here if FIFO not completely full
+         intr_on_low         ;re-enable interrupts
+
+         leaverest
+//
+//********************
+//
+//   Programmed I/O version
+//
+  /else
+         glbsub  uart_put, noregs
+
+put_wait unbank
+         dbankif pir1
+         btfsc   pir1, txif  ;UART is not ready for a new byte ?
+         jump    put_dwait   ;UART is ready
+         gcall   task_yield  ;let all other tasks run for one time slice
+         jump    put_wait    ;back to check UART again
+
+put_dwait dbankis pir1       ;the UART is ready to accept a new byte
+         movff   reg0, txreg ;send the byte in REG0
+
+         leaverest
+  /endif
+;
+;*******************************************************************************
+;
+;   Subroutine UART_INTR_XMIT
+;
+;   This routine is jumped to from the interrupt handler during an interrupt
+;   when the UART is ready to accept a new byte.  This routine must jump back
+;   to INTR_RET_UART when done handling the interrupt condition.
+;
+;   Since this routine is running during an interrupt, it must not modify
+;   the general registers and other global state.  Any call stack locations
+;   used here will not be available to the foreground code.
+;
+/if out_intr then
+         glbent  uart_intr_xmit ;UART transmit interrupt handler
+
+         dbankif gbankadr
+         bsf     flag_sout   ;FIFO guaranteed not to be full after this interrupt
+;
+;   Disable this interrupt if the serial line output FIFO is empty.  The
+;   interrupt is always enabled when a byte is put into the FIFO.
+;
+         dbankif lbankadr
+         fifo_skip_nempty fifo_ou ;a byte is available in the FIFO
+         jump    xmit_off    ;no byte available, disable this interrupt
+;
+;   There is at least one byte in the FIFO.  Send it.
+;
+         dbankif lbankadr
+         ibankif lbankadr
+         fifo_get fifo_ou, fousz, uart_itmp1 ;get the data byte into UART_ITMP1
+         movf    uart_itmp1, w ;get the data byte into W
+         dbankif txreg
+         movwf   txreg       ;write the data byte to the UART
+;
+;   Disable this interrupt if the FIFO is now empty.
+;
+         dbankif lbankadr
+         fifo_skip_empty fifo_ou ;nothing more left to send now ?
+         jump    xmit_leave  ;still more to send, don't disable the interrupt
+
+xmit_off dbankis lbankadr    ;disable the UART transmit ready interrupt
+         dbankif pie1
+         bcf     pie1, txie  ;disable this interrupt
+
+xmit_leave unbank
+         gjump   intr_ret_uart ;done handling the interrupt
+  /endif                     ;end of output interrupts in use
+
+         end

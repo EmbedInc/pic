@@ -1,0 +1,26 @@
+;   Subroutine STORA
+;
+;   Store the accumulator into a 32 bit value.
+;
+;   FSR points to the destination value.  The current indirect register bank
+;   must be set for access to the value.  FSR is trashed.
+;
+.stora   code
+         glbsub  stora, noregs
+
+         movf    reg0, w
+         movwf   indf
+
+         incf    fsr
+         movf    reg1, w
+         movwf   indf
+
+         incf    fsr
+         movf    reg2, w
+         movwf   indf
+
+         incf    fsr
+         movf    reg3, w
+         movwf   indf
+
+         leaverest

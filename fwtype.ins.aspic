@@ -1,0 +1,26 @@
+/if [exist "fwtype"] then    ;save any existsing FWTYPE in FWTYPE_PREV
+  /const fwtype_prev integer = fwtype
+  /del fwtype
+  /endif
+/if [exist "(cog)source/pic/fwtype.all" fnam] then ;include types file if it exists
+  /include "(cog)source/pic/fwtype.all"
+  /endif
+/if [exist "fwtype_prev"] then
+  /if [not [exist "fwtype"]] then
+    /const fwtype integer = fwtype_prev
+    /endif
+  /if [<> fwtype fwtype_prev] then
+    /show "  Firmware type ID conflict, " fwtype_prev " in firmware, " fwtype " in master data"
+         error   FWTYPE
+         end
+    /stop
+    /endif
+  /del fwtype_prev
+  /endif
+/if [not [exist "fwtype"]] then
+  /show "  FWTYPE not defined in firmware and master types file not available."
+         error   FWTYPE
+         end
+  /stop
+  /endif
+fwtype   equ     [chars [str "D'" fwtype "'"]] ;make assembler constant from Prepic constant

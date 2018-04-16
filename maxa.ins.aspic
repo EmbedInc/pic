@@ -1,0 +1,19 @@
+;   Subroutine MAXA
+;
+;   Set REGA to the maximum of REGA and REGB.
+;
+         extern  compa
+
+.maxa    code
+         glbsub  maxa, regff
+
+         gcall   compa       ;compare REGA to REGB
+         skip_flt            ;A < B ?
+         goto    maxa_leave
+;
+;   B is greater than A.  Copy B into A.
+;
+         copy32  rega, regb
+
+maxa_leave                   ;common exit point
+         leave   regff

@@ -1,0 +1,164 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Definitions required by application code to interface with the USB routines,
+;   and USB configuration information that may be used outside the low level USB
+;   module.
+;
+
+;********************
+;
+;   Configuration constants.
+;
+usb_vid  equ     5824        ;USB vendor ID of this device (Voti vendor ID)
+usb_pid  equ     1481        ;device ID within VID, U1EX USB demo firmware
+
+;********************
+;
+;   Global flags required by the USB routines.
+;
+/flag    usbev               ;a USB event was handled
+/flag    usb0reset           ;reset the USB endpoint 0 request processing logic
+/flag    usbsetadr           ;USB SET_ADDRESS request is in progress
+/flag    usbreset            ;a USB reset was received, for app use
+/flag    usbon               ;USB state is up and ready for app communication
+/flag    nameusb0            ;name get routines acquired by USB 0 handler
+
+;********************
+;
+;   Symbolic constants needed outside the USB module.
+;
+;   Status byte bit definitions used with USB_GETn and USB_PUTn calls.
+;
+         ;
+         ;   The low nibble contains bits that are returned by the calls.  Bits
+         ;   not used by a particular call are returned 0.  The sense of the bits
+         ;   are chosen so that a normal transfer of a byte results in a 0 nibble.
+         ;   Not all status bits are returned by all routines, and some status bits
+         ;   have different meanings depending on the routine.  See the individual
+         ;   subroutine documentation for the status bits returned.
+         ;
+usbs_noxf equ    0           ;a data byte was not transferred
+usbs_nrdy equ    1           ;not ready for byte, always 0 if a byte was transferred
+usbs_setu equ    2           ;at start of packet received via SETUP
+usbs_emty equ    2           ;the buffer is empty
+usbs_idle equ    3           ;no transactions pending, buffer empty this endpoint
+         ;
+         ;   The high nibble contains control bits.  Not all bits pertain to all
+         ;   calls.  See the individual subroutine descriptions for which bits
+         ;   are relevant to a particular call.  Bits not used by a particular
+         ;   call are ignored, but are reserved and should be sent as 0 for future
+         ;   compatibility.  This nibble is not altered by calls.  The sense of
+         ;   the bits are chosen so that all zeros is for a normal transfer of
+         ;   a byte.
+         ;
+usbc_noxf equ    4           ;do not transfer a byte whether possible or not
+usbc_nflu equ    5           ;do not flush buffer on PUT unless buffer full
+usbc_uncd equ    6           ;perform op unconditionally, see subroutine description
+;
+;   Symbolic constants for the various types of USB transfers.
+;
+iotype_ctrl equ  0           ;control transfers
+iotype_bulk equ  1           ;bulk transfers
+iotype_isch equ  2           ;isochronous transfers
+iotype_intr equ  3           ;interrupt transfers
+
+;********************
+;
+;   Define the endpoints in use and the size of their buffers.  The constants
+;   OUTnSZ and INnSZ must be defined for each endpoint, and indicate the size
+;   of the OUT and IN buffers, repsectively.  If a direction/endpoint is not
+;   used, the associated constant must be set to 0.
+;
+;   There will be three buffers of the indicated size allocated for each
+;   constant, plus some control state.  Note that the USB spec sets limitations
+;   on buffer sizes for the various transfer types.  The legal buffer
+;   sizes for control and bulk endpoints is 8, 16, 32, and 64 bytes.  Since
+;   endpoint 0 is only used for the mandatory control communication, there
+;   is little reason to make it's buffers larger than the minimum of 8 bytes.
+;
+out0sz   equ     8           ;buffer size for endpoint 0 OUT, must be enabled
+in0sz    equ     8           ;buffer size for endpoint 0 IN, must be enabled
+out1sz   equ     64          ;buffer size for endpoint 1 OUT
+in1sz    equ     64          ;buffer size for endpoint 1 IN
+out2sz   equ     0           ;buffer size for endpoint 2 OUT
+in2sz    equ     0           ;buffer size for endpoint 2 IN
+out3sz   equ     0           ;buffer size for endpoint 3 OUT
+in3sz    equ     0           ;buffer size for endpoint 3 IN
+out4sz   equ     0           ;buffer size for endpoint 4 OUT
+in4sz    equ     0           ;buffer size for endpoint 4 IN
+out5sz   equ     0           ;buffer size for endpoint 5 OUT
+in5sz    equ     0           ;buffer size for endpoint 5 IN
+out6sz   equ     0           ;buffer size for endpoint 6 OUT
+in6sz    equ     0           ;buffer size for endpoint 6 IN
+out7sz   equ     0           ;buffer size for endpoint 7 OUT
+in7sz    equ     0           ;buffer size for endpoint 7 IN
+out8sz   equ     0           ;buffer size for endpoint 8 OUT
+in8sz    equ     0           ;buffer size for endpoint 8 IN
+out9sz   equ     0           ;buffer size for endpoint 9 OUT
+in9sz    equ     0           ;buffer size for endpoint 9 IN
+out10sz  equ     0           ;buffer size for endpoint 10 OUT
+in10sz   equ     0           ;buffer size for endpoint 10 IN
+out11sz  equ     0           ;buffer size for endpoint 11 OUT
+in11sz   equ     0           ;buffer size for endpoint 11 IN
+out12sz  equ     0           ;buffer size for endpoint 12 OUT
+in12sz   equ     0           ;buffer size for endpoint 12 IN
+out13sz  equ     0           ;buffer size for endpoint 13 OUT
+in13sz   equ     0           ;buffer size for endpoint 13 IN
+out14sz  equ     0           ;buffer size for endpoint 14 OUT
+in14sz   equ     0           ;buffer size for endpoint 14 IN
+out15sz  equ     0           ;buffer size for endpoint 15 OUT
+in15sz   equ     0           ;buffer size for endpoint 15 IN
+;
+;   Define the type of transfers for each endpoint.  The constants INnTYPE
+;   and OUTnTYPE must be defined for each endpoint.  The value for unused
+;   direction/endpoints (buffer size set to 0) is irrelevant.  Each of
+;   these constants must be set to the value of one of the symbols IOTYPE_xxx.
+;   Note that the USB spec requires both directions for endpoint 0 to
+;   use control transfers.
+;
+out0type equ     iotype_ctrl ;endpoint 0 OUT transfer type, must be CTRL
+in0type  equ     iotype_ctrl ;endpoint 0 IN transfer type, must be CTRL
+out1type equ     iotype_bulk ;endpoint 1 OUT transfer type
+in1type  equ     iotype_bulk ;endpoint 1 IN transfer type
+out2type equ     iotype_bulk ;endpoint 2 OUT transfer type
+in2type  equ     iotype_bulk ;endpoint 2 IN transfer type
+out3type equ     iotype_bulk ;endpoint 3 OUT transfer type
+in3type  equ     iotype_bulk ;endpoint 3 IN transfer type
+out4type equ     iotype_bulk ;endpoint 4 OUT transfer type
+in4type  equ     iotype_bulk ;endpoint 4 IN transfer type
+out5type equ     iotype_bulk ;endpoint 5 OUT transfer type
+in5type  equ     iotype_bulk ;endpoint 5 IN transfer type
+out6type equ     iotype_bulk ;endpoint 6 OUT transfer type
+in6type  equ     iotype_bulk ;endpoint 6 IN transfer type
+out7type equ     iotype_bulk ;endpoint 7 OUT transfer type
+in7type  equ     iotype_bulk ;endpoint 7 IN transfer type
+out8type equ     iotype_bulk ;endpoint 8 OUT transfer type
+in8type  equ     iotype_bulk ;endpoint 8 IN transfer type
+out9type equ     iotype_bulk ;endpoint 9 OUT transfer type
+in9type  equ     iotype_bulk ;endpoint 9 IN transfer type
+out10type equ    iotype_bulk ;endpoint 10 OUT transfer type
+in10type equ     iotype_bulk ;endpoint 10 IN transfer type
+out11type equ    iotype_bulk ;endpoint 11 OUT transfer type
+in11type equ     iotype_bulk ;endpoint 11 IN transfer type
+out12type equ    iotype_bulk ;endpoint 12 OUT transfer type
+in12type equ     iotype_bulk ;endpoint 12 IN transfer type
+out13type equ    iotype_bulk ;endpoint 13 OUT transfer type
+in13type equ     iotype_bulk ;endpoint 13 IN transfer type
+out14type equ    iotype_bulk ;endpoint 14 OUT transfer type
+in14type equ     iotype_bulk ;endpoint 14 IN transfer type
+out15type equ    iotype_bulk ;endpoint 15 OUT transfer type
+in15type equ     iotype_bulk ;endpoint 15 IN transfer type

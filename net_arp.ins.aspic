@@ -1,0 +1,981 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Address resolution protocol.
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;     I/O pins:
+;
+;     Global flags:
+;
+;       FLAG_ARPCACHE  -  Used internally in this module.
+;
+;       FLAG_ARP15s  -  Used internally in this module.
+;
+;     Preprocessor symbols not defined in the NETWORK.INS.ASPIC include file:
+;
+         extern  our_mac     ;our MAC address, high to low byte order
+         extern  our_ip      ;our IP address, high to low byte order
+         extern  netmask     ;mask for our network segment, high to low order
+         extern  gateway     ;gateway IP address, high to low byte order
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   ncache  integer = n_arpcache ;number of cached resolved addresses
+ncache   equ     [v ncache]
+lbank    equ     [v lbank_arp] ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+/if [< ncache 1] then
+  /show "  NCACHE must be at least 1."
+         error   NCACHE
+  /stop
+  /endif
+
+/show "  Configured for " ncache " ARP cache entries."
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+t15s     res     1           ;100mS clock ticks until next 15 sec clock tick
+;
+;   ARP cache.  Each cache entry supplies the mapping of one IP address to the
+;   ethernet address of the hardware needed to communicate with that IP address.
+;   The fields in each cache entry are:
+;
+;     LIFE  -  8 bit number of 15 second ticks this entry has left to live.
+;       The entry is invalid when this value is 0.
+;
+;     IP  -  4 byte IP address, stored in high to low byte order.
+;
+;     AGE  -  8 bit number of 100mS ticks since information from this cache
+;       entry was requested, 254 max.  255 for empty entries only.
+;
+;     MAC  -  6 byte MAC address, stored in high to low byte order.
+;
+;   This cache is always accessed thru a pointer, so it is put in its own memory
+;   section since we don't need to know its bank at assembly time.
+;
+;   The symbol CACHENTSZ will automatically be defined as the size of one cache
+;   entry in bytes.
+;
+.arpcache udata
+
+arpcache res     0           ;start address of ARP cache
+
+/var new ii integer = 0
+/block
+
+cache[v  ii] res 0           ;symbol for start address for this cache entry
+ac_life[v ii] res 1          ;remaining life time
+ac_ip[v  ii] res 4           ;IP address, high byte first
+ac_age[v ii] res 1           ;time since last referenced
+ac_mac[v ii] res 6           ;MAC address
+
+  /if [= ii 0] then          ;just finished creating first cache entry ?
+cachentsz equ    $-cache0    ;size of each cache entry
+    /endif
+  /set ii [+ ii 1]
+  /if [< ii ncache] then
+    /repeat
+    /endif
+  /endblock
+         ;
+         ;   Names for the offsets of each of the fields from the start of the
+         ;   cache entry.
+         ;
+ac_life  equ     ac_life0 - arpcache
+ac_ip    equ     ac_ip0 - arpcache
+ac_age   equ     ac_age0 - arpcache
+ac_mac   equ     ac_mac0 - arpcache
+
+
+.arp     code
+
+;*******************************************************************************
+;
+;   Subroutine NET_ARP_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  net_arp_init, regf2
+
+         dbankif lbankadr
+         loadk8  t15s, 150   ;max 100mS ticks until next 15 second tick
+;
+;   Invalidate all the cache entries.
+;
+         loadk8  reg2, ncache ;init number of cache entries left to do
+         lfsr    0, arpcache ;point to start of first cache entry
+inv_loop unbank              ;back here to invalidate each new entry
+         clrf    postinc0    ;life = 0 indicates invalid entry
+         addfsr0 4           ;skip over IP address field
+         setf    postinc0    ;age = 255 required for invalid entries
+         addfsr0 6           ;skip over MAC address field
+         decfsz  reg2        ;count one less cache entry left to init
+         jump    inv_loop    ;back to init next cache entry
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro CACHENT ind, ofs
+;
+;   Set FSR0 pointing OFS bytes into the ARP cache entry indicated by IND.  IND
+;   must have a value from 0 to NCACHE-1, but this is not checked.  IND must be
+;   accessible with the current bank setting.  IND may be any of the REGn
+;   general registers.
+;
+cachent  macro   ind, ofs
+         lfsr    0, arpcache + ofs ;point to first cache entry
+         movf    ind, w      ;get the 0-N entry index
+         mullw   cachentsz   ;make offset to entry from start of cache
+         movf    prodl, w    ;add the offset to the pointer
+         addwf   fsr0l
+         movf    prodh, w
+         addwfc  fsr0h
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine ARP_LOCK
+;
+;   Lock the ARP cache for exclusive access by this task.  If the cache is
+;   already locked, then TASK_YIELD is called continually until it is released.
+;   All registers are preserved, including those trashed by TASK_YIELD.
+;
+         locsub  arp_lock, noregs
+
+lck_loop unbank
+         dbankif gbankadr
+         btfss   flag_arpcache ;cache is locked by another task ?
+         jump    lck_avail   ;cache is available
+         gcall   task_yield_save ;let other tasks run a bit
+         jump    lck_loop    ;back to check cache availability again
+
+lck_avail dbankis gbankadr   ;the ARP cache is available
+         bsf     flag_arpcache ;indicate it is now locked
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine ARP_UNLOCK
+;
+;   Release the lock on the ARP cache.  This allows other tasks to access it.
+;
+         locsub  arp_unlock, noregs
+
+         dbankif gbankadr
+         bcf     flag_arpcache ;indicate ARP cache not locked
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro WRITE1 kk
+;
+;   Write the 8 bit constant value KK to the next byte of the transmit buffer
+;   identified by REG8.
+;
+;   REG0 is trashed.
+;
+write1   macro   kk
+         movlw   (kk)
+         movwf   reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+         endm
+
+;*******************************************************************************
+;
+;   Macro WRITE2 kk
+;
+;   Write the 16 bit constant value KK to the next 2 bytes of the transmit
+;   buffer identified by REG8.  The word will be written in network byte order,
+;   which is high byte first.
+;
+;   REG0 is trashed.
+;
+write2   macro   kk
+         movlw   high (kk)
+         movwf   reg0
+         gcall   netp_xmit_write
+         movlw   low (kk)
+         movwf   reg0
+         gcall   netp_xmit_write
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine ARP_REQUEST
+;
+;   Send a broadcast ARP request to get the ethernet address for the IP address
+;   in REG7:REG6:REG5:REG4.  If a suitable transmit buffer can not be allocated,
+;   then the request is not sent.  The C flag is set if the request was sent and
+;   cleared if it was not.
+;
+         locsub  arp_request, regf0 | regf1 | regf8
+
+         loadk16 reg0, 28    ;pass minimum data size needed
+         gcall   netp_xmit_alloc ;try to allocate transmit buffer
+         btfss   reg8, 7     ;didn't get the buffer ?
+         jump    areq_buf    ;got the buffer, send the request packet
+         bcf     status, c   ;indicate failure
+         jump    areq_leave
+
+areq_buf unbank              ;transmit buffer has been allocated, ID in REG8
+         gcall   netp_xmit_bcast ;make this a broadcast packet
+
+         loadk16 reg0, h'0806' ;set type to ARP
+         gcall   netp_xmit_type
+
+         write2  h'0001'     ;HW address space is ethernet
+         write2  h'0800'     ;protocol address space is IP
+         write1  6           ;HW address size, bytes
+         write1  4           ;protocol address size, bytes
+         write2  h'0001'     ;ARP request opcode
+
+         movff   our_mac+0, reg0 ;our MAC address
+         gcall   netp_xmit_write
+         movff   our_mac+1, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+2, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+3, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+4, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+5, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         movff   our_ip+0, reg0 ;our IP address
+         gcall   netp_xmit_write
+         movff   our_ip+1, reg0
+         gcall   netp_xmit_write
+         movff   our_ip+2, reg0
+         gcall   netp_xmit_write
+         movff   our_ip+3, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         clrf    reg0
+         gcall   netp_xmit_write ;fill in zeros for unknown target MAC address
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         movff   reg7, reg0  ;IP address asking about
+         gcall   netp_xmit_write
+         movff   reg6, reg0
+         gcall   netp_xmit_write
+         movff   reg5, reg0
+         gcall   netp_xmit_write
+         movff   reg4, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         gcall   netp_xmit_def ;fill in default fields not previously set
+         gcall   netp_xmit_send ;send the packet
+         gcall   netp_xmit_release ;packet has been sent, done with transmit buffer
+         bsf     status, c   ;indicate success
+
+areq_leave unbank            ;common exit point, C flag all set
+         leavecheck
+
+;*******************************************************************************
+;
+;   Subroutine ARP_RESOLVE
+;
+;   Find the ethernet MAC address for sending packets to a particular IP
+;   address.  FSR0 points to the IP address on entry.  The IP address must be
+;   stored in high to low byte order.  If the MAC address is immediately
+;   available, then FSR0 is returned pointing to the MAC address, which is
+;   stored in high to low byte order.  If the MAC address is not immediately
+;   available, then FSR0 is returned 0 and a ARP request for the IP address is
+;   sent.
+;
+;   Since this routine sends a ARP request whenever the requested IP address is
+;   not in the ARP cache, applications should insert a sufficient delay between
+;   calls for the remote node to respond to the ARP request and the response
+;   to be processed here.  Two seconds is a reasonable retry wait time.
+;
+;   Algorithm:
+;
+;     If the IP address is found in the cache, then FSR0 is returned pointing
+;     to the MAC address of the cache entry.  If the IP address is not in the
+;     cache, then it is added, its lifetime set to maximum, but its MAC address
+;     set to invalid.  This simplifies processing of received ARPs since we only
+;     have to update existing cache entries.  ARPs for IP addresses not in the
+;     cache are ignored.
+;
+         glbsub  arp_resolve, regfa | regfb | regf8
+
+         movff   postinc0, reg7 ;get the IP address into REG7:REG6:REG5:REG4
+         movff   postinc0, reg6
+         movff   postinc0, reg5
+         movff   postinc0, reg4
+;
+;   Switch the IP address in in REG7:REG6:REG5:REG4 to that of the router if the
+;   original IP address is outside our network segment.  NETMASK contains the
+;   mask of the IP address bits that define our network, as apposed to nodes
+;   within our network segment.  Our IP address is in OUR_IP, and the IP address
+;   of the router is in GATEWAY.  A IP address is determined to be outside our
+;   network segment if the masked bits don't match our IP address.
+;
+         dbankif gbankadr
+         movf    reg7, w     ;compare high byte
+         xorwf   our_ip+0, w
+         andwf   netmask+0, w
+         movwf   reg0
+         movf    reg6, w     ;compare byte 2
+         xorwf   our_ip+1, w
+         andwf   netmask+1, w
+         iorwf   reg0
+         movf    reg5, w     ;compare byte 1
+         xorwf   our_ip+2, w
+         andwf   netmask+2, w
+         iorwf   reg0
+         movf    reg4, w     ;compare low byte
+         xorwf   our_ip+3, w
+         andwf   netmask+3, w
+         iorwf   reg0
+         bz      done_router ;requested IP address is within our network ?
+         ;
+         ;   The requested IP address is outside our network segment.
+         ;   Substitute the IP address of the router.
+         ;
+         movff   gateway+0, reg7
+         movff   gateway+1, reg6
+         movff   gateway+2, reg5
+         movff   gateway+3, reg4
+
+done_router                  ;done substituting routine address if needed
+;
+;   Search the cache for a entry with this IP address.
+;
+         mcall   arp_lock    ;lock the cache for our exclusive access
+         clrf    reg0        ;init index of next entry to examine
+lookloop unbank
+         cachent reg0, 0     ;point to the cache entry to examine this time
+         movf    postinc0
+         bz      looknext    ;this entry is empty ?
+
+         movf    postinc0, w ;compare entry IP address to the requested adr
+         xorwf   reg7, w
+         movwf   reg1
+         movf    postinc0, w
+         xorwf   reg6, w
+         iorwf   reg1
+         movf    postinc0, w
+         xorwf   reg5, w
+         iorwf   reg1
+         movf    postinc0, w
+         xorwf   reg4, w
+         iorwf   reg1
+         bnz     looknext    ;entry is not for the requested IP address ?
+         clrf    postinc0    ;reset time since this IP last requested
+
+         btfsc   indf0, 0    ;MAC address in this entry is valid ?
+         jump    no_mac      ;MAC address is invalid
+
+         mcall   arp_unlock  ;release lock on ARP cache
+         jump    ares_leave  ;found MAC, FSR0 is pointing to it
+
+looknext unbank              ;advance to the next cache entry
+         incf    reg0        ;make index of next cache entry
+         movf    reg0, w     ;get the new index
+         sublw   ncache-1    ;compare to last valid index
+         skip_wgt            ;finished with all cache entries ?
+         jump    lookloop    ;back to check next cache entry
+;
+;   No entry for the requested IP address exists.  Find the cache entry to
+;   overwrite to add the new IP address.  This is either the first empty
+;   entry found, or the least recently requested one if there is no unused
+;   entry.
+;
+;   Register usage:
+;
+;     REG0  -  Index of best entry found so far.
+;
+;     REG1  -  Age of best entry found so far.
+;
+;     REG2  -  Index of next entry to check.
+;
+;     REG7:REG6:REG5:REG4  -  IP address
+;
+;     REG8  -  Unused.
+;
+         clrf    reg0        ;init entry 0 to best found so far
+         movff   ac_age0, reg1 ;init age of best entry found so far
+         clrf    reg2        ;init index of previous entry checked
+         lfsr    0, ac_age0  ;init pointer to last entry checked
+age_loop unbank
+         incf    reg2        ;make index of this entry to check
+         movf    reg2, w     ;get the new index
+         sublw   ncache-1    ;compare to last valid index
+         skip_wle            ;index for this iteration is valid ?
+         jump    age_done    ;no, done checking all entries
+
+         addfsr0 cachentsz   ;point to the new entry to check
+         movf    indf0, w    ;get age of this entry
+         subwf   reg1, w     ;compare to oldest so far
+         skip_wgt            ;this entry is older than previous best ?
+         jump    age_loop    ;no, back to check next entry
+         movff   indf0, reg1 ;update age of oldest entry found
+         movff   reg2, reg0  ;save index to this entry
+         jump    age_loop    ;back to check next entry
+
+age_done unbank              ;done looking for least recently used entry
+;
+;   REG0 contains the 0-N index of the cache entry to re-use for the new IP
+;   address.
+;
+         cachent reg0, 0     ;point FSR0 to the start of the entry to write
+         setf    postinc0    ;set remaining lifetime to maximum
+         movff   reg7, postinc0 ;write entry IP address
+         movff   reg6, postinc0
+         movff   reg5, postinc0
+         movff   reg4, postinc0
+         clrf    postinc0    ;set age to most recently used
+
+         setf    postinc0    ;set MAC address to invalid
+no_mac   unbank              ;MAC address in this entry is invalid
+;
+;   REG0 is the cache index of the matching entry, but its MAC address is
+;   invalid.  Before giving up and sending a ARP request, check whether the IP
+;   address is the source address in the currently open received IP packet.  If
+;   so, get the MAC address from the packet.  The IP address to resolve is in
+;   REG7:REG6:REG5:REG4.
+;
+         dbankif gbankadr
+         btfss   flag_recvip ;a received IP packet is open ?
+         jump    send_req    ;no, skip this section
+
+         pushreg reg0        ;temp save ARP cache index on stack
+         gcall   ip_recv_src ;get IP src adr into REG3:REG2:REG1:REG0
+         movf    reg3, w     ;compare packet src and requested addresses
+         xorwf   reg7, w
+         movwf   reg3
+         movf    reg2, w
+         xorwf   reg6, w
+         iorwf   reg3
+         movf    reg1, w
+         xorwf   reg5, w
+         iorwf   reg3
+         movf    reg0, w
+         xorwf   reg4, w
+         iorwf   reg3        ;zero iff addresses same
+         popreg  reg0        ;restore ARP cache index in REG0
+         movf    reg3
+         skip_z              ;IP packet is from requested address ?
+         jump    send_req    ;no
+
+         cachent reg0, ac_mac ;point to MAC field of the cache entry
+         gcall   netp_recv_src ;get packet src MAC address into ARP cache entry
+         mcall   arp_unlock  ;release lock on ARP cache
+         cachent reg0, ac_mac ;point FSR0 to MAC address in cache entry
+         jump    ares_leave  ;return with FSR0 pointing to resolved address
+
+send_req unbank              ;need to send ARP request for this IP address
+         mcall   arp_unlock  ;done with ARP cache, release lock on it
+;
+;   There is a cache entry for the requested IP address, but the MAC address in
+;   the cache entry is not valid.  Send a ARP request.
+;
+;   Register usage:
+;
+;     REG7:REG6:REG5:REG4  -  IP address.
+;
+         mcall   arp_request ;send request to resolve IP in REG7:REG6:REG5:REG4
+         lfsr    0, 0        ;indicate not returning with ethernet address
+
+ares_leave unbank            ;common exit point, FSR0 all set
+         leavecheck
+
+;*******************************************************************************
+;
+;   Macro CHECK1 kk
+;
+;   Check that the next data byte read from the packet is the constant KK.  If
+;   not, a RETURN is executed, which is intended to abort packet processing and
+;   jump to DONE_PACKET.
+;
+check1   macro   kk
+         gcall   netp_recv_read ;read the next packet byte into REG0
+         movlw   (kk)
+         xorwf   reg0, w
+         skip_z              ;byte matches the expected value ?
+         return              ;no, abort packet processing
+         endm
+
+;*******************************************************************************
+;
+;   Macro CHECK2 kk
+;
+;   Check that the next 16 bit word read from the packet is the constant KK.  If
+;   not, a RETURN is executed, which is intended to abort packet processing and
+;   jump to DONE_PACKET.  The word is assumed to be stored in the packet in
+;   network order, which is high byte first.
+;
+check2   macro   kk
+         gcall   netp_recv_read ;read the next packet byte into REG0
+         movlw   high (kk)
+         xorwf   reg0, w
+         skip_z              ;byte matches the expected value ?
+         return              ;no, abort packet processing
+
+         gcall   netp_recv_read ;read the next packet byte into REG0
+         movlw   low (kk)
+         xorwf   reg0, w
+         skip_z              ;byte matches the expected value ?
+         return              ;no, abort packet processing
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine READ2
+;
+;   Read the next 2 bytes from the received packet as a 16 bit word and return
+;   it in REG1:REG0.
+;
+         locsub  read2, noregs
+
+         gcall   netp_recv_read ;read high byte into REG0
+         movff   reg0, reg1  ;save it in REG1
+         gcall   netp_recv_read ;read low byte into REG0
+
+         leavecheck
+
+;*******************************************************************************
+;
+;   Routine ARP_RECV_PACKET
+;
+;   Process a received ARP packet.  This routine is run from the network
+;   background processing task when a packet is received with the type/length
+;   word set to 0806h, which indicates the ARP protocol.
+;
+;   The received packet is currently open, and must be left open.  When done,
+;   this routine must jump or call to DONE_PACKET, or execute a RETURN at the
+;   same nesting level as on entry.  The data stack is currently empty, and
+;   the call stack contains the single entry to DONE_PACKET.  Extraneous data
+;   may be left on both stacks when jumping to DONE_PACKET, and all the REGn
+;   general registers may be trashed.
+;
+;   The REGn registers currently contain:
+;
+;     REG3:REG2  -  Type/length word of the packet.
+;
+;     REG5:REG4  -  Number of payload data bytes in the packet.
+;
+;   The current packet data read offset is set to 0.  In other words, if no
+;   call to NETP_RECV_OFS is made, the next call to NETP_RECV_READ will return
+;   the first data byte.
+;
+;   The layout of a ARP packet is:
+;
+;     HW address space, 2 bytes
+;       0001h = ethernet
+;
+;     Procotol address space, 2 bytes
+;       0800h = IP
+;
+;     HW address size, 1 byte
+;       6 for ethernet
+;
+;     Protocol address size, 1 byte
+;       4 for IP
+;
+;     ARP opcode, 2 bytes
+;       1 = request
+;       2 = response
+;
+;     Sender HW address
+;       6 byte MAC address in our case
+;
+;     Sender protocol address
+;       4 byte IP address in our case
+;
+;     Target hardware address
+;       We ignore this field.
+;
+;     Target protocol address
+;       We ignore this field.
+;
+         glbent  arp_recv_packet
+;
+;   Verify that the hardware address space ID is 0001h (ethernet), the protocol
+;   address space ID is 0800h (IP), and that the lengths of each are correct.
+;   If anything doesn't look right, we abort by executing a RETURN.
+;
+         check2  h'0001'     ;HW address space must be ethernet
+         check2  h'0800'     ;protocol address space must be IP
+         check1  6           ;ethernet addresses are 6 bytes long
+         check1  4           ;IP addresses are 4 bytes long
+
+         check_yield         ;let other tasks run if needed
+;
+;   This appears to be a valid ARP packet.  We haven't looked at the ARP opcode
+;   yet, but regardless, this packet tells us the mapping of one IP address to
+;   its ethernet address.  Use this info in the packet to update the cache entry
+;   for that IP address, if we have one already.
+;
+;   Since this is a small system with limited RAM, we don't cache every IP
+;   address we hear about, only up to the NCACHE IP addresses most recently
+;   asked about by applications.  When a application requests the MAC address
+;   for a IP address, a cache entry is made for that IP address if there wasn't
+;   one previously.  If a new cache entry is created that way, meaning the
+;   associated MAC address is unknown, then the MAC address in the cache entry
+;   is set to invalid.  When we receive a ARP packet matching a IP address in
+;   the cache, the MAC address is overwritten from the packet regardless of what
+;   was previously in the cache.
+;
+         loadk16 reg0, 14    ;set the packet read offset to the resolved IP address
+         gcall   netp_recv_ofs
+         loadk8  reg0, 4     ;pass number of bytes to read
+         lfsr    0, reg4     ;pass buffer start address
+         gcall   netp_recv_readbuf ;read the IP address into REG4:REG5:REG6:REG7
+
+         mcall   arp_lock    ;lock the ARP cache for our exclusive use
+         setf    reg2        ;init index of previous entry checked
+upd_loop unbank              ;back here to do each new cache entry
+         incf    reg2        ;make index of this entry to check
+         movf    reg2, w     ;get the new index
+         sublw   ncache-1    ;compare to max valid index
+         skip_wle            ;index is within range ?
+         jump    upd_done    ;no, done checking all cache entries
+
+         cachent reg2, 0     ;set FSR0 pointing to start of this cache entry
+         movf    postinc0, w ;get remaining lifetime of this entry
+         bz      upd_loop    ;this entry is empty ?
+
+         movf    postinc0, w ;skip this entry if IP address doesn't match
+         xorwf   reg4, w
+         bnz     upd_loop
+         movf    postinc0, w
+         xorwf   reg5, w
+         bnz     upd_loop
+         movf    postinc0, w
+         xorwf   reg6, w
+         bnz     upd_loop
+         movf    postinc0, w
+         xorwf   reg7, w
+         bnz     upd_loop
+         ;
+         ;   The current ARP cache entry has the same IP address as is resolved
+         ;   by the received packet.  FSR0 is pointing to the AGE field of the
+         ;   entry and REG2 is the 0-N entry index.
+         ;
+         loadk16 reg0, 8     ;set packet read offset to the MAC address
+         gcall   netp_recv_ofs
+         addfsr0 1           ;point FSR0 to the MAC address field in the entry
+         loadk8  reg0, 6     ;pass number of bytes to read
+         gcall   netp_recv_readbuf ;read the MAC address into the cache entry
+         cachent reg2, 0     ;point FSR0 back to the start of the cache entry
+         setf    indf0       ;entry refreshed, reset to maximum life time
+
+upd_done unbank              ;done updating cache from this received packet
+         mcall   arp_unlock  ;release lock on the ARP cache
+;
+;   Check the ARP opcode.  Since we have already updated the cache with the
+;   information from the packet, we only do anything further if the opcode is 1,
+;   which is a ARP request.  If so, we send a reply if the request is for our
+;   IP address.
+;
+         ;
+         ;   Abort this packet of the ARP opcode is not 0001h.
+         ;
+         loadk16 reg0, 6     ;set packet read offset to the ARP opcode field
+         gcall   netp_recv_ofs
+         gcall   netp_recv_read ;get opcode high byte into REG0
+         movf    reg0, w
+         skip_z
+         return
+         gcall   netp_recv_read ;get opcode low byte into REG0
+         decfsz  reg0
+         return
+         ;
+         ;   Abort the packet if the target IP address is not our IP address.
+         ;
+         loadk16 reg0, 24    ;set packet read offset to the target IP address
+         gcall   netp_recv_ofs
+         lfsr    0, reg8     ;pass buffer start address
+         loadk8  reg0, 4     ;pass number of bytes to read
+         gcall   netp_recv_readbuf ;read requested IP adr into REG8:REG9:REG10:REG11
+         dbankif gbankadr
+         movf    reg8, w     ;abort if IP addresses don't match
+         xorwf   our_ip+0, w
+         skip_z
+         return
+         movf    reg9, w
+         xorwf   our_ip+1, w
+         skip_z
+         return
+         movf    reg10, w
+         xorwf   our_ip+2, w
+         skip_z
+         return
+         movf    reg11, w
+         xorwf   our_ip+3, w
+         skip_z
+         return
+;
+;   The packet is a ARP request for our IP address.  This means we will send a
+;   reply.  The general registers currently contain:
+;
+;     REG4:REG5:REG6:REG7  -  Requester's IP address.
+;
+;   If a network transmit buffer can not be allocated, then just skip it.  The
+;   requester should try again and then hopefully we can send a reply next time.
+;
+         loadk16 reg0, 28    ;pass minimum data size needed
+         gcall   netp_xmit_alloc ;try to allocate transmit buffer
+         btfsc   reg8, 7     ;got transmit buffer, ID in REG8 ?
+         return              ;no transmit buffer, screw it we're outta here
+
+         loadk16 reg0, 8     ;set packet read offset to the requester's MAC adr
+         gcall   netp_recv_ofs
+         lfsr    0, reg9     ;pass buffer start address
+         loadk8  reg0, 6     ;pass number of bytes to read
+         gcall   netp_recv_readbuf ;read requester's MAC adr into REG9-REG14
+         gcall   netp_xmit_dest ;set dest adr to requester's MAC adr
+
+         loadk16 reg0, h'0806' ;set type/length to ARP protocol ID
+         gcall   netp_xmit_type
+
+         write2  h'0001'     ;HW address space is ethernet
+         write2  h'0800'     ;protocol address space is IP
+         write1  6           ;HW address size, bytes
+         write1  4           ;protocol address size, bytes
+         write2  h'0002'     ;ARP reply opcode
+
+         movff   our_mac+0, reg0 ;our MAC address
+         gcall   netp_xmit_write
+         movff   our_mac+1, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+2, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+3, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+4, reg0
+         gcall   netp_xmit_write
+         movff   our_mac+5, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         movff   our_ip+0, reg0 ;our IP address
+         gcall   netp_xmit_write
+         movff   our_ip+1, reg0
+         gcall   netp_xmit_write
+         movff   our_ip+2, reg0
+         gcall   netp_xmit_write
+         movff   our_ip+3, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         movff   reg9, reg0  ;requester's MAC address
+         gcall   netp_xmit_write
+         movff   reg10, reg0
+         gcall   netp_xmit_write
+         movff   reg11, reg0
+         gcall   netp_xmit_write
+         movff   reg12, reg0
+         gcall   netp_xmit_write
+         movff   reg13, reg0
+         gcall   netp_xmit_write
+         movff   reg14, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         movff   reg4, reg0  ;requester's IP address
+         gcall   netp_xmit_write
+         movff   reg5, reg0
+         gcall   netp_xmit_write
+         movff   reg6, reg0
+         gcall   netp_xmit_write
+         movff   reg7, reg0
+         gcall   netp_xmit_write
+         check_yield         ;let other tasks run if needed
+
+         gcall   netp_xmit_def ;fill in default fields not previously set
+         gcall   netp_xmit_send ;send the ARP response packet
+         gcall   netp_xmit_release ;packet has been sent, done with transmit buffer
+         return              ;all done processing the received ARP packet
+
+;*******************************************************************************
+;
+;   Subroutine ARP_100MS
+;
+;   This routine gets called by the network background processing task once
+;   every 100mS to give this module a opportunity to perform time-related
+;   functions.  The time related functions performed by this routine are:
+;
+;     Age each valid cache entry.
+;
+;       The AGE field in each valid cache entry indicates how long it has been
+;       since a application requested the information in the cache entry.  This
+;       age is used to decide which cache entry to delete when a new IP address
+;       needs to be added to the cache.  The entry with the oldest age, meaning
+;       the entry least recently used by any application, is deleted to make
+;       room for a new entry.
+;
+;       When a application requests information from a cache entry, its age is
+;       set to 0.  The age is incremented every 100mS by this routine until it
+;       reaches the maximum valid age of 254.  The age value of 255 is reserved
+;       for unused cache entries.  This automatically causes any unused entries
+;       to be used for new IP addresses by finding the entry with the maximum
+;       AGE field.
+;
+;     Decrease the remaining lifetime of valid cache entries.
+;
+;       Cached information has the possibility of being wrong if the real state
+;       changes but the cache is not updated.  Fortunately, the MAC address of
+;       a particular IP address rarely changes.  This can happen due to DHCP
+;       leases expiring and getting re-used, network devices getting
+;       re-configured, network cards swapped, etc.  Usually even these events
+;       don't cause problems because most devices will send a ARP message with
+;       their IP and MAC addresses on startup.  We will catch such messages for
+;       IP addresses in the cache and update the entry accordingly.
+;
+;       However, it is still possible for a cache entry to become incorrect
+;       over time without us receiving information about it.  To prevent a
+;       incorrect value from persisting indefinitely, each entry has a limited
+;       lifetime before it is deleted.  The LIFE field is the number of 15
+;       second ticks left for that cache entry.
+;
+;       The LIFE field is set to the maximum possible value of 255 whenever the
+;       cache entry is updated from a newly received packet.  This value is
+;       decremented by one by this routine every 15 seconds.  When it reaches 0,
+;       the cache entry is invalidated.  This means that if no new ARP message
+;       is received for a IP address in 255 * 15 seconds = 64 minutes, then that
+;       entry is deleted.
+;
+;       To prevent entries getting deleted unnecessarily, a new ARP request is
+;       sent for a cache entry whenever its LIFE field is decremented to a value
+;       of 1-15.  This means a ARP request is sent every 15 seconds for a cache
+;       entry during the last 3 3/4 minutes of its life.  The entry is only
+;       deleted if no ARP reply was received before its LIFE value is
+;       decremented to 0.  It is highly unlikely that will happen if the target
+;       node is still up and functioning and the network path to it intact.
+;
+;   This routine is allowed to trash all the REGn general registers.
+;
+         glbsub  arp_100ms, noregs
+;
+;   Update the 15 second tick state and set FLAG_ARP15S according to whether
+;   there is a 15 second clock tick this time.
+;
+         dbankif gbankadr
+         bcf     flag_arp15s ;init to no 15 second tick this time
+         dbankif lbankadr
+         decfsz  t15s        ;one less 100mS tick until 15s tick
+         jump    no_tick15s  ;no 15s tick this time
+         loadk8  t15s, 150   ;reset time until next 15s tick
+         dbankif gbankadr
+         bsf     flag_arp15s ;indicate 15 second tick this time
+no_tick15s unbank            ;skip to here on no 15 second tick
+;
+;   Loop thru all the ARP cache entries.
+;
+         mcall   arp_lock    ;lock cache for our exclusive access
+         setf    reg2        ;init index of previous entry checked
+tick_loop unbank             ;back here to do each new cache entry
+         incf    reg2        ;make index of this entry to check
+         movf    reg2, w     ;get the new index
+         sublw   ncache-1    ;compare to max valid index
+         skip_wle            ;index is within range ?
+         jump    tick_done   ;no, done checking all cache entries
+
+         cachent reg2, 0     ;set FSR0 pointing to start of this cache entry
+         movf    indf0
+         bz      tick_loop   ;this cache entry is empty ?
+;
+;   Update remaining lifetime if this is on a 15 second tick.  FSR0 is pointing
+;   to the start of the cache entry.
+;
+         dbankif gbankadr
+         btfss   flag_arp15s ;15 second tick now ?
+         jump    done_life   ;no, done with lifetime field
+
+         decfsz  indf0       ;count one less 15 second tick in lifetime
+         jump    still_alive ;life not just expired ?
+         ;
+         ;   The life of this cache entry just expired.  Invalidate it.  The
+         ;   LIFE field has already been set to 0.  FSR0 is pointing to the
+         ;   LIFE field.
+         ;
+         addfsr0 5           ;point FSR0 to the AGE field
+         setf    indf0       ;set to value for unused entry
+         jump    tick_loop   ;nothing more can be done with this cache entry
+
+still_alive unbank           ;lifetime of this entry did not just expire
+         movf    indf0, w    ;get the new lifetime value
+         sublw   15          ;compare to highest value to send new request at
+         skip_wle            ;life near end, send request to update contents ?
+         jump    done_life   ;not near end of life
+         ;
+         ;   The lifetime of this cache entry was just decremented to within
+         ;   15 ticks of the end.  Send a new ARP request for the IP address
+         ;   of this entry.
+         movff   preinc0, reg7 ;get the IP address into REG7:REG6:REG5:REG4
+         movff   preinc0, reg6
+         movff   preinc0, reg5
+         movff   preinc0, reg4
+         mcall   arp_request ;try to send a new ARP request for this IP address
+         cachent reg2, 0     ;restore FSR0 pointing to start of cache entry
+
+done_life unbank             ;done updating remaining lifetime of this entry
+;
+;   Update age of this cache entry.  FSR0 is pointing to the start of the cache
+;   entry.
+;
+         addfsr0 5           ;point FSR0 to the AGE field
+         movf    indf0, w    ;get the current AGE value
+         sublw   253         ;compare to maximum value to increment
+         skip_wgt            ;already max, don't increment further ?
+         incf    indf0       ;not max, count one more tick of age
+
+         jump    tick_loop   ;done with this cache entry, back to do next
+
+tick_done unbank             ;done processing all cache entries
+         mcall   arp_unlock  ;release exclusive lock on ARP cache
+
+         leaverest

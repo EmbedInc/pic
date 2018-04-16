@@ -1,0 +1,862 @@
+;   ***************************************************************
+;   * Copyright (C) 2013, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   EmCan byte stream handling.  This module relies on services in the EMCAN
+;   module, which implements the basic EmCan functions including the byte
+;   streams.  This module uses the byte streams interface exported by the EMCAN
+;   module to implement the byte stream command processor.  Although that is
+;   really part of EmCan, it is broken into two modules to keep the size of the
+;   individual modules down and to make maintanence easier.
+;
+         extern  emcan_sync  ;request output stream sync next opportunity
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+ecstr_stacksz equ 32 + ntsksave ;task data stack size
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+/if [not [exist "devman"]] then
+  /const devman string = ""
+  /endif
+/if [not [exist "devmod"]] then
+  /const devmod string = ""
+  /endif
+/if [not [exist "devdesc"]] then
+  /const devdesc string = ""
+  /endif
+/if [not [exist "devuse"]] then
+  /const devuse string = ""
+  /endif
+/if [not [exist "emcan_nvol_write"]] then
+  /const emcan_nvol_write string = ""
+  /endif
+/if [not [exist "emcan_nvol_read"]] then
+  /const emcan_nvol_read string = ""
+  /endif
+
+;*******************************************************************************
+;
+;   Variables.
+;
+;*******************
+;
+;   Global state.
+;
+.ecstrbuf udata
+ecstrbuf res     256         ;per-command scratch buffer
+
+         global  ecstrbuf
+
+;*******************
+;
+;   Local state.
+;
+.ecstr_stack udata
+ecstr_stack res  ecstr_stacksz ;task data stack
+
+
+.ecstr   code
+;*******************************************************************************
+;
+;   Subroutine ECSTR_INIT
+;
+;   Initialize the state managed by this module.
+;
+         glbsub  ecstr_init, noregs
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_START
+;
+;   Start the command stream processing task.  This routine is called during
+;   system initialization after all the modules have been individually
+;   initialized.
+;
+ecstr_start glbsub regf0 | regf1 | regf2 | regf3 | regf4
+
+         task_create ecstr_task, ecstr_stack ;create EmCan command stream task
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_GET8
+;
+;   Get the next 8 bit byte from the command input stream into REG0.  This
+;   routine waits indefinitely until a byte is available.  This routine may only
+;   be called from the EmCan stream processing task.  It is made external so
+;   that command processing routines can be implemented in other modules.
+;
+;   This routine will jump to ECSTR_DONE if the EmCan input stream was reset.
+;   When the stream is reset, any sequence in progress is effectively aborted,
+;   and the next received byte will be the opcode of a new command.
+;
+ecstr_get8 glbsub
+         gcall   emcan_get   ;try to get the next byte
+         skip_nz             ;got a byte ?
+         jump    ecstr_done  ;no, command stream was reset
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_GET16
+;
+;   Get the next two bytes from the command input stream as a 16 bit value into
+;   REG1:REG0.  The bytes are assumed to be in most to least significant order.
+;
+ecstr_get16 glbsub
+         mcall   ecstr_get8  ;get the high byte
+         movff   reg0, reg1
+
+         mcall   ecstr_get8  ;get the low byte
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_GET24
+;
+;   Get the next two bytes from the command input stream as a 16 bit value into
+;   REG2:REG1:REG0.  The bytes are assumed to be in most to least significant
+;   order.
+;
+ecstr_get24 glbsub
+         mcall   ecstr_get8  ;get the high byte
+         movff   reg0, reg2
+
+         mcall   ecstr_get8
+         movff   reg0, reg1
+
+         mcall   ecstr_get8  ;get the low byte
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_GET32
+;
+;   Get the next two bytes from the command input stream as a 16 bit value into
+;   REG3:REG2:REG1:REG0.  The bytes are assumed to be in most to least
+;   significant order.
+;
+ecstr_get32 glbsub
+         mcall   ecstr_get8  ;get the high byte
+         movff   reg0, reg3
+
+         mcall   ecstr_get8
+         movff   reg0, reg2
+
+         mcall   ecstr_get8
+         movff   reg0, reg1
+
+         mcall   ecstr_get8  ;get the low byte
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_GETPORT
+;
+;   Get a 16 bit port number from the input stream into REG7:REG16.  The port
+;   number is assumed to be sent in high to low byte order.
+;
+ecstr_getport glbsub regf0
+         mcall   ecstr_get8  ;get the high byte
+         movff   reg0, reg7
+         mcall   ecstr_get8  ;get the low byte
+         movff   reg0, reg6
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_GET_STRING
+;
+;   Read a text string from the input stream.  The next input stream byte must
+;   be the string length, followed by exactly that many bytes.  The entire
+;   string, starting with the length byte, is read into the command scratch
+;   buffer ECSTRBUF.  The maximum number of bytes written to ECSTRBUF is 256,
+;   which is the length byte plus 255 string bytes.
+;
+ecstr_get_string glbsub regf0 | regf1
+
+         mcall   ecstr_get8  ;get the number of data bytes into REG0
+
+         lfsr    0, ecstrbuf ;init pointer where to write the next byte
+         movf    reg0, w     ;get the number of string characters
+         movwf   postinc0    ;save string length in the buffer
+         bz      ecstr_gs_leave ;no character bytes, nothing more to do ?
+
+         movwf   reg1        ;init number of bytes left to read
+ecstr_gs_byte unbank         ;back here each new byte
+         pushreg fsr0l       ;temp save destination pointer
+         pushreg fsr0h
+         mcall   ecstr_get8  ;get this string character into REG0
+         popreg  fsr0h       ;restore destination pointer into FSR0
+         popreg  fsr0l
+         movff   reg0, postinc0 ;stuff this string character into the buffer
+         decfsz  reg1        ;count one less byte left to do
+         jump    ecstr_gs_byte ;back to do the next byte
+
+ecstr_gs_leave unbank        ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_PUT8
+;
+;   Write the byte in REG0 to the response stream.
+;
+;   The caller must be holding the output stream writing lock.
+;
+ecstr_put8 glbsub
+         extern  emcan_put
+         gjump   emcan_put
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_PUT16
+;
+;   Write the 16 bit value in REG1:REG0 to the response stream.  The bytes are
+;   written in most to least significant order.
+;
+;   The caller must be holding the output stream writing lock.
+;
+ecstr_put16 glbsub
+         pushreg reg0
+
+         movff   reg1, reg0
+         gcall   emcan_put
+
+         popreg  reg0
+         gcall   emcan_put
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_PUT24
+;
+;   Write the 24 bit value in REG2:REG1:REG0 to the response stream.  The bytes
+;   are written in most to least significant order.
+;
+;   The caller must be holding the output stream writing lock.
+;
+ecstr_put24 glbsub
+         pushreg reg0
+
+         movff   reg2, reg0
+         gcall   emcan_put
+
+         movff   reg1, reg0
+         gcall   emcan_put
+
+         popreg  reg0
+         gcall   emcan_put
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_PUT32
+;
+;   Write the 32 bit value in REG3:REG2:REG1:REG0 to the response stream.  The
+;   bytes are written in most to least significant order.
+;
+;   The caller must be holding the output stream writing lock.
+;
+ecstr_put32 glbsub
+         pushreg reg0
+
+         movff   reg3, reg0
+         gcall   emcan_put
+
+         movff   reg2, reg0
+         gcall   emcan_put
+
+         movff   reg1, reg0
+         gcall   emcan_put
+
+         popreg  reg0
+         gcall   emcan_put
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_PUT_PSTRING
+;
+;   Write a string from program memory to the output stream.  The string will be
+;   sent starting with the length byte, followed by exactly that many character
+;   bytes.  The string is assumed to be in program memory in the same format
+;   starting at the address in TBLPTR.
+;
+;   The caller must be holding the output stream writing lock.
+;
+ecstr_put_pstring glbsub regf0 | regf1
+
+         tblrd*+             ;get length byte into TABLAT
+         movff   tablat, reg0 ;get string length into REG0
+         pushreg tblptrl     ;temp save the source pointer
+         pushreg tblptrh
+         pushreg tblptru
+         gcall   emcan_put   ;send the string length byte
+         popreg  tblptru     ;restore the source pointer
+         popreg  tblptrh
+         popreg  tblptrl
+
+         movf    reg0, w     ;get the number of character bytes
+         bz      ecstr_pps_leave ;no character bytes, nothing more to do ?
+         movwf   reg1        ;init number of bytes left to do
+ecstr_pps_byte unbank        ;back here each new byte
+         tblrd*+             ;get this character into REG0
+         movff   tablat, reg0
+         pushreg tblptrl     ;temp save the source pointer
+         pushreg tblptrh
+         pushreg tblptru
+         gcall   emcan_put   ;send this string character
+         popreg  tblptru     ;restore the source pointer
+         popreg  tblptrh
+         popreg  tblptrl
+         decfsz  reg1        ;count one less byte left to do
+         jump    ecstr_pps_byte ;back to do the next byte
+
+ecstr_pps_leave unbank       ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_PUT_NSTRING
+;
+;   Write a string from non-volatile memory to the output stream.  The string
+;   will be sent starting with the length byte, followed by exactly that many
+;   character bytes.  The string is assumed to be in non-volatile memory
+;   starting with the storage size byte, then the current length byte, then the
+;   data bytes.  The storage size is not relevant when reading the string from
+;   the non-volatile memory, so is skipped.
+;
+;   The starting address of the string in non-volatile memory is passed in
+;   REG2:REG1.  This address can be FFFFh to indicate the string does not exist.
+;   In that case, the empty string is sent, which is simply a single zero byte.
+;
+;   REG1 and REG2 are trashed.
+;
+;   The caller must be holding the output stream writing lock.
+;
+/if [= emcan_nvol_read ""]
+  /then                      ;can't read from non-volatile memory
+ecstr_put_nstring glbsub regf0
+         loadk8  reg0, 0
+         gcall   emcan_put   ;send the empty string
+         leaverest
+
+  /else                      ;we can read from non-volatile memory
+         glbsub  ecstr_put_nstring, regf0 | regf3
+;
+;   Check for invalid address.  If so, send just the zero length byte and leave.
+;
+         movf    reg1, w     ;make the AND of the address bytes
+         andwf   reg2, w
+         xorlw   h'FF'       ;compare to the invalid value
+         bnz     ecstr_pns_vadr ;the address is valid ?
+
+         loadk8  reg0, 0
+         gcall   emcan_put   ;send the empty string
+         jump    ecstr_pns_leave
+;
+;   The non-volatile address in REG2:REG1 is valid.
+;
+ecstr_pns_vadr unbank
+         gcall   [chars emcan_nvol_read] ;skip the storage length byte
+
+         gcall   [chars emcan_nvol_read] ;get the string length into REG0
+         gcall   emcan_put   ;send the string length
+         movf    reg0, w     ;get the string length
+         bz      ecstr_pns_leave ;empty string, nothing more to do ?
+
+         movwf   reg3        ;init number of bytes left to do
+ecstr_pnw_byte unbank        ;back here to do each new byte
+         gcall   [chars emcan_nvol_read] ;get this string character into REG0
+         gcall   emcan_put   ;send it
+         decfsz  reg3        ;count one less byte left to do
+         jump    ecstr_pnw_byte ;back to do the next byte
+
+ecstr_pns_leave unbank       ;common exit point
+         leaverest
+
+  /endif
+
+;*******************************************************************************
+;
+;   Subroutine ECSTR_WRITE_NSTRING
+;
+;   Write the string in the temporary commands buffer ECSTRBUF to non-volatile
+;   memory at the address in REG2:REG1.  The first byte of the temp buffer
+;   contains the number of string bytes, with that many valid bytes following.
+;
+;   The non-volatile memory start address is passed in REG2:REG1.  The first
+;   byte is the maximum string length, then the actual current string length,
+;   then as many bytes as indicated by the first byte.  REG2:REG1 may contain
+;   FFFFh to indicate that no non-volatile storage exists for the string.
+;   Nothing will be done in that case.  The unit must be in configuration state
+;   for the string to be written.
+;
+;   REG1 and REG2 are trashed.
+;
+/if [or [= emcan_nvol_read ""] [= emcan_nvol_write ""]]
+  /then                      ;can't access non-volatile memory
+ecstr_write_nstring glbsub
+         leaverest
+
+  /else                      ;we have access to non-volatile memory
+ecstr_write_nstring glbsub regf0 | regf3
+;
+;   Abort if not in configuration state or the target address is invalid.
+;
+         skip_flag emcan_config ;in configuration state ?
+         jump    ecstr_wns_leave ;no, ignore this write request
+
+         movf    reg1, w     ;make the AND of the address bytes
+         andwf   reg2, w
+         xorlw   h'FF'       ;compare to the invalid value
+         bz      ecstr_wns_leave ;invalid target address ?
+;
+;   Do the write.
+;
+         movff   ecstrbuf+0, reg3 ;init number of char bytes from source string
+         gcall   [chars emcan_nvol_read] ;get the maximum string length into REG0
+         movf    reg3, w     ;get the source string length
+         subwf   reg0, w     ;compare to max length we can write
+         skip_wle            ;whole source string can be written ?
+         movff   reg0, reg3  ;no, truncate to maximum target storage size
+
+         movff   reg3, reg0
+         gcall   [chars emcan_nvol_write] ;write the target string length
+
+         lfsr    0, ecstrbuf+1 ;init source pointer to first string character
+ecstr_wns_byte unbank        ;back here to copy each new byte
+         movf    reg3
+         bz      ecstr_wns_dbytes ;done all the string characters ?
+         movff   postinc0, reg0 ;fetch this character
+         pushreg fsr0l       ;temp save the source pointer
+         pushreg fsr0h
+         gcall   [chars emcan_nvol_write] ;write this string character
+         popreg  fsr0h
+         popreg  fsr0l
+         decf    reg3        ;count one less byte left to do
+         jump    ecstr_wns_byte ;back to do the next byte
+ecstr_wns_dbytes unbank      ;done writing the string to non-volatile memory
+
+         gcall   emcan_wrotenv ;indicate non-volatile memory written, will flush
+
+ecstr_wns_leave unbank       ;common exit point
+         leaverest
+  /endif
+
+;*******************************************************************************
+;
+;   Routine ECSTR_TASK
+;
+;   This code is run in a separate task.  The task reads the command stream,
+;   processes the commands, and possibly sends responses.
+;
+ecstr_task unbank            ;task starts here
+;
+;   Return point after done executing a command.  Command routines can jump here
+;   from nested subroutines or with data on the stack.  The stack will be reset
+;   to empty before any further processing.
+;
+         glbent  ecstr_done
+
+         clrf    stkptr      ;reset the call stack to empty
+         intr_off
+         stack_set ecstr_stack ;reset the data stack to empty
+         intr_on
+
+         gcall   emcan_unlock_all ;make sure we are not holding the outpu stream lock
+;
+;   Flush the output stream if there is any buffered data and there is not more
+;   data for us to immediately process.
+;
+         skip_nflag emcan_inbyte ;nothing more to process right now ?
+         jump    ecstr_dflush ;more stuff to do immediately, don't flush now
+
+         gcall   emcan_flush ;force any buffered output stream data to be sent
+
+ecstr_dflush unbank          ;done flushing output stream
+;
+;   Get and process the next command.
+;
+         gcall   task_yield  ;give other tasks a chance to run
+
+         mcall   ecstr_get8  ;get the opcode byte into REG0
+         ;
+         ;   Push the address of ECSTR_DONE onto the call stack.  This allows
+         ;   command routines to be implemented as subroutines.
+         ;
+         push                ;create new call stack level
+         movlw   low ecstr_done ;set the new entry to address of ECSTR_DONE
+         movwf   tosl
+         movlw   high ecstr_done
+         movwf   tosh
+         movlw   upper ecstr_done
+         movwf   tosu
+
+         dispatch ecstr_cmdtable ;jump to address for this command in dispatch table
+         jump    ecstr_done  ;invalid opcode, ignore this command
+
+;*******************************************************************************
+;
+;   Command CMDS
+;
+;   Sends the CMDS response, which indicates which commands are implemented.
+;
+;   Register usage:
+;
+;     REG0  -  Data byte.
+;
+;     REG1  -  Number of bytes left to send.
+;
+;     REG2  -  Number of bits left to do in this byte.
+;
+;     REG3  -  Mask for this bit within the byte.
+;
+;     REG4  -  Command number for this bit.
+;
+;     REG6:REG5  -  Offset into dispatch table for this command.
+;
+ecscm_cmds:
+         gcall   emcan_lock  ;acquire lock on response stream
+
+         loadk8  reg0, 1     ;send the opcode byte
+         mcall   ecstr_put8
+
+         clrf    reg0        ;init current commands byte being built
+         loadk8  reg1, 32    ;init number of bytes left to send
+         loadk8  reg2, 8     ;init number of bits left in this byte
+         loadk8  reg3, 1     ;init mask for current bit within the byte
+         loadk8  reg4, 0     ;init command number for the current bit
+cds_cmd  unbank              ;back here to set the bit for each new command
+         ;
+         ;   Check for this command is within table.
+         ;
+         movf    reg4, w     ;get this command number
+         sublw   ecstr_cmdtable0nent-1 ;compare to last valid table entry
+         skip_wle            ;this command is within the table ?
+         jump    cds_nxcmd   ;no, this command not implemented
+         ;
+         ;   Compute the address offset into the table for this command in
+         ;   REG6:REG5.  This is either 2x or 3x the command number, depending
+         ;   on how many bytes are required to hold a program memory address on
+         ;   this processor.
+         ;
+         clrf    reg6        ;init high byte of offset
+         bcf     status, c   ;init bit to shift in
+         rlcf    reg4, w
+         movwf   reg5
+         rlcf    reg6
+  if progadrb > 2            ;table is 3 addresses, not 2 ?
+         movf    reg4, w     ;add in command number one more time
+         addwf   reg5
+         movlw   0
+         addwfc  reg6
+    endif
+         ;
+         ;   Set TBLPTR to the actual table entry address.  This is the table
+         ;   start address plus the offset in REG6:REG5.
+         ;
+         movlw   low ecstr_cmdtable ;init to the table start address
+         movwf   tblptrl
+         movlw   high ecstr_cmdtable
+         movwf   tblptrh
+         movlw   upper ecstr_cmdtable
+         movwf   tblptru
+
+         movf    reg5, w     ;add in the offset for the particular table entry
+         addwf   tblptrl
+         movf    reg6, w
+         addwfc  tblptrh
+         movlw   0
+         addwfc  tblptru
+         ;
+         ;   Read the first byte of the table entry.  The entry contains a valid
+         ;   address when the low bit is cleared, and is a empty entry when the
+         ;   low bit is 1.
+         ;
+         tblrd*              ;read first byte of table entry into TABLAT
+         movf    reg3, w     ;get the mask for this bit in case needed
+         btfss   tablat, 0   ;empty entry, this command not implemented ?
+         iorwf   reg0        ;is implemented, set the bit for this command
+;
+;   Done setting or leaving clear the bit for this command.  Advance to the next
+;   command.
+;
+cds_nxcmd unbank             ;done setting bit for this command, advance to next
+         rlncf   reg3        ;update mask for next bit within this byte
+         incf    reg4        ;make number of the next command
+         decfsz  reg2        ;count one less bit left to do in this byte
+         jump    cds_cmd     ;back to do the next bit in this byte
+
+         mcall   ecstr_put8  ;send this byte
+         clrf    reg0        ;init byte value for next set of commands
+         loadk8  reg2, 8     ;init number of bits left to do in this new byte
+         loadk8  reg3, 1     ;init mask of next bit to set within this new byte
+         decfsz  reg1        ;count one less byte left to send
+         jump    cds_cmd     ;back to do the next byte
+
+         return              ;all data bytes sent
+
+;*******************************************************************************
+;
+;   Command DEVMAN
+;
+;   Send the DEVMAN response, which provides the manufacturer name.
+;
+ecscm_devman unbank
+         gcall   emcan_lock  ;acquire lock on response stream
+
+         loadk8  reg0, 2
+         mcall   ecstr_put8  ;send DEVMAN response opcode
+
+         set_tblptr str_devman ;send the string
+         jump    ecstr_put_pstring
+
+;*******************************************************************************
+;
+;   Command DEVMOD
+;
+;   Send the DEVMOD response, which provides the model name of this device.
+;
+ecscm_devmod unbank
+         gcall   emcan_lock  ;acquire lock on response stream
+
+         loadk8  reg0, 3
+         mcall   ecstr_put8  ;send DEVMOD response opcode
+
+         set_tblptr str_devmod ;send the string
+         jump    ecstr_put_pstring
+
+;*******************************************************************************
+;
+;   Command DEVDESC
+;
+;   Send the DEVDESC response, which provides the manufacturer's device
+;   description.
+;
+ecscm_devdesc unbank
+         gcall   emcan_lock  ;acquire lock on response stream
+
+         loadk8  reg0, 4
+         mcall   ecstr_put8  ;send DEVDESC response opcode
+
+         set_tblptr str_devdesc ;send the string
+         jump    ecstr_put_pstring
+
+;*******************************************************************************
+;
+;   Command DEVUSE
+;
+;   Get the device usage string.  The following response is sent:
+;
+;     DEVUSE: 5 n string
+;
+ecscm_devuse unbank
+         gcall   emcan_lock  ;acquire exclusive lock on response stream
+
+         loadk8  reg0, 5     ;send the DEVUSE response opcode
+         mcall   ecstr_put8
+
+/if [= devuse ""]
+  /then                      ;no useage string storage exists
+         loadk8  reg0, 0     ;send the empty string
+         mcall   ecstr_put8
+         return
+  /else                      ;we have nvol address of usage string
+         loadk16 reg1, [chars devuse] ;point REG2:REG1 to string in nvol memory
+         jump    ecstr_put_nstring ;send the string
+  /endif
+
+;*******************************************************************************
+;
+;   Command PORTDESC firstport nports
+;
+;   Send the fixed description string for a range of ports.  The following
+;   response is sent for each implemented port:
+;
+;     PORTDESC: 6 port n string
+;
+ecscm_portdesc unbank
+         mcall   ecstr_getport ;get the starting port number into REG7:REG6
+
+         mcall   ecstr_get8  ;get the number of ports left to do in REG4:REG3
+         movff   reg0, reg4
+         mcall   ecstr_get8
+         movff   reg0, reg3
+
+ptdesc_port unbank           ;back here to do each new port
+         movf    reg3, w
+         iorwf   reg4, w
+         skip_nz             ;still at least one port left to do ?
+         return              ;no, all done
+         gcall   emcan_port_inrange ;set Z iff port number past end of range
+         skip_nz             ;this port number is within range ?
+         return              ;no, all done
+
+         gcall   emcan_port_desc ;set TBLPTR to the string in program memory
+         bz      prdesc_next ;this port doesn't exist ?
+         pushreg tblptrl     ;temp save the source pointer
+         pushreg tblptrh
+         pushreg tblptru
+
+         gcall   emcan_lock  ;acquire lock on response stream
+         loadk8  reg0, 6     ;send the PORTDESC opcode byte
+         mcall   ecstr_put8
+         movff   reg7, reg0  ;send the port number
+         mcall   ecstr_put8
+         movff   reg6, reg0
+         mcall   ecstr_put8
+
+         popreg  tblptru     ;restore the source pointer
+         popreg  tblptrh
+         popreg  tblptrl
+         mcall   ecstr_put_pstring ;send the string from program memory
+         gcall   emcan_unlock ;release lock on the output stream
+
+         gcall   task_yield  ;give other tasks a chance to run
+
+prdesc_next unbank           ;done with this port, advance to next
+         incf    reg6        ;make number of next port to do
+         movlw   0
+         addwfc  reg7
+         decf    reg3        ;count one less port left to do
+         movlw   0
+         subwfb  reg4
+         jump    ptdesc_port ;back to do this next port
+
+;*******************************************************************************
+;
+;   Command PORTUSE firstport nports
+;
+;   Send the user-defined port usage string for a range of ports.  The following
+;   response is sent for each implemented port:
+;
+;     PORTUSE: 7 port n string
+;
+ecscm_portuse unbank
+         mcall   ecstr_getport ;get the starting port number into REG7:REG6
+
+         mcall   ecstr_get8  ;get the number of ports left to do in REG4:REG3
+         movff   reg0, reg4
+         mcall   ecstr_get8
+         movff   reg0, reg3
+
+ptuse_port unbank            ;back here to do each new port
+         movf    reg3, w
+         iorwf   reg4, w
+         skip_nz             ;still at least one port left to do ?
+         return              ;no, all done
+         gcall   emcan_port_inrange ;set Z iff port number past end of range
+         skip_nz             ;this port number is within range ?
+         return              ;no, all done
+
+         gcall   emcan_port_useadr ;get nvol usage string adr into REG2:REG1
+         bz      pruse_next  ;this port doesn't exist ?
+
+         gcall   emcan_lock  ;acquire lock on response stream
+         loadk8  reg0, 7     ;send the PORTUSE opcode byte
+         mcall   ecstr_put8
+         movff   reg7, reg0  ;send the port number
+         mcall   ecstr_put8
+         movff   reg6, reg0
+         mcall   ecstr_put8
+         mcall   ecstr_put_nstring ;send the string from non-volatile memory
+         gcall   emcan_unlock ;release lock on the output stream
+
+         gcall   task_yield  ;give other tasks a chance to run
+
+pruse_next unbank            ;done with this port, advance to next
+         incf    reg6        ;make number of next port to do
+         movlw   0
+         addwfc  reg7
+         decf    reg3        ;count one less port left to do
+         movlw   0
+         subwfb  reg4
+         jump    ptuse_port  ;back to do this next port
+
+;*******************************************************************************
+;
+;   Command SETDUSE n string
+;
+;   Set the device usage string.
+;
+ecscm_setduse unbank
+         mcall   ecstr_get_string ;read the string into the temp buffer
+
+/if [= devuse ""]
+  /then                      ;no storage for usage string exists
+         return
+  /else                      ;we have address of usage string in nvol memory
+         loadk16 reg1, [chars devuse] ;point to usage string in non-volatile memory
+         jump    ecstr_write_nstring ;write string from temp buffer to nvol mem
+  /endif
+
+;*******************************************************************************
+;
+;   Command SETPUSE port n string
+;
+;   Set the usage string for the specified port.
+;
+ecscm_setpuse unbank
+         mcall   ecstr_getport ;get the port number into REG7:REG6
+         mcall   ecstr_get_string ;read the string into the temp buffer
+
+         gcall   emcan_port_useadr ;get nvol usage string adr into REG2:REG1
+         jump    ecstr_write_nstring ;write string from temp buffer to nvol mem
+
+;*******************************************************************************
+;
+;   Static info in program memory.
+;
+.ecstr_data code_pack
+
+str_devman pgstring [v devman] ;manufacturer name
+str_devmod pgstring [v devmod] ;model name
+str_devdesc pgstring [v devdesc] ;device description
+
+;***************************************
+;
+;   Commands dispatch table.
+;
+         dsp_start ecstr_cmdtable
+
+         dsp_entry 0, ecstr_done ;NOP, ignored
+         dsp_entry 1, ecscm_cmds ;CMDS, send list of implemented commands
+         dsp_entry 2, ecscm_devman ;DEVMAN, send manufacturer name
+         dsp_entry 3, ecscm_devmod ;DEVMOD, send model name
+         dsp_entry 4, ecscm_devdesc ;DEVDESC, send product description
+         dsp_entry 5, ecscm_devuse ;DEVUSE, requests DEVUSE response
+         dsp_entry 6, ecscm_portdesc ;PORTDESC, request descriptions for range of ports
+         dsp_entry 7, ecscm_portuse ;PORTUSE, request port usage for range of ports
+         dsp_entry 8, ecscm_setduse ;SETDUSE, set device usage string
+         dsp_entry 9, ecscm_setpuse ;SETPUSE, set usage string of a port
+         dsp_entry 10, emcan_sync ;SYNC, send output stream sync
+;
+;   The table is continued immediately after here in the file that includes this
+;   one.  Only the EmCan-specific commands 0-63 are defined here.  The remaining
+;   commands, if any, are defined in the parent file, then the table is ended.
+;

@@ -1,0 +1,113 @@
+;
+;*******************************************************************************
+;
+;   Subroutine FROM_HEX
+;
+;   Convert the hexadecimal digit in REG0 to its 0-15 value.  The global
+;   ERR flag bit is set if the input character was not a valid HEX
+;   digit.  The returned REG0 value is undefined in that case.
+;
+         locsub  from_hex, noregs
+
+         bsf     flags, flagb_err ;init to error
+
+         movlw   '0'
+         subwf   reg0        ;make value if char is 0-9 digit
+         btfsc   reg0, 7     ;char was >= "0" ?
+         jump    fromhex_leave ;no, return with error
+
+         movlw   10
+         subwf   reg0, w     ;compare to first value past 0-9 digit range
+         skip_wle            ;past 0-9 range ?
+         jump    fhok        ;is 0-9
+
+         movlw   'A' - '9' - 1 ;size of gap between "9" and "A" digits
+         subwf   reg0, w     ;make digit value if "A"-"F" range
+         andlw   b'11011111' ;also if "a"-"f" range
+         movwf   reg0        ;set final digit value if char was in range
+         andlw   b'11110000' ;zero if legal input digit
+         skip_nz             ;input digit was illegal ?
+fhok     bcf     flags, flagb_err ;indicate no error, returning with value
+
+fromhex_leave unbank
+         leaverest
+;
+;*******************************************************************************
+;
+;   Global subroutine HEX_DIGIT_SEND
+;
+;   Send the hexadecimal digit represented by the low 4 bits of REG0
+;   to the host.
+;
+         glbsub  hex_digit_send, regf0
+
+         movlw   h'0F'
+         andwf   reg0        ;mask in only the 0-15 digit value
+
+         movlw   '0'
+         addwf   reg0        ;make digit char if in 0-9 range
+
+         movlw   '9' + 1
+         subwf   reg0, w     ;compare to first char past 0-9 range
+         movlw   'A' - '9' - 1 ;size of gap between "9" and "A" digits
+         skip_wgt            ;digit is in 0-9 range ?
+         addwf   reg0        ;no, switch to A-F range
+
+         gcall   uart_put    ;send HEX digit character to the host
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Global subroutine CRLF_SEND
+;
+;   Send carriage return and line feed to host.
+;
+         glbsub  crlf_send, regf0
+
+         putbyte 13
+         putbyte 10
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Global subroutine SPACE_SEND
+;
+;   Send a space character to the host.
+;
+         glbsub  space_send, regf0
+
+         putbyte ' '
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Global subroutine HEX_BYTE_SEND
+;
+;   Send two hexadecimal characters to the host that represent the byte
+;   value in REG0.
+;
+         glbsub  hex_byte_send, noregs
+
+         swapf   reg0
+         mcall   hex_digit_send ;send the high digit
+         swapf   reg0
+         mcall   hex_digit_send ;send the low digit
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Global subroutine CMD_PROMPT
+;
+;   Send the command prompt to the host.
+;
+         glbsub  cmd_prompt, regf0
+
+         mcall   crlf_send   ;carriage return, line feed
+         putbyte ':'
+         putbyte ' '
+
+         leaverest

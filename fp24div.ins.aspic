@@ -1,0 +1,443 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Subroutine FP24DIV
+;
+;   Divide the 24 bit floating point number in the low 3 bytes of REGA by
+;   the 24 bit floating point number in the low 3 bytes of REGB and put
+;   the result in the low 3 bytes of REGA.
+;
+;   If REGA is zero, then the result will be zero.  If REGA is non-zero
+;   and REGB is zero, then the result will be the maximum representable
+;   magnitude with the sign of the original REGA number.
+;
+;   See the comments in FP24FLT for a description of the floating point
+;   format.
+;
+didit    set     0           ;init to no code written
+
+.fp24div code
+;
+;*******************************************************************************
+;
+;   This section is for PIC 16 family (14 bit core).
+;
+  if fam_16
+didit    set     1           ;this processor is supported
+
+         glbsub  fp24div, regfb | regfc | regf12
+         dbankif reg12
+;
+;   Handle special case where REGA is 0.
+;
+         movf    rega+2      ;set Z if REGA value is zero
+         skip_nz             ;REGA is not zero ?
+         goto    div_leave   ;REGA is zero, return with zero
+;
+;   Make the sign of the result and store it in the high bit of REG12.
+;
+         movf    rega+2, w   ;get sign bit of number in REGA
+         xorwf   regb+2, w   ;make resulting sign
+         movwf   reg12       ;save it
+;
+;   Handle special case where REGB is 0.
+;
+         movf    regb+2      ;set Z if REGB value is zero
+         skip_z              ;dividing by zero ?
+         goto    not_div0    ;not dividing by zero special case
+
+ret_max                      ;jump here to return maximum possible magnitude
+         loadk24 rega, h'7FFFFF' ;set the return value to maximum magnitude
+         goto    ret_sign    ;return the sign in high bit of REG12 and leave
+not_div0                     ;skip to here if not dividing by zero
+;
+;   Initialize resulting exponent in REG11.
+;
+         bcf     rega+2, 7   ;leave only exponent fields in high bytes
+         bcf     regb+2, 7
+         movf    regb+2, w   ;get denominator exponent
+         subwf   rega+2, w   ;make numerator - denominator exponent
+         movwf   reg11       ;init exponent of quotient
+;
+;   Convert both values to unsigned fixed point by restoring the implied
+;   1 bit.
+;
+         movlw   1           ;get byte value with the implied 1 bit
+         movwf   rega+2
+         movwf   regb+2
+;
+;   The low 24 bits of REGA and REGB both contain an unsigned fixed point
+;   number in the range of 10000h to 1FFFFh.
+;
+;   The quotient will now be found by successively comparing REGB to REGA.
+;   If REGB <= REGA then REGB is subtracted from REGA and a 1 is shifted
+;   into the low bit of REGC.  If REGB > REGA then REGA is left unaltered
+;   and a 0 is shifted into the low bit of REGC.  In either case, REGA
+;   is then shifted one bit left.  This finds one bit of the quotient each
+;   iteration.  Note that at least one of the first two quotient bits is
+;   guaranteed to be 1.  18 quotient bits will be created so that at least
+;   16 mantissa bits remain after the highest bit is removed to become
+;   the implied 1 bit.
+;
+;   Register useage during the loop:
+;
+;     REG2,REG1,REG0 (low 3 bytes of REGA)  -  Numerator
+;
+;     REG6,REG5,REG4 (low 3 bytes of REGB)  -  Denominator
+;
+;     REG7  -  Number of iterations left to do
+;
+;     REG10,REG9,REG8 (low 3 bytes of REGC)  -  Quotient
+;
+         clrf    regc+0      ;init quotient register
+         movlw   18          ;init number of iterations left to do
+         movwf   reg7
+;
+;   Main divide loop.
+;
+loop_div                     ;back here to make each new quotient bit
+;
+;   Shift a zero into the low bit of the quotient (REGC).  This is later
+;   set to 1 if the quotient bit is really 1.
+;
+         bcf     status, c   ;set bit value to shift in
+         rlf     regc+0
+         rlf     regc+1
+         rlf     regc+2
+;
+;   Compare REGA to REGB.  If REGB <= REGA then subtract REGB from REGA
+;   and set the low bit of REGC.  Note that the high byte of the 24 bit
+;   number in REGB is always 1, and that the high byte of the 24 bit
+;   number in REGA is always 0, 1, 2, or 3.
+;
+         movf    rega+2      ;set Z if high byte of REGA is zero
+         skip_nz             ;high byte of REGA is zero ?
+         goto    div0        ;yes, REGB > REGA
+         decf    rega+2, w   ;set Z if high byte of REGA is 1
+         skip_z              ;high bytes of the 24 bit numbers are equal ?
+         goto    div1        ;no, REGB < REGA
+
+         movf    regb+1, w   ;compare middle bytes
+         subwf   rega+1, w
+         skip_wle            ;REGB <= REGA ?
+         goto    div0        ;REGB > REGA
+         skip_z              ;these bytes equal, need to check next lower byte ?
+         goto    div1        ;REGB < REGA
+
+         movf    regb+0, w   ;compare the low bytes
+         subwf   rega+0, w
+         skip_wle            ;REGB <= REGA ?
+         goto    div0        ;REGB > REGA
+         ;
+         ;   REGB is less than or equal to REGA.
+         ;
+div1                         ;this quotient bit is 1
+         bsf     regc+0, 0   ;set this quotient bit to 1
+         sub24   rega, regb  ;subtract the value in REGB from REGA
+div0                         ;skip to here if this bit of quotient is 0
+;
+;   Shift the 24 bit number in REGA one bit left and go back to do the next
+;   iteration if there are any left to do.
+;
+         bcf     status, c   ;set bit to shift in
+         rlf     rega+0
+         rlf     rega+1
+         rlf     rega+2
+
+         decfsz  reg7        ;count one less iteration left to do
+         goto    loop_div    ;back to do next iteration
+;
+;   Register useage:
+;
+;     REG10,REG9,REG8 (low 3 bytes of REGC)  -  Raw quotient as 18 bit number
+;       justified in the low bits.  This value is shifted one bit left from
+;       that implied by the exponent in REG11.
+;
+;     REG11  -  Exponent value of the quotient if both numbers were equal.
+;
+;     REG12  -  Final quotient sign bit in high bit.
+;
+;   Align the number in REGC so that the mantissa value is positioned correctly.
+;   This means the highest 1 bit must be in bit 16.  It is currently either
+;   in bit 16 or bit 17.  The exponent value must be adjusted accordingly.
+;   The exponent value in REG11 is currently correct if the REGC number must
+;   be shifted one bit right.
+;
+         decf    reg11       ;assume REGC number already normalized
+
+         btfss   regc+2, 1   ;need to shift REGC right one bit to normalize it ?
+         goto    isnorm      ;REGC is already normalized
+
+         rrf     regc+2      ;shift mantissa into position
+         rrf     regc+1
+         rrf     regc+0
+         incf    reg11       ;adjust exponent to account for the shift
+isnorm                       ;done normalizing number in REGC
+;
+;   The final mantissa field is in the low 16 bits of REGC.  The exponent value
+;   is in REG11, and the sign is in the high bit of REG12.  Now assemble
+;   the whole floating point number into REGA.
+;
+;   The exponent is checked for overflow and underflow.  If the exponent
+;   overflows, then the largest magnitude is substituted.  If the exponent
+;   underflows, then zero is substituted.
+;
+         movf    reg11, w    ;get the exponent value
+         addlw   64          ;make 0-127 exponent field value
+         movwf   rega+2      ;init byte containing exponent in result number
+
+         btfss   reg11, 7    ;exponent value is negative
+         goto    exp_pos     ;exponent value is positive
+         ;
+         ;   The exponent value is negative.  Return zero on overflow.
+         ;
+         btfss   rega+2, 7   ;exponent underflowed ?
+         goto    exp_inrange ;no
+         clrf    rega+0      ;pass back zero
+         clrf    rega+1
+         clrf    rega+2
+         goto    div_leave
+         ;
+         ;   The exponent value is positive or zero.  Return the maximum
+         ;   magnitude on overflow.
+         ;
+exp_pos                      ;the exponent value is positive
+         btfsc   rega+2, 7   ;exponent within range, no overflow ?
+         goto    ret_max     ;overflow, go return maximum magnitude
+
+exp_inrange                  ;exponent is within range
+;
+;   The exponent field in REGA has been set and is within range.  The
+;   sign field has been initialized to 0.
+;
+         movf    regc+0, w   ;copy the mantissa field from REGC into REGA
+         movwf   rega+0
+         movf    regc+1, w
+         movwf   rega+1
+
+ret_sign                     ;return sign in high bit of REG12 and leave
+         btfsc   reg12, 7    ;set sign if returned value should be negative
+         bsf     rega+2, 7
+
+div_leave                    ;common exit point
+         leaverest
+    endif                    ;end of PIC 16 case
+;
+;*******************************************************************************
+;
+;   This section is for PIC 18 family (16 bit core).
+;
+  if fam_18
+didit    set     1           ;this processor is supported
+
+         glbsub  fp24div, regfb | regfc | regf12
+;
+;   Handle special case where REGA is 0.
+;
+         movf    rega+2      ;set Z if REGA value is zero
+         bz      div_leave   ;REGA is zero, return with zero
+;
+;   Make the sign of the result and store it in the high bit of REG12.
+;
+         movf    rega+2, w   ;get sign bit of number in REGA
+         xorwf   regb+2, w   ;make resulting sign
+         movwf   reg12       ;save it
+;
+;   Handle special case where REGB is 0.
+;
+         movf    regb+2      ;set Z if REGB value is zero
+         bnz     not_div0    ;not dividing by 0 special case ?
+
+ret_max                      ;jump here to return maximum possible magnitude
+         loadk24 rega, h'7FFFFF' ;set the return value to maximum magnitude
+         jump    ret_sign    ;return the sign in high bit of REG12 and leave
+
+not_div0                     ;skip to here if not dividing by zero
+;
+;   Initialize resulting exponent in REG11.
+;
+         bcf     rega+2, 7   ;leave only exponent fields in high bytes
+         bcf     regb+2, 7
+         movf    regb+2, w   ;get denominator exponent
+         subwf   rega+2, w   ;make numerator - denominator exponent
+         movwf   reg11       ;init exponent of quotient
+;
+;   Convert both values to unsigned fixed point by restoring the implied
+;   1 bit.
+;
+         movlw   1           ;get byte value with the implied 1 bit
+         movwf   rega+2
+         movwf   regb+2
+;
+;   The low 24 bits of REGA and REGB both contain an unsigned fixed point
+;   number in the range of 10000h to 1FFFFh.
+;
+;   The quotient will now be found by successively comparing REGB to REGA.
+;   If REGB <= REGA then REGB is subtracted from REGA and a 1 is shifted
+;   into the low bit of REGC.  If REGB > REGA then REGA is left unaltered
+;   and a 0 is shifted into the low bit of REGC.  In either case, REGA
+;   is then shifted one bit left.  This finds one bit of the quotient each
+;   iteration.  Note that at least one of the first two quotient bits is
+;   guaranteed to be 1.  18 quotient bits will be created so that at least
+;   16 mantissa bits remain after the highest bit is removed to become
+;   the implied 1 bit.
+;
+;   Register useage during the loop:
+;
+;     REG2,REG1,REG0 (low 3 bytes of REGA)  -  Numerator
+;
+;     REG6,REG5,REG4 (low 3 bytes of REGB)  -  Denominator
+;
+;     REG7  -  Number of iterations left to do
+;
+;     REG10,REG9,REG8 (low 3 bytes of REGC)  -  Quotient
+;
+         clrf    regc+0      ;init quotient register
+         movlw   18          ;init number of iterations left to do
+         movwf   reg7
+;
+;   Main divide loop.
+;
+loop_div                     ;back here to make each new quotient bit
+;
+;   Shift a zero into the low bit of the quotient (REGC).  This is later
+;   set to 1 if the quotient bit is really 1.
+;
+         bcf     status, c   ;set bit value to shift in
+         rlcf    regc+0
+         rlcf    regc+1
+         rlcf    regc+2
+;
+;   Compare REGA to REGB.  If REGB <= REGA then subtract REGB from REGA
+;   and set the low bit of REGC.  Note that the high byte of the 24 bit
+;   number in REGB is always 1, and that the high byte of the 24 bit
+;   number in REGA is always 0, 1, 2, or 3.
+;
+         movf    rega+2      ;set Z if high byte of REGA is zero
+         bz      div0        ;REGB > REGA ?
+         decf    rega+2, w   ;set Z if high byte of REGA is 1
+         bnz     div1        ;REGB < REGA ?
+
+         movf    regb+1, w   ;compare middle bytes
+         subwf   rega+1, w
+         jmp_wgt div0        ;REGB > REGA ?
+         bnz     div1        ;REGB < REGA ?
+
+         movf    regb+0, w   ;compare the low bytes
+         subwf   rega+0, w
+         jmp_wgt div0        ;REGB > REGA ?
+         ;
+         ;   REGB is less than or equal to REGA.
+         ;
+div1                         ;this quotient bit is 1
+         bsf     regc+0, 0   ;set this quotient bit to 1
+         sub24   rega, regb  ;subtract the value in REGB from REGA
+div0                         ;skip to here if this bit of quotient is 0
+;
+;   Shift the 24 bit number in REGA one bit left and go back to do the next
+;   iteration if there are any left to do.
+;
+         bcf     status, c   ;set bit to shift in
+         rlcf    rega+0
+         rlcf    rega+1
+         rlcf    rega+2
+
+         decfsz  reg7        ;count one less iteration left to do
+         jump    loop_div    ;back to do next iteration
+;
+;   Register useage:
+;
+;     REG10,REG9,REG8 (low 3 bytes of REGC)  -  Raw quotient as 18 bit number
+;       justified in the low bits.  This value is shifted one bit left from
+;       that implied by the exponent in REG11.
+;
+;     REG11  -  Exponent value of the quotient if both numbers were equal.
+;
+;     REG12  -  Final quotient sign bit in high bit.
+;
+;   Align the number in REGC so that the mantissa value is positioned correctly.
+;   This means the highest 1 bit must be in bit 16.  It is currently either
+;   in bit 16 or bit 17.  The exponent value must be adjusted accordingly.
+;   The exponent value in REG11 is currently correct if the REGC number must
+;   be shifted one bit right.
+;
+         decf    reg11       ;assume REGC number already normalized
+
+         btfss   regc+2, 1   ;need to shift REGC right one bit to normalize it ?
+         jump    isnorm      ;REGC is already normalized
+
+         rrcf    regc+2      ;shift mantissa into position
+         rrcf    regc+1
+         rrcf    regc+0
+         incf    reg11       ;adjust exponent to account for the shift
+isnorm                       ;done normalizing number in REGC
+;
+;   The final mantissa field is in the low 16 bits of REGC.  The exponent value
+;   is in REG11, and the sign is in the high bit of REG12.  Now assemble
+;   the whole floating point number into REGA.
+;
+;   The exponent is checked for overflow and underflow.  If the exponent
+;   overflows, then the largest magnitude is substituted.  If the exponent
+;   underflows, then zero is substituted.
+;
+         movf    reg11, w    ;get the exponent value
+         addlw   64          ;make 0-127 exponent field value
+         movwf   rega+2      ;init byte containing exponent in result number
+
+         btfss   reg11, 7    ;exponent value is negative
+         jump    exp_pos     ;exponent value is positive
+         ;
+         ;   The exponent value is negative.  Return zero on overflow.
+         ;
+         btfss   rega+2, 7   ;exponent underflowed ?
+         jump    exp_inrange ;no
+         clrf    rega+0      ;pass back zero
+         clrf    rega+1
+         clrf    rega+2
+         jump    div_leave
+         ;
+         ;   The exponent value is positive or zero.  Return the maximum
+         ;   magnitude on overflow.
+         ;
+exp_pos                      ;the exponent value is positive
+         btfsc   rega+2, 7   ;exponent within range, no overflow ?
+         jump    ret_max     ;overflow, go return maximum magnitude
+
+exp_inrange                  ;exponent is within range
+;
+;   The exponent field in REGA has been set and is within range.  The
+;   sign field has been initialized to 0.
+;
+         movf    regc+0, w   ;copy the mantissa field from REGC into REGA
+         movwf   rega+0
+         movf    regc+1, w
+         movwf   rega+1
+
+ret_sign                     ;return sign in high bit of REG12 and leave
+         btfsc   reg12, 7    ;set sign if returned value should be negative
+         bsf     rega+2, 7
+
+div_leave                    ;common exit point
+         leaverest
+    endif                    ;end of PIC 18 case
+;
+;*******************************************************************************
+;
+;   Check that code was emitted for this processor.
+;
+  if !didit
+         error   FP24DIV not implemented for this processor.
+    endif

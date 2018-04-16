@@ -1,0 +1,51 @@
+;   Subroutine LOOKFLAS
+;
+;   Read the program memory word at REG3,REG2 into REG1,REG0.  REG3,REG2
+;   will be incremented so that successive calls will return successive
+;   program memory values.
+;
+;   This routine is only implemented on processors where a whole program
+;   memory word can be read as data.  On the 16C series, these are generally
+;   the processors with "flash" program memory.  The hardware state used
+;   to access the program memory will be trashed.
+;
+  ifdef eecon1               ;this machine has the EECON1 special function reg ?
+
+.lookflas code
+         glbsub  lookflas, noregs
+;
+;   Start the program memory read operation.
+;
+         movf    reg2, w     ;set address low byte
+         dbankif eeadr
+         movwf   eeadr
+         movf    reg3, w     ;set address high byte
+         dbankif eeadrh
+         movwf   eeadrh
+
+         dbankif eecon1
+         bsf     eecon1, eepgd ;select access to program memory, not data EEPROM
+         bsf     eecon1, rd  ;start the read of program memory
+
+         nop                 ;wait for the memory read to complete
+         nop
+;
+;   Pass back the read data in REG2,REG0.
+;
+         dbankif eedata
+         movf    eedata, w   ;get the low data byte
+         movwf   reg0
+         dbankif eedath
+         movf    eedath, w   ;get the high data byte
+         movwf   reg1
+;
+;   Increment the address in REG3,REG2.
+;
+         movlw   1           ;get increment value into W
+         addwf   reg2        ;increment the low byte
+         skip_ncarr          ;no carry into high byte ?
+         incf    reg3        ;propagate the carry
+
+         leaverest
+
+    endif                    ;end of EECON1 register exists on this machine

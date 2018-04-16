@@ -1,0 +1,1463 @@
+;   ***************************************************************
+;   * Copyright (C) 2009, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Declare defaults for all the assembly values required by STD.INS.ASPIC.
+;   Applications should include this file, set any values they know and care
+;   about, then include STD.INS.ASPIC.
+;
+;   See the comments in STD.INS.ASPIC for a description of all the
+;   assembly values it needs.
+;
+         radix   dec         ;set default radix to decimal
+;
+;   Standard constants.
+;
+true     equ     1           ;boolean values for assembler variables
+false    equ     0
+
+;*******************************************************************************
+;
+;   Handle the version and sequence numbers for this build.  This section is
+;   only run if the following preprocessor constants exist:
+;
+;     SRCDIR  -  The name of the directory within (cog)source containing the
+;       source code of the project.  Builds are run in a directory of the same
+;       name in (cog)src.
+;
+;     FWNAME  -  Name of the firmware project.  The name of ordinary source
+;       modules would start with this name followed by a underscore.  For
+;       example, if FWNAME was "blah", then the standard project init module
+;       would be called "blah_init.aspic".
+;
+;       This constant is allowed to not exist.  If so, then BUILDNAME must be
+;       defined, and FWNAME will be defined here the same as BUILDNAME.
+;
+;     BUILDNAME  -  This constant is optional.  It specifies the subdirectory
+;       within the source directory where the source code for this build is
+;       stored.  When this variable does not exist or is the empty string, flat
+;       structure is assumed where all source files are directly in the source
+;       directory.
+;
+;   If the boolean variable MAKE_VERSION exists and is set to TRUE, then the
+;   version include file is always made and the preprocessing is aborted
+;   immediately afterwards.  Otherwise, the version include file is only made
+;   if it does not already exist.  In that case, processing continues and uses
+;   the new version include file.  The sequence number is updated whenever the
+;   version include file is written.  MAKE_VERSION is intended to be set from
+;   the command line by the build script to explicitly create the version
+;   include file before any modules are built for real.
+;
+;   If the boolean variable MAKE_VERSION_CONTINUE exists and is set to TRUE,
+;   then the version include file is always made and processing continues
+;   normally.  This switch can be used by single-module projects.
+;
+/block
+  /var local fnam string     ;customized firmware version info include file name
+  /var local snam string     ;sequence file name
+  /var local ver integer     ;firmware version number
+  /var local seq integer     ;firmware sequence number
+
+  /if [not [exist "buildname"]] then ;make sure BUILDNAME exists, empty string if needed
+    /const buildname = ""
+    /endif
+  /if [not [exist "fwname"]] then
+    /if [= buildname ""]
+      /then                  ;both FWNAME and BUILDNAME not defined
+        /quit
+      /else                  ;default FWNAME to BUILDNAME
+        /const fwname = buildname
+      /endif
+    /endif
+  /if [not [exist "srcdir"]] then
+    /quit
+    /endif
+
+  /if [not [exist "make_version"]] then
+    /var new make_version bool = false
+    /endif
+  /if [not [exist "make_version_continue"]] then
+    /const make_version_continue bool = false
+    /endif
+
+  /set fnam [tnam [str "(cog)src/" srcdir "/" fwname "_fwver.ins.aspic"]]
+  /if [or make_version make_version_continue [not [exist fnam fnam]]] then
+;
+;   Create the <fwname>_FWVER.INS.ASPIC file.  FNAM is set to the name of the
+;   file.  This file defines the FWVER and FWSEQ constants both in MPASM and in
+;   the preprocessor.  The sequence number is advanced after being written to
+;   the file.
+;
+    /if [= buildname ""]
+      /then                  ;flat source structure
+        /set snam [str "(cog)source/" srcdir "/" fwname]
+      /else                  ;this build has its own directory
+        /set snam [str "(cog)source/" srcdir "/" buildname "/seq/" fwname]
+      /endif
+    /set ver [seq snam 0 1]  ;get the version number, we don't change this
+    /set snam [str snam ver]
+    /set seq [seq snam 1 1]  ;set this sequence number, advance it for next time
+         ;
+         ;   Write the version and sequence numbers to the VER include file.  The
+         ;   pathname of that include file is in FNAM.
+         ;
+    /writepush fnam          ;open the version include file
+    /write "/const fwver integer = " ver
+    /write "/const fwseq integer = " seq
+    /write "fwver equ " ver
+    /write "fwseq equ " seq
+    /writepop                ;close the version include file
+;
+;   Create the <fwname>.PICNAME file.  This file contains just the model name
+;   of the particular PIC this code is being built for.  The PIC name is taken
+;   from the PICNAME preprocessor constant, which is normally defined in the
+;   <fwname>lib.ins.aspic file before this file is included.
+;
+    /writepush [str "(cog)src/" srcdir "/" fwname ".picname"]
+    /write picname
+    /writepop
+
+    /show "  Building " [ucase fwname] " version " ver " sequence " seq
+
+    /if [not make_version_continue] then ;just make version, don't process ?
+      /stop
+      /endif
+    /endif
+;
+;   The version include file exists and its name is in FNAM.
+;
+  /include fnam
+  /endblock                  ;done setting firmware version and sequence number
+
+;*******************************************************************************
+;
+;   Set the processor and include the processor-specific include file if the new
+;   preprocessor interface for selecting the processor is being used.
+;   Previously, The xxxLIB.INS.ASPIC file would set the processor, include the
+;   processor file, then include this file.  This was originally all done with
+;   MPASM directives, then with preprocessor directives which included setting
+;   the PREPIC constant PROCESSOR to the PIC name string.  The new and more
+;   automatic way sets the PREPIC constant PICNAME to the processor name string,
+;   then only includes this file.  The remaining canned initialization is now
+;   done here, since it can all be derived from the processor name.
+;
+;   To avoid breaking old source code, the processor-specific initialization is
+;   only performed here if the PREPIC constant PROCESSOR does not exist but
+;   PICNAME does.
+;
+/if [and [exist "picname"] [not [exist "processor"]]] then ;using new proc setup method ?
+  /const processor = picname
+         processor [chars processor]
+         include [str "p" [lcase processor] ".inc"]
+         radix   dec         ;make sure default radix still decimal after include file
+  /endif
+
+;*******************************************************************************
+;
+;   Set global defaults.  These values are always defined, but may be
+;   altered below depending on the specific processor type this code is
+;   running on.
+;
+;   See the comments at the beginning of STD.INS.ASPIC for a detailed
+;   description of these settings.
+;
+stacksize set    16          ;software stack size
+numregs  set     13          ;number of general registers, REG0 - REGn
+regstart set     h'70'       ;starting address of general registers (REG0 address)
+nregbanks set    4           ;init to worst case for bank switching
+ncodepages set   4           ;init to worst case for page switching
+commregs_first set 1         ;init to no common RAM between banks
+commregs_last set 0
+uart_type set    0           ;init to no UART present
+  ifdef txsta
+uart_type set    2           ;init to 16F876 type UART if present
+    endif
+  ifdef txsta1
+uart_type set    2           ;init to 16F876 type UART if present, multiple UARTs
+    endif
+  ifdef baudctl
+uart_type set    3           ;init to 18F1320 type UART if BAUDCTL register exists
+    endif
+  ifdef baudcon
+uart_type set    3
+    endif
+  ifdef baudcon1
+uart_type set    3
+    endif
+
+adr_word set     1           ;init to 1 address increment per prog memory word
+create_flags set true        ;init to create FLAGS/GFLAGS byte
+create_tempw set true        ;init to create TEMPW temporary W save area byte
+using_interrupts set true    ;interrupts in use INTR_OFF, INTR_ON do something
+bra_bug  set     false       ;doesn't corrupt address on interrupt during BRA
+;
+;   Initialize the internal passive pullup configuration for this
+;   processor.  Some customization may need to be performed for specific
+;   processors.
+;
+ii       set     0           ;init to port A has no pullups
+  ifdef not_gppu
+ii       set     1           ;port A has pullups
+    endif
+  ifdef not_rapu
+ii       set     1           ;port A has pullups
+    endif
+  ifdef wpua
+ii       set     1           ;port A has pullups
+    endif
+
+  if ii                      ;port A weak pullups enable bit exists ?
+pullups_porta set b'00110111' ;assume traditional port A, RA3 open drain
+pullups_porta set pullups_porta | h'80000000' ;init to all together on or off
+    ifdef wpu                ;separate GPIO port pullups enable register ?
+pullups_porta set pullups_porta & h'7FFFFFFF' ;indicate can be separately enabled
+      endif
+    ifdef wpua               ;separate PORTA pullups enable register ?
+pullups_porta set pullups_porta & h'7FFFFFFF' ;indicate can be separately enabled
+      endif
+    ifdef wpuda              ;separate PORTA pullups enable register ?
+pullups_porta set pullups_porta & h'7FFFFFFF' ;indicate can be separately enabled
+      endif
+    endif
+
+  ifdef not_rbpu             ;port B weak pullups enable bit exists ?
+pullups_portb set b'11111111' ;assume all pins have weak pullups
+pullups_portb set pullups_portb | h'80000000' ;init to all together on or off
+    endif
+  ifdef not_rabpu            ;port B weak pullups enable bit exists ?
+pullups_portb set b'11111111' ;assume all pins have weak pullups
+pullups_portb set pullups_portb | h'80000000' ;init to all together on or off
+    endif
+  ifdef wpub                 ;separate pullups enable register ?
+pullups_portb set b'11111111' ;indicate can be separately enabled
+    endif
+
+ii       set     1           ;init to port D has pullups
+  ifndef rdpu
+ii       set     0
+    endif
+  ifndef porte
+ii       set     0
+    endif
+  if ii                      ;port D has pullups
+pullups_portd set b'11111111' ;indicate pins that have pullups
+pullups_portd set pullups_portd | h'80000000' ;indicate all together on or off
+    endif
+
+;*******************************************************************************
+;
+;   Set INTR_OFF_BUG appropriately.  This should really be handled by the
+;   specific section for each processor.  However, we received the list
+;   of processors that exhibit this bug and don't want to look up all the
+;   other details of each of these processors and make a custom section
+;   for them right now.
+;
+intr_off_bug set false       ;init to this processor does not have interrupt off bug
+
+  ifdef __14000
+intr_off_bug set true
+    endif
+  ifdef __16c61
+intr_off_bug set true
+    endif
+  ifdef __16c62
+intr_off_bug set true
+    endif
+  ifdef __16c63a
+intr_off_bug set true
+    endif
+  ifdef __16c64
+intr_off_bug set true
+    endif
+  ifdef __16c65
+intr_off_bug set true
+    endif
+  ifdef __16c65b
+intr_off_bug set true
+    endif
+  ifdef __16c71
+intr_off_bug set true
+    endif
+  ifdef __16c73
+intr_off_bug set true
+    endif
+  ifdef __16c73b
+intr_off_bug set true
+    endif
+  ifdef __16c74
+intr_off_bug set true
+    endif
+  ifdef __16c74b
+intr_off_bug set true
+    endif
+  ifdef __17c42
+intr_off_bug set true
+    endif
+
+;*******************************************************************************
+;
+;   Determine the processor family.  Exactly one of the following symbols
+;   will be set to 1 (true) while the remaining ones will be set to 0 (false).
+;
+;   FAM_12  -  12 bit instruction word like 12C508, ...
+;
+;   FAM_16C5  -  12 bit instruction word like 16C54, ...
+;
+;   FAM_16  -  14 bit instruction word.  All the remaining 16xxx devices
+;     like 16C77, ...
+;
+;   FAM_16B  -  Enhanced 14 bit core, like 16F1823.
+;
+;   FAM_17  -  Old 16 bit instruction word like 17C42, ...
+;
+;   FAM_18  -  New 16 bit instruction word like 18C242, ...
+;
+fam_12   set     0           ;init all family type flags to false
+fam_16c5 set     0
+fam_16   set     0
+fam_16b  set     0
+fam_17   set     0
+fam_18   set     0
+
+;**********
+;
+;   Check for known FAM_12 devices.
+;
+  ifdef __10f200
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'10'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __10f202
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'08'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __10f204
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'10'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __10f206
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'08'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __10f220
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'10'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __10f222
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'09'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __12f508
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     0
+regstart set     h'07'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+
+  ifdef __12c508a
+fam_12   set     1
+nregbanks set    1
+ncodepages set   1
+numregs  set     9
+regstart set     h'07'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+  ifdef __12c509a
+fam_12   set     1
+nregbanks set    2
+ncodepages set   2
+numregs  set     9
+regstart set     h'07'
+stacklast set    h'3F'
+stacksize set    0
+    endif
+
+  ifdef __16f506
+fam_12   set     1
+nregbanks set    1
+ncodepages set   2
+numregs  set     9
+regstart set     h'10'
+stacklast set    h'1F'
+stacksize set    0
+    endif
+
+;**********
+;
+;   Check for known FAM_16C5 devices.
+;
+
+
+;**********
+;
+;   Check known FAM_16 devices.
+;
+  ifdef __12f629
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'20'
+commregs_last set h'5F'
+regstart set     h'20'
+stacklast set    h'5F'
+stacksize set    16
+ee_start set     h'2100'
+    endif
+
+  ifdef __12f675
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'20'
+commregs_last set h'5F'
+regstart set     h'20'
+stacklast set    h'5F'
+stacksize set    16
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f610
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    32
+    endif
+
+  ifdef __16f616
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+    endif
+
+  ifdef __16f688
+fam_16   set     1
+nregbanks set    3
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'16F'
+stacksize set    32
+    endif
+
+  ifdef __16f630
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'20'
+commregs_last set h'5F'
+regstart set     h'20'
+stacklast set    h'5F'
+stacksize set    16
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f636
+fam_16   set     1
+nregbanks set    4
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+regstart set     h'70'
+stacklast set    h'BF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f676
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'20'
+commregs_last set h'5F'
+regstart set     h'20'
+stacklast set    h'5F'
+stacksize set    16
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f677
+fam_16   set     1
+nregbanks set    4
+ncodepages set   1
+commregs_first set h'F0'
+commregs_last set h'7F'
+regstart set     h'70'
+stacklast set    h'BF'
+stacksize set    32
+ee_start set     h'2100'
+pullups_porta set b'00110111'
+pullups_portb set b'11110000'
+    endif
+
+  ifdef __16f684
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16c622a
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    32
+    endif
+
+  ifdef __16f627a
+fam_16   set     1
+nregbanks set    3
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f628
+fam_16   set     1
+nregbanks set    3
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f628A
+fam_16   set     1
+nregbanks set    3
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'14F'
+stacksize set    48
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f648A
+fam_16   set     1
+nregbanks set    3
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'EF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16c66
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    40
+    endif
+
+  ifdef __16c77
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    40
+    endif
+
+  ifdef __16f716
+fam_16   set     1
+nregbanks set    2
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+    endif
+
+  ifdef __16f720
+fam_16   set     1
+nregbanks set    4
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+    endif
+
+  ifdef __16f721
+fam_16   set     1
+nregbanks set    4
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+    endif
+
+  ifdef __16f722
+fam_16   set     1
+nregbanks set    4
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+    endif
+
+  ifdef __16f723
+fam_16   set     1
+nregbanks set    4
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'EF'
+stacksize set    40
+    endif
+
+  ifdef __16f724
+fam_16   set     1
+nregbanks set    4
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'EF'
+stacksize set    40
+    endif
+
+  ifdef __16f726
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'EF'
+stacksize set    40
+    endif
+
+  ifdef __16f727
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'EF'
+stacksize set    40
+    endif
+
+  ifdef __16c923
+fam_16   set     1
+nregbanks set    2
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    32
+    endif
+
+  ifdef __16c924
+fam_16   set     1
+nregbanks set    2
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    32
+    endif
+
+  ifdef __16f876
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    40
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f877
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'6F'
+stacksize set    40
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f882
+fam_16   set     1
+nregbanks set    4
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f883
+fam_16   set     1
+nregbanks set    4
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'16F'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f884
+fam_16   set     1
+nregbanks set    4
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'16F'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f886
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'1EF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f887
+fam_16   set     1
+nregbanks set    4
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'1EF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+  ifdef __16f913
+fam_16   set     1
+nregbanks set    4
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'EF'
+stacksize set    32
+ee_start set     h'2100'
+    endif
+
+
+;**********
+;
+;  Enhanced 14 bit core devices.
+;
+  ifdef __12f1501
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'4F'
+stacksize set    24
+progadrb set     2
+create_tempw set false
+    endif
+
+  ifdef __16f1786
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'64F'
+stacksize set    48
+ee_start set     h'F000'
+progadrb set     2
+create_tempw set false
+bra_bug  set     true        ;interrupt during BRA corrupts PC
+pullups_porta set h'FF'
+    endif
+  ifdef __16lf1786
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'64F'
+stacksize set    48
+ee_start set     h'F000'
+progadrb set     2
+create_tempw set false
+bra_bug  set     true        ;interrupt during BRA corrupts PC
+pullups_porta set h'FF'
+    endif
+
+  ifdef __16f1782
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'33F'
+stacksize set    32
+ee_start set     h'F000'
+progadrb set     2
+create_tempw set false
+    endif
+
+  ifdef __16f1823
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   1
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'BF'
+stacksize set    32
+ee_start set     h'F000'
+progadrb set     2
+create_tempw set false
+    endif
+
+
+;**********
+;
+;   Check known FAM_17 devices.
+;
+  ifdef __17c752
+fam_17   set     1
+nregbanks set    7
+ncodepages set   1
+stacklast set    h'FD'
+stacksize set    40
+regstart set     h'1B'
+uart_type set    1
+    endif
+
+  ifdef __17c756a
+fam_17   set     1
+nregbanks set    8
+ncodepages set   2
+stacklast set    h'FD'
+stacksize set    40
+regstart set     h'1B'
+uart_type set    1
+    endif
+
+
+;**********
+;
+;   Check for known FAM_18 devices.
+;
+  ifdef __18f252
+fam_18   set     1
+nregbanks set    6
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f2520
+fam_18   set     1
+nregbanks set    6
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f452
+fam_18   set     1
+nregbanks set    6
+ncodepages set   1
+acclast  set     h'7F'
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f2450
+fam_18   set     1
+nregbanks set    2
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    40
+regstart set     0
+numregs  set     16
+adr_word set     2
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f2455
+fam_18   set     1
+nregbanks set    8
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+
+  ifdef __18f4450
+fam_18   set     1
+nregbanks set    2
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    40
+regstart set     0
+numregs  set     16
+adr_word set     2
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f4455
+fam_18   set     1
+nregbanks set    8
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f4550
+fam_18   set     1
+nregbanks set    8
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f45k22
+fam_18   set     1
+nregbanks set    6
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+progadrb set     2
+    endif
+
+  ifdef __18f2480
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f25k80
+fam_18   set     1
+nregbanks set    16
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f2550
+fam_18   set     1
+nregbanks set    8
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f13k50
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    32
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'200'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+  ifdef __18lf13k50
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    32
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'200'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f14k50
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    48
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'200'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+  ifdef __18lf14k50
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    48
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'200'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
+  ifdef __18f2423
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f2580
+fam_18   set     1
+nregbanks set    6
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f4480
+fam_18   set     1
+nregbanks set    3
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+proglast set     h'3FFF'
+    endif
+
+  ifdef __18f4580
+fam_18   set     1
+nregbanks set    6
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+/const   proglast integer = 16#7FFF
+/const   prog_erasesz integer = 64 ;program memory erase block size, bytes
+/const   prog_writesz integer = 32 ;program memory write block size, bytes
+proglast set     [v proglast]
+    endif
+
+  ifdef __18f1220
+fam_18   set     1
+nregbanks set    1
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f1320
+fam_18   set     1
+nregbanks set    1
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f6520
+fam_18   set     1
+nregbanks set    8
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f6527
+fam_18   set     1
+nregbanks set    16
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f6627
+fam_18   set     1
+nregbanks set    16
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     3
+    endif
+
+  ifdef __18f4220
+fam_18   set     1
+nregbanks set    2
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f4320
+fam_18   set     1
+nregbanks set    2
+acclast  set     h'7F'
+ncodepages set   1
+stacklast set    h'80'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f6680
+fam_18   set     1
+nregbanks set    13
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  ifdef __18f67j60
+fam_18   set     1
+nregbanks set    15
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     3
+cfg_adr  set     h'1FFF8'
+    endif
+
+  ifdef __18f26j50
+fam_18   set     1
+nregbanks set    15
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+cfg_adr  set     h'0FFF8'
+    endif
+
+  ifdef __18f47j53
+fam_18   set     1
+nregbanks set    15
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+progadrb set     3
+usb_bd0  set     h'D00'      ;start of USB buffer descriptor 0
+cfg_adr  set     h'1FFF8'
+    endif
+
+  ifdef __18f25k20
+fam_18   set     1
+nregbanks set    15
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    64
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+progadrb set     2
+    endif
+
+  if fam_18
+    ifndef cfg_adr
+cfg_adr  set     h'300000'   ;default config words start for 18F
+      endif
+    endif
+
+;**********
+;
+;   Make sure exactly ONE of the FAM_xxx symbols is set to 1.
+;
+ii       set     0
+  if fam_12
+ii       set     ii + 1
+    endif
+  if fam_16c5
+ii       set     ii + 1
+    endif
+  if fam_16
+ii       set     ii + 1
+    endif
+  if fam_16b
+ii       set     ii + 1
+    endif
+  if fam_17
+ii       set     ii + 1
+    endif
+  if fam_18
+ii       set     ii + 1
+    endif
+
+  if ii < 1
+         error   "Specific processor not identified in STD_DEF.INS.ASPIC"
+    endif
+  if ii > 1
+         error   "Multiple processor families identified in STD_DEF.INS.ASPIC"
+    endif
+
+  if fam_18
+         errorlevel -230     ;shut up about __CONFIG deprecated
+    endif
+
+         errorlevel -311     ;don't whine about HIGH argument larger than FFFFh
+         errorlevel -231     ;don't whine about label in RAM without reserved mem

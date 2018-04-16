@@ -1,0 +1,4 @@
+/var new show_net_config bool = true ;enable showing net routines config
+/include "qq2.ins.aspic"
+/include "(cog)src/pic/net_task.ins.aspic"
+         end

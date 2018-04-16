@@ -1,0 +1,1592 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Dynamic Host Configuration Protocol (DHCP).
+;
+;   This module implements the dynamic host configuration protocol as described
+;   by RFC 2131.  DHCP is used to acquire a IP address for this node, and to
+;   determine the netmask and router IP address for our local network segment.
+;
+;   This module has no entry points intended to be called directly by
+;   applications.  Parts of this module are run by the network background task
+;   on 100 ms clock ticks and when a UDP packet to the DHCP port is received.
+;
+;   When the network stack is configured for DHCP capability, UDP and IP will
+;   also be automatically included.
+;
+/if [not using_net_dhcp] then ;DHCP is globally disabled ?
+  /show "  Disabled"
+         end
+  /stop
+  /endif
+
+         extern  our_ip      ;our IP address, high to low byte order
+         extern  netmask     ;our network mask, high to low byte order
+         extern  gateway     ;IP address of router, high to low byte order
+         extern  our_mac     ;our MAC address, high to low byte order
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Constants that reflect external realities and that are therefore not design
+;   choices or values we can change.
+;
+;   BOOTP option opcodes.  Each of these preprocessor constants is named OPT_xxx
+;   where XXX is the name of the option.
+;
+/const   opt_subnet integer = 1 ;length 4, local subnet mask
+/const   opt_routers integer = 3 ;length 4n, list of N routers, preferred first
+/const   opt_reqip integer = 50 ;length 4, requested IP address, used when renewing
+/const   opt_leaset integer = 51 ;length 4, lease time in seconds
+/const   opt_server integer = 54 ;length 4, DHCP server IP address
+/const   opt_reqopt integer = 55 ;length N, list of requested option opcodes
+/const   opt_renewt integer = 58 ;length 4, renew time in seconds
+/const   opt_rebindt integer = 59 ;length 4, rebind time in seconds
+/const   opt_end integer = 255 ;no length byte or following data
+;
+;   Configuration constants.
+;
+lbank    equ     [v lbank_net_dhcp] ;register bank for the local state of this module
+dhcpsave set     0           ;registers saved by YIELD in pseudo-task
+dhcpsave set     dhcpsave | regf0
+dhcpsave set     dhcpsave | regf1
+dhcpsave set     dhcpsave | regf2
+dhcpsave set     dhcpsave | regf3
+dhcpsave set     dhcpsave | regf8
+/const   nststack integer = 2 ;maximum state machine nexting level supported
+sendsize equ     312         ;max size of UDP message to send
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+nststack equ     [v nststack]
+;
+;   Symbolic names for the DHCP processing states.
+;
+  cblock 0
+dhst_init                    ;immediately after initialization
+dhst_inisend                 ;init for sending a DHCP packet via UDP
+dhst_send1                   ;send initial DHCP request
+dhst_send2                   ;send DHCP discover message
+dhst_wait_offer              ;wait for DHCP offer message
+dhst_offer                   ;OFFER message was received
+dhst_reqoff                  ;send request in response to offer
+dhst_wait_ack1               ;wait for ACK to DISCOVER->OFFER->REQUEST
+dhst_ack                     ;received ACK
+dhst_wait_lease              ;waiting for lease to run down to require action
+dhst_renew                   ;send message to try to renew lease
+    endc
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+restart  res     progadrb    ;DHCP_RUN pseudo-thread restart address
+udpin    res     1           ;UDP input unit number
+udpout   res     1           ;UDP output unit number
+dhstate  res     nststack+1  ;DHCP processing state
+cntsec   res     1           ;100 ms ticks until next 1 second tick
+elsecs   res     2           ;elapsed seconds of relevant operation
+sretry   res     1           ;seconds until retry
+nxtry    res     1           ;seconds for next retry wait
+of_ip    res     4           ;offered IP address
+serv_id  res     4           ;unique ID of the selected DHCP server
+tleft    res     2           ;seconds left in lease
+                             ;elapsed seconds last sent before lease
+
+  if debug
+         global  udpin, udpout, dhstate
+         global  cntsec, elsecs, sretry, nxtry
+         global  of_ip, serv_id, tleft
+    endif
+;
+;   Save area for the registers that are preserved accross a YIELD call in the
+;   pseudo-task.
+;
+ii       set     0
+mask     set     1
+  while ii < numregs
+    if mask & dhcpsave
+save#v(ii) res   1
+      endif
+ii       set     ii + 1
+mask     set     mask << 1
+    endw
+
+.dhcp_acs udata_acs          ;local state in the access bank
+flgs1    res     1           ;set of 1-bit flags, use FLG_xxx
+
+#define flg_ropen flgs1, 0   ;UDP input unit is open
+#define flg_sopen flgs1, 1   ;UDP output unit is open
+#define flg_sec flgs1, 2     ;one second tick occurred this run
+#define flg_optfl flgs1, 3   ;options continue into FILE field
+#define flg_optsn flgs1, 4   ;options continue into SNAME field
+#define flg_nack flgs1, 5    ;received DHCP NACK message
+#define flg_lease flgs1, 6   ;we have IP lease, TLEFT is seconds left
+#define flg_reset flgs1, 7   ;do explicit reset of state machine
+
+.dhcp    code
+
+;*******************************************************************************
+;
+;   Subroutine NET_DHCP_INIT
+;
+;   Performs one-time module-level initialization.  This routine is called from
+;   NETWORK_INIT when the system has been configured for DHCP capability.  It is
+;   also called from the state machine logic if the state machine needs to be
+;   reset to the initial state.
+;
+         glbsub  net_dhcp_init, noregs
+;
+;   Init local state.
+;
+         mcall   dhcp_reset_state ;init DHCP processing state machine
+;
+;   Init global state.
+;
+         dbankif gbankadr
+         bsf     flag_dhcp   ;init to using DHCP to get network config
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine DHCP_RESET_STATE
+;
+;   Reset the DHCP processing state machine.
+;
+         locsub  dhcp_reset_state, noregs
+
+         dbankif lbankadr
+         movlw   low task_start ;init pseudo-task restart address
+         movwf   restart+0
+  if progadrb > 1
+         movlw   high task_start
+         movwf   restart+1
+    endif
+  if progadrb > 2
+         movlw   upper task_start
+         movwf   restart+2
+    endif
+
+         loadk8  dhstate, dhst_init ;start in INIT state
+         loadk16 elsecs, 0
+         loadk8  cntsec, 10
+
+         clrf    flgs1       ;init all local flags to off
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine DHCP_RESET
+;
+;   Cancel the current DHCP lease, if any, and reset the DHCP state machine.
+;   This routine is intended to be called if external logic knows of a reason
+;   the DHCP lease needs to be terminated.
+;
+         glbsub  dhcp_reset, noregs
+
+         bsf     flg_reset   ;do reset next time DHCP state machine is run
+;
+;   Reset the current IP configuration if it came from DHCP, which we now have to
+;   assume is invalid.
+;
+         dbankif gbankadr
+         btfss   flag_dhcp   ;IP config being determined by DHCP ?
+         jump    dhres_dhoff ;no, skip this section
+
+         gcall   net_ipconfig_clear ;reset IP configuration to unknown
+
+dhres_dhoff unbank           ;skip to here if IP config not from DHCP
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine DHCP_RUN
+;
+;   This routine is called to allow DHCP processing when a relevant external
+;   event occurs.  Currently the only such external event is a UDP datagram has
+;   been received.  There is no guarantee that the UDP datagram is for DHCP.
+;   That must be determined by the pseudo-thread.
+;
+;   This routine must only be called from top level code, not from within any
+;   subroutine.  In other words, the hardware call stack pointer must be 0 in
+;   the calling routine at the time of the call.
+;
+;   This routine restores the pseudo-thread state and runs the pseudo-thread at
+;   its restart address.  The pseudo-thread runs the YIELD macro to release the
+;   processor until the next DHCP_RUN call.  YIELD eventually causes DHCP_RUN
+;   to return.
+;
+;   WARNING:  All the general registers may be trashed.
+;
+         glbsub  dhcp_run, noregs
+;
+;   Return immediately if DHCP is not enabled.  The global precprocessor
+;   variable USING_NET_DHCP causes the DHCP code to be included in the build
+;   when set to TRUE.  This allows use of DHCP at runtime, which is also the
+;   default set by NET_DHCP_INIT (above).  However, the application can chose to
+;   not use DHCP at runtime by clearing FLAG_DHCP.  This flag is checked here
+;   and nothing is done if DHCP is disabled at runtime (flag not set).
+;
+         dbankif gbankadr
+         btfss   flag_dhcp   ;DHCP enabled at runtime ?
+         return              ;no, nothing to do
+;
+;   Restore the general registers listed in DHCPSAVE.
+;
+ii       set     0
+mask     set     1
+  while ii < numregs
+    if mask & dhcpsave
+         movff   save#v(ii), reg#v(ii)
+      endif
+ii       set     ii + 1
+mask     set     mask << 1
+    endw
+;
+;   Jump to the pseudo-thread restart address.
+;
+  if progadrb > 2
+         movff   restart+2, pclatu
+    endif
+  if progadrb > 1
+         movff   restart+1, pclath
+    endif
+         dbankif lbankadr
+         movf    restart+0, w
+         movwf   pcl
+
+;*******************************************************************************
+;
+;   Macro YIELD
+;
+;   Used by the pseudo-thread only to release the processor to other tasks.
+;   Since the whold pseudo-thread is actually part of subroutine DHCP_RUN, this
+;   macro eventually causes a return from DHCP_RUN.
+;
+;   This macro saves the state unique to the location it was envoked from, then
+;   jumps to non-replicated code to perform any further processing.
+;
+yield    macro
+         local   nextrun
+
+  if progadrb > 2
+         dbankif lbankadr
+         movlw   upper nextrun
+         movwf   restart+2
+    endif
+  if progadrb > 1
+         dbankif lbankadr
+         movlw   high nextrun
+         movwf   restart+1
+    endif
+         movlw   low nextrun
+         jump    yield2      ;to non-replicated code
+
+nextrun  dbankis lbankadr    ;pseudo-thread restart address next time
+         endm
+;
+;   Routine YIELD2
+;
+;   This is the non-replicated code that can be thought of as part of macro
+;   YIELD.  All but the low byte of the restart address has been saved in
+;   RESTART.  The low byte of the restart address is in W.  The bank is set for
+;   access to the local state.
+;
+yield2   dbankis lbankadr
+         movwf   restart+0   ;save low byte of the restart address
+;
+;   Save the general registers listed in DHCPSAVE so that they can be restored
+;   when the pseudo-thread is next run.
+;
+ii       set     0
+mask     set     1
+  while ii < numregs
+    if mask & dhcpsave
+         movff   reg#v(ii), save#v(ii)
+      endif
+ii       set     ii + 1
+mask     set     mask << 1
+    endw
+
+         return              ;return from DHCP_RUN
+
+;*******************************************************************************
+;
+;   Local subroutine CHECK_BYTE
+;
+;   Check that the next byte read from the received datagram is the value passed
+;   in W.  If so, this routine returns normally.  If not, the packet is
+;   discarded by jumping to TSK_DONE at the original call nesting level.  This
+;   releases the received datagram and returns execution to the caller of
+;   DHCP_RUN.
+;
+;   REG0 and REG1 are trashed.
+;
+         locsub  check_byte, noregs
+
+         movwf   reg1        ;save the exected byte value
+         gcall   udp_recv_read ;get the next datagram byte into REG0
+         movf    reg0, w     ;get the new byte
+         xorwf   reg1, w     ;compare it to the expected byte
+         skip_nz             ;mismatch
+         return              ;is the expected byte, return normally
+;
+;   Mismatch, abort to TSK_DONE at the original call nesting level, which is 1.
+;
+         movlw   1           ;jump back to the original call nesting level
+         movwf   stkptr
+         jump    tsk_done    ;discard packet and return from DHCP_RUN
+
+;*******************************************************************************
+;
+;   Local subroutine GET_OPTION_INIT
+;
+;   Set up the state for reading the stream of options using GET_OPTION.  This
+;   routine must be called before attempting to read the first option.
+;   GET_OPTION always returns the first option in the stream after this routine
+;   is called.
+;
+;   REG0,REG1 are trashed.
+;
+         locsub  get_option_init, noregs
+
+         loadk16 reg0, 240   ;go to first option in OPTIONS field
+         gcall   udp_recv_ofs
+
+         clrf    reg6        ;no unread bytes left in previous option
+         bcf     flg_optfl   ;init to options not continued in FILE field
+         bcf     flg_optsn   ;init to options not continued in SNAME field
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_OPTION_BYTE
+;
+;   Get the next data byte of the current option into REG0.  REG6 is the number
+;   of unread data bytes of the current option, and will be updated.  If REG6 is
+;   zero on entry, then no data byte is read, REG6 is not changed, and the
+;   returned byte value in REG0 will be zero.
+;
+         locsub  get_option_byte, noregs
+
+         clrf    reg0        ;init the returned data byte value
+         movf    reg6
+         bz      goptb_leave ;no byte left to read ?
+
+         gcall   udp_recv_read ;get the next data byte into REG0
+         decf    reg6        ;count one less data byte left in option
+
+goptb_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine GET_OPTION
+;
+;   Read the option at the current position of the received datagram.  All
+;   options start with a opcode byte.  Except for the special options of 0 and
+;   255, this is followed by a length byte, followed by exactly that many data
+;   bytes.
+;
+;   The special option 0 is a NOP, and consists only of the opcode byte.  The
+;   special option 255 indicates the end of the options, and consists only of
+;   the opcode byte.
+;
+;   The option opcode is returned in REG4 and the data length in REG5.  Up to
+;   the first 4 data bytes are returned in REG3 thru REG0.  The number of
+;   remaining unread data bytes is returned in REG6.  REG6 must contain the
+;   number of remaining unread data bytes on entry to this routine.  These bytes
+;   will be read and discarded, then the following byte interpreted as the
+;   opcode of the next option.  This allows callers to easily skip over
+;   irrelevant options without having to explicitly consume their data bytes.
+;   The routine GET_OPTION_BYTE can be used to get a single additional data byte
+;   from the option, using and updating REG6 in the process.  It is recommended
+;   callers use this routine instead of calling UDP_RECV_READ directly to get
+;   additional data bytes for options with more than 4 relevant data bytes.
+;
+;   In summary, the registers used are:
+;
+;     REG3,REG2,REG1,REG0  -  Returned up to the first 4 option data bytes.  The
+;       first data byte is returned in REG3, the second in REG2, etc.  If the
+;       option has fewer than 4 data bytes, the remaining registers are returned
+;       0.
+;
+;     REG4  -  Returned the option opcode.
+;
+;     REG5  -  Returned the total number of data bytes.
+;
+;     REG6  -  On entry is the number of bytes to skip before reading the next
+;       option.  Returned the number of bytes remaining in the option after data
+;       bytes have been read into REG3-REG0.  This value is therefore 0 for
+;       options with 0 to 4 data bytes, and the number of data bytes minus 4 for
+;       options with more data bytes.
+;
+;   This routine presents the abstraction of a single linear list of options.
+;   The presence of the OVERLOAD options and therefore continuance of the stream
+;   of options to the FILE and SNAME fields is hidden by this routine.  The
+;   OVERLOAD option is processed internally and never returned.  The END option
+;   is only returned once at the end of the whole stream of options, not at the
+;   end of the options in the OPTIONS and FILE fields if these are continued.
+;   All PAD options are skipped internally.  This routine never returns a PAD
+;   option.
+;
+;   GET_OPTION_INIT must be called before calling this routine to get the first
+;   option.
+;
+         locsub  get_option, noregs
+
+gopt_next unbank             ;back here to get next option
+;
+;   Consume the number of data bytes indicated by REG6.
+;
+gopt_skip unbank             ;back here to skip each new byte
+         movf    reg6
+         bz      gopt_dskip  ;done skipping initial bytes ?
+         gcall   udp_recv_read ;read this byte
+         decf    reg6        ;count one less byte left to skip
+         jump    gopt_skip   ;back to do next byte
+gopt_dskip unbank            ;done skipping to start of new option
+;
+;   The next byte is the option opcode.  REG6 is set to 0.
+;
+         clrf    reg5        ;init total number of data bytes to 0
+         gcall   udp_recv_read ;get opcode byte
+         movf    reg0, w
+         bz      gopt_next   ;ignore PAD options
+         movwf   reg4        ;save it in REG4
+         addlw   1
+         bz      gopt_data   ;special case opcode of 255 ?
+
+         gcall   udp_recv_read ;get the number of data bytes
+         movf    reg0, w
+         movwf   reg5        ;return total number of data bytes in REG5
+         movwf   reg6        ;init remaining unread data bytes in REG6
+;
+;   Read up to the first 4 data bytes into REG3-REG0.  Any non-existant data
+;   bytes will be returned as 0.
+;
+gopt_data unbank
+         mcall   get_option_byte
+         movff   reg0, reg3
+         mcall   get_option_byte
+         movff   reg0, reg2
+         mcall   get_option_byte
+         movff   reg0, reg1
+         mcall   get_option_byte
+;
+;   Check for the special case of the OVERLOAD option.  This indicates that the
+;   FILE and/or SNAME fields contain additional options.  This option may only
+;   appear in the OPTIONS field.  These additional options are only processed
+;   after the OPTIONS field has been exhausted (END option encountered).
+;
+         movf    reg4, w     ;get the option opcode
+         xorlw   52          ;compare to OVERLOAD option
+         bnz     gopt_novld  ;not OVERLOAD option ?
+
+         btfsc   reg3, 0
+         bsf     flg_optfl   ;indicate to continue later in FILE field
+         btfsc   reg3, 1
+         bsf     flg_optsn   ;indicate to continue later in SNAME field
+         jump    gopt_next   ;done with this option, back to get next
+
+gopt_novld unbank            ;this is not the OVERLOAD option
+;
+;   Check for special case of the END option.  This may cause switching to the
+;   FILE or SNAME fields.
+;
+         movf    reg4, w     ;get the option opcode
+         xorlw   255         ;compare to END option
+         bnz     gopt_nend   ;not END option ?
+
+         btfss   flg_optfl   ;continue in the FILE field ?
+         jump    gopt_nfile  ;no
+         bcf     flg_optfl   ;don't jump to FILE field again
+         loadk16 reg0, 106   ;go to start of FILE field
+         gcall   udp_recv_ofs
+         jump    gopt_next   ;back to get next option at new position
+gopt_nfile unbank            ;options not continuing in FILE field
+
+         btfss   flg_optsn   ;continue in the SNAME field ?
+         jump    gopt_nsname ;no
+         bcf     flg_optsn   ;don't jump to SNAME field again
+         loadk16 reg0, 44    ;go to start of SNAME field
+         gcall   udp_recv_ofs
+         jump    gopt_next   ;back to get next option at new position
+gopt_nsname unbank           ;options not continuing in SNAME field
+
+gopt_nend unbank             ;skip to here on not END option
+
+         leaverest
+
+//******************************************************************************
+//
+//   Macro CHECK_OPT_INIT
+//
+//   Initialize for checking the current option for being one of a small list
+//   of specific options.  The option opcode must be in REG4, as it is on return
+//   from GET_OPTION.  The runtime and preprocessor state are set up as required
+//   by macro CHECK_OPT, below.
+//
+/macro check_opt_init
+         movf    reg4, w     ;get the option opcode
+  /set opt_test 0            ;init total subtracted from W so far
+  /endmac
+
+//******************************************************************************
+//
+//   Macro CHECK_OPT opt, skip, [LONG]
+//
+//   Check for the option opcode OPT.  If it is this option, then fall thru to
+//   after this macro.  Otherwise jump to SKIP.
+//
+//   This macro is inteneded to be used in a chain of tests for a sparse set of
+//   opcodes from a larger domain.  W starts out with the option opcode, and a
+//   specific opcode is subtracted from it to test for that opcode.  To avoid
+//   reloading W each test, the subtraction of the next test is adjusted to
+//   compensate for the total subtracted so far.  This total is kept track of
+//   in the preprocessor variable OPT_TEST, which must be set to 0 before the
+//   first test.
+//
+//   The third argument must either be "LONG" or be omitted.  When omitted, a
+//   conditional relative branch is used to jump to SKIP when the option does
+//   not match.  This is the most efficient, and is fine when SKIP is only a
+//   short distance from this macro.  The LONG option forces a unconditional
+//   relative branch to be used, which has a much longer range.
+//
+/macro check_opt
+  /if [not [exist 1 arg]] then
+    /show "  Argument 1 to CHECK_OPT missing"
+         error   check_opt
+         end
+    /stop
+    /endif
+  /if [not [exist 2 arg]] then
+    /show "  Argument 2 to CHECK_OPT missing"
+         error   check_opt
+         end
+    /stop
+    /endif
+
+  /var local opt string = [ucase [qstr [arg 1]]]
+  /var local long bool = false
+  /var local optn integer    ;0-255 option opcode
+  /var local ii integer      ;scratch integer
+  /var local jj integer
+
+  /if [exist 3 arg] then     ;third argument was provided ?
+    /if [<> [ucase [qstr [arg 3]]] "LONG"] then
+      /show '  Argument 3 to CHECK_OPT is not "LONG"'
+         error   check_opt
+         end
+      /stop
+      /endif
+    /set long true
+    /endif
+
+  /set optn [chars "opt_" [qstr [arg 1]]] ;get option opcode value
+  /set ii [+ optn opt_test]  ;make W value now for it to be this opcode
+  /set ii [and ii 255]
+  /if [<= ii 128]
+    /then                    ;value is small, so subtract normally
+      /set jj [- 0 ii]
+    /else                    ;value is large, really doing addition
+      /set jj [- 256 ii]
+    /endif
+         addlw   [chars [if [< jj 0] "low " ""]][v jj]
+  /if long
+    /then                    ;use long reach conditional branch
+      /write "         skip_z              ;is the " opt " option ?"
+      /write "         jump    " [qstr [arg 2]] "   ;no"
+    /else                    ;use short reach conditional branch
+      /write "         bnz     " [qstr [arg 2]] "   ;not the " opt " option ?"
+    /endif
+  /write ""
+  /set opt_test [- opt_test ii] ;update total that has been subtracted from W
+  /set opt_test [and opt_test 255]
+  /endmac
+
+/var new opt_test integer    ;the total subtracted from W currently
+
+;*******************************************************************************
+;
+;   DHCP processing pseudo-task.  This task is run whenever DHCP_RUN is called
+;   until the task executes YIELD.  YIELD must only be run from the top level,
+;   not from within any subroutines.
+;
+;   This task is only run when a received UDP datagram is open.  There is no
+;   guarantee that the datagram is open on our UDP unit.
+;
+tsk_wopen dbankis lbankadr   ;back here to wait for UDP input unit to be open
+         yield
+task_start                   ;task initial start point.
+         btfss   flg_ropen   ;UDP input unit has been opened ?
+         jump    tsk_wopen   ;no, go back and check again
+;
+;   Wait for a UDP datagram to be received.
+;
+tsk_wudp unbank
+         yield
+         movff   udpin, reg8 ;get the UDP input unit number
+         gcall   udp_recv_check ;check for UDP datagram received
+         skip_nz             ;we have a received UDP datagram ?
+         jump    tsk_wudp    ;no, go back and check again
+;
+;   A UDP datagram has been received to our port and is currently open for
+;   reading.  Only one received network packet can be open at a time, so this
+;   packet must be processed and released quickly.  Most other network
+;   processing will be suspended until this packet is released.
+;
+         gcall   udp_recv_src_port ;get the UDP source port into REG1:REG0
+         movlw   67          ;validate datagram was sent from DHCP server port
+         xorwf   reg0, w
+         iorwf   reg1
+         skip_z
+         jump    tsk_done    ;not from DHCP server port
+;
+;   Check some of the fixed fields to verify this packet is worth processing
+;   further.
+;
+         loadk16 reg0, 0     ;go to OP field
+         gcall   udp_recv_ofs
+         movlw   2           ;must be reply
+         mcall   check_byte
+
+         loadk16 reg0, 2     ;go to hardware address length field
+         gcall   udp_recv_ofs
+         movlw   6           ;must be size of MAC address
+         mcall   check_byte
+
+         loadk16 reg0, 28    ;go to client hardware address
+         gcall   udp_recv_ofs
+         dbankif gbankadr
+         movf    our_mac+0, w ;verify it is our MAC address
+         mcall   check_byte
+         dbankif gbankadr
+         movf    our_mac+1, w
+         mcall   check_byte
+         dbankif gbankadr
+         movf    our_mac+2, w
+         mcall   check_byte
+         dbankif gbankadr
+         movf    our_mac+3, w
+         mcall   check_byte
+         dbankif gbankadr
+         movf    our_mac+4, w
+         mcall   check_byte
+         dbankif gbankadr
+         movf    our_mac+5, w
+         mcall   check_byte
+
+         loadk16 reg0, 236   ;go to start of OPTIONS field
+         gcall   udp_recv_ofs
+         movlw   99          ;validate the "magic cookie" value of 99,130,83,99
+         mcall   check_byte
+         movlw   130
+         mcall   check_byte
+         movlw   83
+         mcall   check_byte
+         movlw   99
+         mcall   check_byte
+;
+;   Scan all the options once only to determine the type of DHCP message this
+;   is.  We don't really know what to do with this message until we know the
+;   type, and there is no guarantee the type is the first option.  Since a
+;   valid DHCP message must have a DHCP message type option, this message is
+;   discarded if no such option is found.
+;
+         mcall   get_option_init ;init for reading the stream of options
+tsk_typloop unbank           ;back here each new option
+         mcall   get_option  ;read this option
+         incf    reg4, w     ;set Z flag if this is END option
+         skip_nz             ;not END option
+         jump    tsk_done    ;END encountered before DHCP type, discard message
+         xorlw   53+1        ;compare to DHCP MESSAGE TYPE option
+         bnz     tsk_typloop ;not DHCP MESSAGE TYPE, back to try next option
+         ;
+         ;   This option is DHCP MESSAGE TYPE.  The only valid DHCP message
+         ;   types we receive are:
+         ;
+         ;     OFFER: 2
+         ;     ACK: 5
+         ;     NACK: 6
+         ;
+         movf    reg3, w     ;get the message type ID
+         addlw   -2
+         skip_nz
+         jump    tsk_offer   ;is OFFER message
+         addlw   -3
+         skip_nz
+         jump    tsk_ack     ;is ACK message
+         addlw   -1
+         skip_nz
+         jump    tsk_nack    ;is NACK message
+;
+;   All done with the received message.
+;
+tsk_done unbank              ;done with the received packet
+         gcall   udp_recv_release ;release the received UDP datagram
+         jump    tsk_wudp    ;back to wait for the next one
+
+;*****************************
+;
+;   This is a DHCP OFFER message.
+;
+tsk_offer unbank
+         dbankif lbankadr
+         movf    dhstate, w  ;get current DHCP processing state
+         xorlw   dhst_wait_offer ;compare to waiting for OFFER message
+         skip_z              ;expecting offer message ?
+         jump    tsk_done    ;no, discard this message
+         ;
+         ;   Init the DHCP server IP address with the source IP address of this
+         ;   message.  Apparently not all DHCP servers send the server ID option
+         ;   as expected.  If this option is present, then its value will
+         ;   overwrite the server address we grab here.
+         ;
+         gcall   ip_recv_src ;get IP source address into REG3:REG2:REG1:REG0
+         movff   reg3, serv_id+0 ;save it
+         movff   reg2, serv_id+1
+         movff   reg1, serv_id+2
+         movff   reg0, serv_id+3
+         ;
+         ;   Save offered IP address in OF_IP (YIADDR field).
+         ;
+         loadk16 reg0, 16    ;move to start of YIADDR field
+         gcall   udp_recv_ofs
+         loadk8  reg1, 4     ;number of bytes to read
+         lfsr    0, of_ip    ;where to write them
+         gcall   udp_recv_read_ind ;save offered IP address
+;
+;   Process the options.
+;
+         mcall   get_option_init ;init for reading the options stream
+tsk_offopt unbank            ;back here each new option from offer message
+         mcall   get_option  ;get info about this option
+         check_opt_init      ;init for checking for specific options
+;
+;   Option SUBNET: 1, 4, subnet IP address
+;
+         check_opt subnet, tsk_off_nsubnet
+         movff   reg3, netmask+0
+         movff   reg2, netmask+1
+         movff   reg1, netmask+2
+         movff   reg0, netmask+3
+         jump    tsk_offopt
+
+tsk_off_nsubnet unbank
+;
+;   Option ROUTERS: 3, 4n, list of N router IPs, preferred first
+;
+         check_opt routers, tsk_off_nrouters
+         movff   reg3, gateway+0 ;save IP address of the preferred router
+         movff   reg2, gateway+1
+         movff   reg1, gateway+2
+         movff   reg0, gateway+3
+         jump    tsk_offopt
+
+tsk_off_nrouters unbank
+;
+;   Option SERVER: 54, 4, server ID (IP address)
+;
+         check_opt server, tsk_off_nserver
+         movff   reg3, serv_id+0
+         movff   reg2, serv_id+1
+         movff   reg1, serv_id+2
+         movff   reg0, serv_id+3
+         jump    tsk_offopt
+
+tsk_off_nserver unbank
+;
+;   Option END: 255
+;
+         check_opt end, tsk_offopt, long
+;
+;   All the options have been processed.
+;
+;   Ignore this offer if it is from any of the IP addresses that the constants
+;   DHCP_SERV_AVOIDn are set to.  These are preprocessor string constants that
+;   each contain a IP address in dot notation format.  The constants are
+;   numbered sequentially starting at 1.  If a constant of a particular number
+;   does not exist, then it is safe to assume no constants of a higher number
+;   exist.
+;
+/var new ii integer = 1      ;init to number of first constant to check
+/var new name string         ;full name of current constant
+/block                       ;back here each new constant to check
+  /set name [str "dhcp_serv_avoid" ii] ;make full name of this constant
+  /if [not [exist name]] then ;this constant doesn't exist ?
+    /quit
+    /endif
+  /call parse_ipadr [chars name] ip ;get IP address bytes into IP0-IP3
+  /show "  Avoiding DHCP offers from " ip3 "." ip2 "." ip1 "." ip0
+  /write "         ;"
+  /write "         ;   Reject this offer if it is from " ip3 "." ip2 "." ip1 "." ip0
+  /write "         ;"
+         dbankif lbankadr
+         movf    serv_id+0, w
+         xorlw   [v ip3]
+         movwf   reg0
+         movf    serv_id+1, w
+         xorlw   [v ip2]
+         iorwf   reg0
+         movf    serv_id+2, w
+         xorlw   [v ip1]
+         iorwf   reg0
+         movf    serv_id+3, w
+         xorlw   [v ip0]
+         iorwf   reg0
+         skip_nz             ;not this specific IP address ?
+         jump    tsk_done    ;is this IP address, ignore the packet
+  /set ii [+ ii 1]
+  /repeat
+  /endblock
+/del name                    ;delete temporary variables
+/del ii
+;
+;   This is a valid offer.
+;
+         dbankif lbankadr
+         loadk8  dhstate, dhst_offer ;indicate offer message received
+         jump    tsk_done    ;done processing this message
+
+;*****************************
+;
+;   This is a DHCP ACK message.
+;
+tsk_ack  unbank
+         ;
+         ;   Save offered IP address in OF_IP (YIADDR field).
+         ;
+         loadk16 reg0, 16    ;move to start of YIADDR field
+         gcall   udp_recv_ofs
+         loadk8  reg1, 4     ;number of bytes to read
+         lfsr    0, of_ip    ;where to write them
+         gcall   udp_recv_read_ind ;save offered IP address
+;
+;   Process the options.
+;
+         mcall   get_option_init ;init for reading the options stream
+tsk_ackopt unbank            ;back here each new option from offer message
+         mcall   get_option  ;get info about this option
+         check_opt_init      ;init for checking for specific options
+;
+;   Option SUBNET: 1, 4, subnet IP address
+;
+         check_opt subnet, tsk_ack_nsubnet
+         movff   reg3, netmask+0
+         movff   reg2, netmask+1
+         movff   reg1, netmask+2
+         movff   reg0, netmask+3
+         jump    tsk_ackopt
+
+tsk_ack_nsubnet unbank
+;
+;   Option ROUTERS: 3, 4n, list of N router IPs, preferred first
+;
+         check_opt routers, tsk_ack_nrouters
+         movff   reg3, gateway+0 ;save IP address of the preferred router
+         movff   reg2, gateway+1
+         movff   reg1, gateway+2
+         movff   reg0, gateway+3
+         jump    tsk_ackopt
+
+tsk_ack_nrouters unbank
+;
+;   Option SERVER: 54, 4, server ID (IP address)
+;
+         check_opt server, tsk_ack_nserver
+         movff   reg3, serv_id+0
+         movff   reg2, serv_id+1
+         movff   reg1, serv_id+2
+         movff   reg0, serv_id+3
+         jump    tsk_ackopt
+
+tsk_ack_nserver unbank
+;
+;   Option LEASET: 51, 4, lease time in seconds
+;
+         check_opt leaset, tsk_ack_nleaset
+         ;
+         ;   The lease time in seconds is in REG3:REG2:REG1:REG0.
+         ;
+         ;   Clip it to the maximum 16 bit unsigned value if more.  This means
+         ;   leases are never longer than 65535 seconds (18.2 hours) from our
+         ;   point of view.  At most this causes us to try to renew the lease
+         ;   after 18 hours or so when it might not be necessary for longer.
+         ;   This time is still so long for the extra bandwidth to be of no
+         ;   consequence.
+         ;
+         movf    reg3, w     ;make OR of the two high bytes
+         iorwf   reg2, w
+         skip_z              ;set low 16 bits to max if overflowed
+         setf    reg1
+         skip_z
+         setf    reg0
+         movff   reg0, tleft+0 ;init seconds remaining in the lease
+         movff   reg1, tleft+1
+         bsf     flg_lease   ;indicate TLEFT now contains remaining lease time
+         jump    tsk_ackopt
+
+tsk_ack_nleaset unbank
+;
+;   Option END: 255
+;
+         check_opt end, tsk_ackopt, long
+;
+;   All the options have been processed.
+;
+         dbankif lbankadr
+         movlw   dhst_ack    ;now in ACK received state
+         movwf   dhstate
+         jump    tsk_done    ;done processing this message
+
+;*****************************
+;
+;   This is a DHCP NACK message.
+;
+tsk_nack unbank
+         bsf     flg_nack    ;indicate NACK message received
+         jump    tsk_done    ;done processing this message
+
+;*******************************************************************************
+;
+;   Local subroutine PUSH_STATE
+;
+;   Push the current states one deeper onto the states stack, and set the
+;   current state to the value in W.
+;
+         locsub  push_state, noregs
+/var new ii integer
+
+         dbankif lbankadr
+/set ii nststack             ;init loop counter
+/block                       ;back here each new value to move
+         movff   dhstate+[- ii 1], dhstate+[v ii]
+  /set ii [- ii 1]
+  /if [> ii 0] then
+    /repeat
+    /endif
+  /endblock
+         movwf   dhstate     ;set new current state
+
+/del ii
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro PUSHSTATE state
+;
+;   Push the indicated state onto the current state stack.  The new state
+;   becomes the current state, and the previous NSTSTACK states are saved.
+;   Execution continues after this macro.
+;
+/macro pushstate
+  /if [not [exist 1 arg]] then
+    /show "  Missing state name parameter to PUSHSTATE macro."
+         error   GOSTATE
+         end
+    /stop
+    /endif
+         movlw   dhst_[arg 1] ;get new state ID
+         mcall   push_state  ;push old state, set new state as current
+  /endmac
+
+;*******************************************************************************
+;
+;   Macro GOSTATE state
+;
+;   Used by the 100mS tick routine to switch to a new DHCP processing state.
+;   STATE is the generic name of the new state.  For example, if STATE is
+;   "init", then the state ID is the constant "dhst_init" and the code for
+;   processing that state is "st_init".
+;
+;   The current state will be set to the new state, then the new state code run
+;   immediately.  The previous state is pushed onto the state stack.  The state
+;   stack is limited in size, and only NSTSTACK previous states are kept.
+;
+/macro gostate
+  /if [not [exist 1 arg]] then
+    /show "  Missing state name parameter to GOSTATE macro."
+         error   GOSTATE
+         end
+    /stop
+    /endif
+  /write
+  /write "         ;   GOSTATE " [qstr [arg 1]]
+         pushstate [arg 1]   ;push old state, set new state as current
+         jump    st_[arg 1]  ;run the routine for the new state
+  /endmac
+
+;*******************************************************************************
+;
+;   Local routine POPSTATE
+;
+;   Restore the previous state as current, then run the code for that state.
+;
+popstate unbank
+/var new ii integer
+
+         dbankif lbankadr
+/set ii 0                    ;init loop counter
+/block                       ;back here each new value to move
+         movff   dhstate+[+ ii 1], dhstate+[v ii]
+  /set ii [+ ii 1]
+  /if [< ii nststack] then
+    /repeat
+    /endif
+  /endblock
+         setf    dhstate+[v nststack] ;set deepest entry to invalid
+
+         jump    restate     ;go run the code for the new current state
+/del ii
+
+;*******************************************************************************
+;
+;   Macro WRITE8 val
+;
+;   Write the 8 bit value VAL to the UDP output packet.  REG8 must contain the
+;   UDP output unit number.  REG0 is trashed.
+;
+write8   macro   val
+         loadk8  reg0, (val)
+         gcall   udp_xmit_write
+         endm
+
+;*******************************************************************************
+;
+;   Macro WRITE16 val
+;
+;   Write the 16 bit value VAL to the UDP output packet.  REG8 must contain the
+;   UDP output unit number.  REG0 and REG1 are trashed.
+;
+write16  macro   val
+         loadk16 reg0, (val)
+         gcall   udp_xmit_write2
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine SETUP_RETRY
+;
+;   Setup the retry timing state for sending the current packet immediately,
+;   then waiting the increasing delay times to resend it.
+;
+         locsub  setup_retry, noregs
+
+         dbankif lbankadr
+         loadk8  cntsec, 10  ;init to start of whole second interval
+         loadk8  sretry, 1   ;init to send packet next 1 second tick
+         loadk8  nxtry, 3    ;init seconds of first retry wait interval
+         bsf     flg_sec     ;make tick now to cause immediate send
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine DHCP_100MS
+;
+;   This routine is called regularly every 100 ms from the internal network
+;   background task.  There may be some jitter on the 100mS period, but the long
+;   term accuracy is as good as the processor oscillator.
+;
+;   This routine may trash all the REGn general registers.
+;
+         glbsub  dhcp_100ms, noregs
+
+         dbankif gbankadr
+         btfss   flag_dhcp   ;DHCP enabled at runtime ?
+         return              ;no, nothing to do
+         btfss   flag_macadr ;we know our own MAC address ?
+         return              ;no, check again next tick
+;
+;   Check for need to reset the state machine.
+;
+         btfsc   flg_reset   ;no pending deliberate reset ?
+         jump    tk_reset
+
+         dbankif gbankadr
+         btfss   flag_link   ;we have network link ?
+         jump    tk_reset    ;no, reset the state machine
+;
+;   Update clocks.
+;
+         bcf     flg_sec     ;init to no one second tick this time
+         dbankif lbankadr
+         decfsz  cntsec      ;one less tick until next second
+         jump    tk_dsec     ;no seconds tick now
+
+         loadk8  cntsec, 10  ;reset 100mS ticks until next 1 second tick
+         bsf     flg_sec     ;indicate one second tick this time
+         incf    elsecs+0    ;count one more elapsed second
+         skip_ncarr
+         incf    elsecs+1
+tk_dsec                      ;done with seconds tick
+;
+;   Dispatch to the code for the state we are currently in.
+;
+restate  unbank              ;back here to re-run current state code
+         movff   dhstate, reg0 ;get the current state
+         dispatch dstate     ;jump to the code for the current state
+;
+;   Invalid state.  Close the UDP input and output units if open and reset to
+;   the INIT state.
+;
+tk_reset unbank              ;can jump here any time to reset state machine
+
+         btfss   flg_ropen   ;UDP input unit is open ?
+         jump    tk_rclos    ;no, skip this section
+         movff   udpin, reg8 ;pass UDP input unit number
+         gcall   udp_recv_close ;close it
+tk_rclos unbank              ;the UDP input unit is closed
+
+         btfss   flg_sopen   ;UDP output unit is open ?
+         jump    tk_sclos    ;no, skip this section
+         movff   udpout, reg8 ;pass UDP output unit number
+         gcall   udp_xmit_close ;close it
+tk_sclos unbank              ;the UDP output unit is closed
+
+         mcall   net_dhcp_init ;re-initialize this module
+         return
+
+;*****************************
+;
+;   Initial state immediately after NET_DHCP_INIT is called.
+;
+;   Open a UDP input unit to recieve UDP datagrams to port 68.
+;
+st_init  unbank
+         loadk16 reg0, 68    ;pass number of port to listen on
+         gcall   udp_recv_open ;try to open UDP input unit
+         btfsc   reg8, 7     ;unit was opened
+         return              ;no, try again next tick
+
+         dbankif lbankadr
+         movff   reg8, udpin ;save UDP input unit number
+         bsf     flg_ropen   ;indicate UDP receiving unit is open
+         gostate send1       ;go send initial DHCP request
+
+;*****************************
+;
+;   State INISEND
+;
+;   Initialize for sending a DHCP request packet.  The UDP output unit will be
+;   opened and the basic packet data initialized to default or benign values.
+;
+;   This is a state machine "subroutine".
+;
+st_inisend unbank
+;
+;   Open a UDP output unit.
+;
+         loadk16 reg0, sendsize ;pass max UDP payload size needed
+         gcall   udp_xmit_open ;try to open UDP output unit
+         btfsc   reg8, 7     ;output unit successfully opened ?
+         return              ;no, try again next tick
+         movff   reg8, udpout ;save UDP output unit
+         bsf     flg_sopen   ;indicate we have UDP output unit open
+;
+;   Init the packet control state.
+;
+         loadk16 reg0, 68    ;set UDP source port
+         gcall   udp_xmit_src_port
+
+         loadk16 reg0, 67    ;set UDP destination port
+         gcall   udp_xmit_dest_port
+
+         loadk32 reg0, h'FFFFFFFF' ;send to broadcast address
+         gcall   udp_xmit_dest_ip
+;
+;   Init the packet payload.  All the fields will be written here, but are
+;   intended to be overwritten as required by the code that is sending the
+;   specific packet.
+;
+;   The current offset is left at where the first OPTION opcode is to be
+;   written.  It is the caller's responsibility to write the options, including
+;   END.
+;
+         write8  1           ;opcode, 1 = request
+         write8  1           ;hardware type, 1 = ethernet type MAC address
+         write8  6           ;hardware address size in bytes
+         write8  0           ;number of hops, always starts out 0 here
+
+         loadk32 reg0, h'11223344' ;arbitrary ID, we don't use our own IDs
+         gcall   udp_xmit_write4
+
+         dbankif lbankadr
+         movff   elsecs+0, reg0 ;elapsed seconds
+         movff   elsecs+1, reg1
+         btfsc   flg_lease   ;we don't currently have a IP lease ?
+         jump    st_is_nlease ;we do, don't currupt TLEFT
+         movff   reg0, tleft+0
+         movff   reg1, tleft+1
+st_is_nlease
+         gcall   udp_xmit_write2 ;write SECS field
+
+         write16 0           ;flags word
+
+         lfsr    0, our_ip   ;pass pointer to data to write
+         loadk8  reg1, 4     ;number of bytes to write
+         gcall   udp_xmit_write_ind ;write our IP adr, will be 0 when unknown
+
+         loadk8  reg0, 0     ;data byte to write
+         loadk8  reg1, 12    ;number of bytes to write
+         gcall   udp_xmit_write_fill ;fill YIADDR, SIADDR, GIADDR fields
+
+         lfsr    0, our_mac  ;pass pointer to data to write
+         loadk8  reg1, 6     ;number of bytes to write
+         gcall   udp_xmit_write_ind ;write our MAC address in start of CHADDR field
+
+         loadk8  reg0, 0     ;data byte to write
+         loadk8  reg1, 202   ;number of bytes to write
+         gcall   udp_xmit_write_fill ;fill rest of CHADDR, SNAME, and FILE fields
+
+         write8  99          ;write the "magic cookie"
+         write8  130
+         write8  83
+         write8  99
+
+         jump    popstate    ;pop back to previous state and run it
+
+;*****************************
+;
+;   State SEND1
+;
+;   Start the process of requesting a DHCP lease.
+;
+st_send1 unbank
+         pushstate send2     ;where to go after initializing a output packet
+         gostate inisend     ;initialize output packet, then go to SEND2
+
+;*****************************
+;
+;   State SEND2
+;
+;   Send DHCP discover message.  The output packet has already been set up and
+;   initialized to defaults.  The current UDP data offset is where to write the
+;   next option.
+;
+st_send2 unbank
+         movff   udpout, reg8 ;get UDP output unit number
+
+         write8  53          ;DCHP message type option opcode
+         write8  1           ;option data length
+         write8  1           ;message type is DISCOVER
+
+         write8  55          ;parameter request list option opcode
+         write8  3           ;number of data bytes
+         write8  1           ;subnet mask option opcode
+         write8  3           ;routers list option opcode
+         write8  54          ;server ID
+
+         write8  255         ;END option opcode
+
+         mcall   setup_retry ;set up retry state for sending new packet
+         gostate wait_offer  ;go wait for the offer response
+
+;*****************************
+;
+;   State WAIT_OFFER
+;
+;   Wait for a OFFER response from a DHCP server.  The DISCOVER request is
+;   resent according to the retry state.
+;
+st_wait_offer unbank
+         dbankif lbankadr
+         btfss   flg_sec     ;a one second tick just occurred ?
+         return              ;no, check again next tick
+         decfsz  sretry      ;one less second until retry
+         return              ;retry time did not just elapse
+;
+;   The retry time just elapsed.  Reset it for the next retry wait interval and
+;   resend the packet.
+;
+         dbankif lbankadr
+         movff   nxtry, sretry ;set length of this new retry wait period
+         bsf     status, c   ;set 1 bit to shift in
+         rlcf    nxtry       ;double the wait for next time
+         movlw   63
+         andwf   nxtry       ;clip to maximum retry length
+
+         movff   udpout, reg8 ;get the UDP output unit number
+         gcall   udp_xmit_send ;send or resend the packet
+         return
+
+;*****************************
+;
+;   State OFFER
+;
+;   A offer message was received while we were in WAIT_OFFER state.
+;
+st_offer unbank
+         movff   udpout, reg8 ;get the UDP output unit number
+         gcall   udp_xmit_close ;delete the discover request output message
+         bcf     flg_sopen   ;we no longer have a UDP output unit open
+
+         pushstate reqoff    ;where to go after initializing output message
+         gostate inisend     ;initialize output message, then go to REQOFF
+
+;*****************************
+;
+;   State REQOFF
+;
+;   Send request message in response to a offer message.  A output message has
+;   been opened and initialized.  The output message data offset is currently
+;   at where to write the next option.
+;
+st_reqoff unbank
+         movff   udpout, reg8 ;get UDP output unit number
+;
+;   Write the options.
+;
+         write8  53          ;DCHP message type option opcode
+         write8  1           ;option data length
+         write8  3           ;message type is REQUEST
+
+         write8  55          ;parameter request list option opcode
+         write8  3           ;number of data bytes
+         write8  1           ;subnet mask option opcode
+         write8  3           ;routers list option opcode
+         write8  54          ;server ID
+
+         write8  54          ;server ID option opcode
+         write8  4           ;option data length
+         movff   serv_id+0, reg0
+         gcall   udp_xmit_write
+         movff   serv_id+1, reg0
+         gcall   udp_xmit_write
+         movff   serv_id+2, reg0
+         gcall   udp_xmit_write
+         movff   serv_id+3, reg0
+         gcall   udp_xmit_write
+
+         write8  50          ;requested IP address option opcode
+         write8  4
+         movff   of_ip+0, reg0
+         gcall   udp_xmit_write
+         movff   of_ip+1, reg0
+         gcall   udp_xmit_write
+         movff   of_ip+2, reg0
+         gcall   udp_xmit_write
+         movff   of_ip+3, reg0
+         gcall   udp_xmit_write
+
+         write8  255         ;END option opcode
+;
+;   Overwrite the fixed fields that need to be different from the default
+;   written by the INISEND state.
+;
+         loadk16 reg0, 8     ;go to SECS field
+         gcall   udp_xmit_ofs
+         movff   tleft+1, reg0 ;must use same SECS as discover message
+         gcall   udp_xmit_write
+         movff   tleft+0, reg0
+         gcall   udp_xmit_write
+
+         mcall   setup_retry ;set up retry state for sending new packet
+         gostate wait_ack1   ;go wait for ACK to REQUEST response to OFFER
+
+;*****************************
+;
+;   State WAIT_ACK1
+;
+;   Wait for the ACK resulting from a DISCOVER --> OFFER --> REQUEST sequence.
+;   The request message is still open and will be resent a few times.  If the
+;   ACK is not received within a reasonable time, then abort back to the
+;   initial state.
+;
+st_wait_ack1 unbank
+         dbankif lbankadr
+         btfss   flg_sec     ;a one second tick just occurred ?
+         return              ;no, check again next tick
+         decfsz  sretry      ;one less second until retry
+         return              ;retry time did not just elapse
+;
+;   The retry time just elapsed.  Reset it for the next retry wait interval and
+;   resend the packet.
+;
+         dbankif lbankadr
+         movff   nxtry, sretry ;set length of this new retry wait period
+         bsf     status, c   ;set 1 bit to shift in
+         rlcf    nxtry       ;double the wait for next time
+         btfsc   nxtry, 6    ;not time to give up yet
+         jump    tk_reset    ;waited long enough, give up
+         movff   udpout, reg8 ;get the UDP output unit number
+         gcall   udp_xmit_send ;send or resend the packet
+         return
+
+;*****************************
+;
+;   State ACK
+;
+;   A ACK message was received.  This means we now officially have a IP address
+;   assigned.
+;
+st_ack   unbank
+         btfss   flg_sopen   ;UDP output unit is currently open ?
+         jump    st_ackcls   ;no
+         bcf     flg_sopen   ;unit will now be closed
+         movff   udpout, reg8 ;pass UDP output unit number
+         gcall   udp_xmit_close ;close it
+st_ackcls unbank             ;UDP output unit is closed
+
+         movff   of_ip+0, our_ip+0 ;promote offered IP adr to our IP adr
+         movff   of_ip+1, our_ip+1
+         movff   of_ip+2, our_ip+2
+         movff   of_ip+3, our_ip+3
+         dbankif gbankadr
+         bsf     flag_ipconfig ;our IP configuration is now all set
+
+         status0 stat_net_dhcplease ;received DCHP lease event
+
+         gostate wait_lease  ;wait for lease to run down and require action
+
+;*****************************
+;
+;   State WAIT_LEASE
+;
+;   We have valid IP address lease, and TLEFT is the remaining seconds of that
+;   lease.
+;
+;   When this lease runs low, we first send deliberate REQUEST messages to the
+;   same server that originally gave us the lease.  If that doesn't work, we
+;   start sending broadcast REQUEST messages.  If that doesn't work we revert
+;   back to unassigned state and start all over.
+;
+st_wait_lease unbank
+         btfss   flg_sec     ;a new one second tick ?
+         return              ;no, nothing more to do
+
+         dbankif lbankadr
+         movf    tleft+1     ;check high byte of lease time
+         bz      st_wltlow   ;lease time is low ?
+         clrf    elsecs+0    ;lots of time, don't start counting elapsed time yet
+         clrf    elsecs+1
+st_wltlow                    ;skip here to avoid resetting elapsed seconds
+
+         dbankif lbankadr
+         decf    tleft+0     ;count one less second remaining in lease
+         movlw   0
+         subwfb  tleft+1
+         skip_z              ;255 or less seconds left ?
+         return              ;no, still lots of time, nothing more to do
+;
+;   255 or fewer seconds are left in the current lease.
+;
+;   We now make occasional attempts to renew the lease.  One attempt will be
+;   made whenever the low 4 bits of the remaining time are all ones, which is
+;   every 16 seconds.  When the high bit of the 8 remaining time bits is set,
+;   then we send a unicast REQUEST message to the server that originally granted
+;   us the lease.  When the high bit of 8 is 0, then we send a broadcast REQUEST
+;   message so that hopefully some DHCP server will respond.
+;
+;   In other words, first we try 8 times to renew the lease from the original
+;   server, then 8 times to any DHCP server, with 16 seconds between each
+;   message sent.
+;
+         dbankif lbankadr
+         movf    tleft+0, w  ;get the 0-255 seconds left
+         skip_nz             ;lease not already elapsed ?
+         jump    tk_reset    ;lease expired, reset state machine
+
+         andlw   b'00001111' ;mask in low 4 bits
+         xorlw   b'00001111' ;compare to value to send request
+         skip_z              ;time to send request now ?
+         return              ;no, wait for another tick
+;
+;   Send a request now.
+;
+         pushstate renew     ;where to go after initializing output packet
+         gostate inisend     ;init output packet, then go to RENEW
+
+;*****************************
+;
+;   State RENEW
+;
+;   Send a message to attempt to renew our current lease.  A output message has
+;   been opened and initialized.  The output message data offset is currently at
+;   where to write the next option.  This message will be a DHCP request for our
+;   current IP address.  It will be unicast to the original server if bit 7 of
+;   TLEFT is 1, and broadcast to any DHCP server when the bit is 0.
+;
+st_renew unbank
+         movff   udpout, reg8 ;get UDP output unit number
+;
+;   Write the options.
+;
+         write8  53          ;DCHP message type option opcode
+         write8  1           ;option data length
+         write8  3           ;message type is REQUEST
+
+         write8  55          ;parameter request list option opcode
+         write8  2           ;number of data bytes
+         write8  1           ;subnet mask option opcode
+         write8  3           ;routers list option opcode
+
+         write8  255         ;END option opcode
+;
+;   Set the target address to the server that gave us the lease if the high bit
+;   of TLEFT is 1.  This address has already been set to broadcast, so there is
+;   nothing more to do if the high bit of TLEFT is 0.
+;
+         dbankif lbankadr
+         btfss   tleft, 7    ;high bit is 1 (at least 128 seconds left on lease) ?
+         jump    st_rentadr  ;no, leave target address as broadcast
+
+         movff   serv_id+0, reg3 ;pass DHCP server's IP address
+         movff   serv_id+1, reg2
+         movff   serv_id+2, reg1
+         movff   serv_id+3, reg0
+         gcall   udp_xmit_dest_ip ;set destination to this address
+
+st_rentadr unbank            ;done setting message target address
+;
+;   Send the message and close the UDP output unit.
+;
+         gcall   udp_xmit_send ;send the message
+         gcall   udp_xmit_close ;delete the message and close the unit
+         bcf     flg_sopen   ;indicate UDP output unit not open
+
+         pushstate wait_lease ;where to go next tick
+         return              ;done for this tick
+
+;*****************************
+;
+;   Dispatch table for the DHCP processing state.  This needs to go into a
+;   CODE_PACK linker section.
+;
+.dhcp_tbl code_pack
+
+         dsp_start dstate    ;start the dispatch table
+
+         dsp_entry dhst_init, st_init ;initial state
+         dsp_entry dhst_inisend, st_inisend ;subroutine to init output packet
+         dsp_entry dhst_send1, st_send1 ;send initial request
+         dsp_entry dhst_send2, st_send2 ;send DHCP discover message
+         dsp_entry dhst_wait_offer, st_wait_offer ;wait for offer response
+         dsp_entry dhst_offer, st_offer ;offer message received
+         dsp_entry dhst_reqoff, st_reqoff ;send request in response to offer
+         dsp_entry dhst_wait_ack1, st_wait_ack1 ;wait for ACK 1
+         dsp_entry dhst_ack, st_ack ;received ACK
+         dsp_entry dhst_wait_lease, st_wait_lease ;waiting for lease to run down
+         dsp_entry dhst_renew, st_renew ;send message to try to renew lease
+
+         dsp_end dstate      ;end the dispatch table

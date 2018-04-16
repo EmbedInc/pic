@@ -1,0 +1,22 @@
+;   Subroutine NEGB
+;
+;   Negate the integer value in REGB.
+;
+.negb    code
+         glbsub  negb, noregs
+
+         comf    regb+0      ;take two's complement
+         comf    regb+1
+         comf    regb+2
+         comf    regb+3
+
+         incfsz  regb+0      ;and increment it
+         goto    negb_dinc
+         incfsz  regb+1
+         goto    negb_dinc
+         incfsz  regb+2
+         goto    negb_dinc
+         incf    regb+3
+negb_dinc                    ;skip to here on no more carry due to increment
+
+         leaverest

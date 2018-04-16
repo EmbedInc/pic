@@ -1,0 +1,250 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module contains the I16_DEC subroutine, which converts a 16 bit
+;   unsigned integer to 5 decimal digits.
+;
+;   This module automatically configures itself to the original PIC 16, enhanced
+;   PIC 16, or PIC 18 architecture.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     0           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+dig5     res     4           ;5 digits in most to least significant order
+dig_low  res     1           ;least significant digit, used internally
+
+         global  dig5
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+
+.i16bcd  code
+;*******************************************************************************
+;
+;   Macro INIT_POINTER
+;
+;   Initialize the pointer to the least significant digit byte.
+;
+init_pointer macro
+
+  if fam_16                  ;traditional PIC 16 architecture
+         ibankif gbankadr    ;set indirect bank for access to the return value
+         movlw   low dig_low ;set the pointer to the low digit
+         movwf   fsr
+         exitm
+    endif
+
+  if fam_16b                 ;enhanced PIC 16 (16F1xxx) architecture
+         movlw   low dig_low
+         movwf   fsr0l
+         movlw   high dig_low
+         movwf   fsr0h
+         exitm
+    endif
+
+  if fam_18                  ;PIC 18 architecture
+         lfsr    0, dig_low  ;set the pointer to the low digit
+         exitm
+    endif
+
+         error   "INIT_POINTER macro not implemented for this processor"
+         endm
+
+;*******************************************************************************
+;
+;   Macro WRITE_DIGIT
+;
+;   Write the digit value to where the pointer is pointing, and update the
+;   pointer to the next higher digit.  The high bit of the 4-bit digit value is
+;   in C, with the low three bits in the high three bits of REG1.
+;
+write_digit macro
+
+  if fam_16                  ;traditional PIC 16 architecture
+         rrf     reg1, w     ;get the digit in high 4 bits of W
+         andlw   b'11110000' ;mask in only the digit value
+         movwf   indf        ;write shifted digit to output byte
+         swapf   indf        ;fix digit format in output byte
+         decf    fsr         ;update pointer to next higher output digit
+         exitm
+    endif
+
+  if fam_16b                 ;enhanced PIC 16 (16F1xxx) architecture
+         rrf     reg1, w     ;get the digit in high 4 bits of W
+         andlw   b'11110000' ;mask in only the digit value
+         movwf   indf0       ;write shifted digit to output byte
+         swapf   indf0       ;fix digit format in output byte
+         addfsr  fsr0, -1    ;update pointer to next higher output digit
+         exitm
+    endif
+
+  if fam_18                  ;PIC 18 architecture
+         rrcf    reg1, w     ;get the digit in high 4 bits of W
+         andlw   b'11110000' ;mask in only the digit value
+         swapf   wreg        ;shift digit value to output format
+         movwf   postdec0    ;write digit and update pointer
+         exitm
+    endif
+
+         error   "WRITE_DIGIT macro not implemented for this processor"
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine I16_DEC
+;
+;   Convert the unsigned 16 bit integer value in REG1:REG0 to 5 decimal digits
+;   in DIG5.
+;
+i16_dec  glbsub  regf0 | regf1 | regf2 | regf3
+
+         movlw   5           ;init number of digits left to generate
+         movwf   reg3
+         init_pointer        ;init pointer to least significant digit
+
+digit_loop                   ;back here to generate each new BCD digit
+;
+;   Divide the 16 bit integer value in REG1:REG0 by 10.  The remainder is
+;   written to where FSR is pointing.  REG1:REG0 is updated with the quotient.
+;
+;   Register usage:
+;
+;     REG1:REG0  -  Starts as numerator.  Quotient is shifted into LSB by one
+;        bit each iteration.
+;
+;     REG2  -  Loop counter.  Number of iterations left to do.
+;
+         loadk8  reg2, 13    ;init number of iterations left to do
+         bcf     status, c   ;init 17th bit to 0
+;
+;   One quotient bit is produced each iteration of DIV_LOOP.  The 16 bit value
+;   numerator is compared to the reference value of 10 * 2**13, the high byte of
+;   which is 10100000b with the low byte 0.  If the numerator is greater than or
+;   equal to the reference value, then the quotient bit is a 1 and the reference
+;   value is removed (subtracted) from the numerator.  If it is less than the
+;   numerator, then the quotient bit is 0 and the reference value is not
+;   subtracted off.
+;
+;   This pretty much mimics the way long division is done by hand.  Note that if
+;   you were dividing 65535 by 10, you would first divide the leading "65" part
+;   by 10 to produce a 6 quotient digit.  By only dividing the left few digits
+;   of the numerator, you are really shifting the denominator left several
+;   digits and doing the divide.  In other words, the first part of the long
+;   division of dividing 65535 by 10 is really dividing 65535 by 10000.  This
+;   yields the high digit of the quotient (6), with the remainder used to
+;   generate the remaining digits.  The quotient digit times the shifted
+;   denominator (60000) is removed from the numerator, and the remainder used as
+;   the numerator for the next iteration to get the next digit.  In this example
+;   65535 - 60000 = 5535, which is used to get the next quotient digit.  Each
+;   time the denominator is shifted right one digit.  Therefore, the next
+;   iteration will divide 5535 by 1000.
+;
+;   The code below uses this same technique, except that it does it in binary
+;   instead of base 10.  This means the actual "divide" step is just a compare.
+;   The quotient digit is 1 if the shifted denominator is greater than or equal
+;   to the current numerator, and 0 otherwise.  Since the quotient digit can
+;   only be 0 or 1, it is either subtracted directly from the numerator
+;   (quotient digit 1) or not (quotient digit 0).
+;
+;   Instead of shifting the denominator right one digit each iteration, the
+;   algorithm below shifts the numerator left one digit (bit) each iteration.
+;   This is equivalent mathematically.  It also frees up the low bit of the
+;   numerator each time, which is where the new quotient bit is stored.  After
+;   13 iterations, the low 13 bits of the numerator are the quotient, and the
+;   high 3 bits are the remainder which is always a value of 0-9.
+;
+;   There is one additional wrinkle that may be a bit confusing.  The numerator
+;   after the denominator times the quotient bit is removed is always less than
+;   denominator, but it may have its high bit set.  When the numerator is
+;   shifted left one 1, this high bit must be taken into account.  If this high
+;   bit is set at the start of an iteration, then the quotient bit is always 1,
+;   since the value with the high bit set is always larger than the denominator.
+;   This high bit is left in C after the numerator is shifted left 1 bit at the
+;   end of the previous iteration.  This is referred to in the comments as the
+;   "17th" bit, and is checked at the start of each iteration.
+;
+div_loop                     ;back here to find each quotient bit
+         movlw   b'10100000' ;get high byte of value 10 shifted left 13 bits
+         btfss   status, c   ;17th bit is set ?
+         jump    high0       ;no, need to do compare
+         ;
+         ;   17th bit is 1.
+         ;
+         subwf   reg1        ;update numerator with denominator removed
+         bsf     status, c   ;shift in a 1 quotient bit this iteration
+         jump    div_shq     ;go shift in the quotient bit
+         ;
+         ;   17th bit is 0.
+         ;
+high0
+         subwf   reg1, w     ;compare to remaining value, quotient bit into C
+         skip_wgt            ;this quotient bit is 0 ?
+         movwf   reg1        ;update numerator with denominator removed
+         ;
+         ;   The denominator has been removed from the numerator, if
+         ;   appropriate, and the new quotient bit is in C.
+         ;
+div_shq
+  if fam_18
+         rlcf    reg0        ;shift numerator left 1, new quotient bit into LSB
+         rlcf    reg1
+    else
+         rlf     reg0        ;shift numerator left 1, new quotient bit into LSB
+         rlf     reg1
+    endif
+
+         decfsz  reg2        ;cone one less iteration left to do
+         jump    div_loop    ;back to make next quotient bit
+;
+;   The quotient is in the low 13 bits of REG1:REG0.  The low 3 bits of the
+;   remainder are in the high 3 bits of REG1:REG0, and the high bit of the
+;   remainder is in C.
+;
+         write_digit         ;write digit in C:REG1<7:5>, advance pointer
+;
+;   Clean up the quotient in REG1:REG0.
+;
+         movlw   b'00011111' ;get mask for valid quotient bits in REG1
+         andwf   reg1        ;mask in only the quotient bits
+;
+;   Done with the divide.
+;
+         decfsz  reg3        ;count one less digit left to generate
+         jump    digit_loop  ;back to do next digit
+
+         leaverest           ;restore registers and leave
+
+         end

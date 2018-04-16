@@ -1,0 +1,989 @@
+;   ***************************************************************
+;   * Copyright (C) 2009, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   CAN bus interface routines.  The exported routines are briefly listed here.
+;   See the header comments of each routine for details.
+;
+;     CAN_INIT  -  One-time module initialization.  Must be first call after
+;       reset.
+;
+;     CAN_START  -  Sets up the CAN hardware ready for use, and also starts the
+;       CAN receiving thread.
+;
+;     CAN_SEND_INIT  -  Initialize the pending transmit frame state.  Must be
+;       first call for sending any new CAN frame.  REG0 contains flags that
+;       indicate standard versus extended and data versus remote request frame.
+;
+;     CAN_SEND_ID  -  Sets the frame ID in the pending transmit frame state.
+;
+;     CAN_SEND_DAT  -  Adds a data byte to the pending transmit frame state.
+;
+;     CAN_SEND  -  Sends the frame described by the current transmit frame
+;       state.
+;
+;   The following global flags must be defined before this file:
+;
+;     FLAG_CANIN  -  Automatically set by the CAN receiving task in this module
+;       whenever a new CAN frame is received.  The CAN frame data will be in the
+;       global CANIN_xxx variables.  This state is only valid when FLAG_CANIN is
+;       set.  New received CAN frames will be held and will not overwrite the
+;       CANIN_xxx state until FLAG_CANIN is cleared.  This flag must be cleared
+;       by application code outside this file when done with the CANIN_xxx state
+;       for the current frame to allow new CAN frames to be received.
+;
+;     FLAG_CANIN_EXT  -  Indicates the current received CAN frame is in extended
+;       format (29 bit ID) as apposed to standard format (11 bit ID).  This flag
+;       is read-only outside this file, and is only valid while FLAG_CANIN is
+;       set.
+;
+;     FLAG_CANIN_RTR  -  Indicates the current received CAN frame is a remote
+;       request as apposed to a data frame.  This flag is read-only outside this
+;       file, and is only valid while FLAG_CANIN is set.
+;
+;     FLAG_CANSEND  -  Part of the mutex mechanism to guarantee a single task at
+;       a time is building and sending a CAN frame.  Managed in this module, but
+;       may be examined by external code to see if the CAN sending mechanism is
+;       currently acquired by another task and therefore whether CAN_SEND_INIT
+;       will stall for a while if called immediately.
+;
+;   The following values can be defined before this file is included:
+;
+;     BITRATE  -  Preprocessor constant, type REAL.  The desired CAN bit rate in
+;       bits per second.  Default = 500 Kbits/second.
+;
+;     CANIN_CALLBACK  -  Preprocessor constant, type STRING.  Name of routine to
+;       call from internal CAN thread when a CAN frame is received.  No routine
+;       is called when this constant is blank.  Default = blank (no received CAN
+;       frame callback routine).
+;
+;     CALLBACK_EXTERN  -  Preprocessor constant, type BOOL.  Indicates that the
+;       callback routine named in CANIN_CALLBACK is external to this module.
+;       The default is TRUE (is external).  This constant must be created and
+;       set to FALSE if the callback routine is local to prevent the code in
+;       this file from generating a EXTERN reference to it, which will produce
+;       a assembler error.
+;
+;     DEBUG_CANCFG  -  Preprocessor constant, type BOOL.  TRUE causes detailed
+;       information to be shown about the automatic CAN bit timing
+;       configuration calculations.  The default is FALSE, which just shows the
+;       final result.
+;
+;     LBANK  -  MPASM constant.  0-15 bank number for local state of this
+;       module.  No default, required.
+;
+;   This version drives the ECAN module built into the 18F4580.
+;
+         extern  currtask    ;ID of the currently running task
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/if [not [exist "bitrate"]] then
+  /const bitrate real = 500e3 ;CAN buts bit rate, Hz
+  /endif
+/if [not [exist "canin_callback"]]
+  /then
+    /const canin_callback = "" ;name of routine to call when CAN frame received
+  /else
+    /if [not [exist "callback_extern"]] then
+      /const callback_extern bool = true ;default to callback routine is external
+      /endif
+  /endif
+/if [not [exist "debug_cancfg"]] then
+  /const debug_cancfg bool = false ;default to not show config select details
+  /endif
+
+stacksz  equ     32 + ntsksave ;CAN receiving task data stack size
+ecanconr0 equ    b'10010000' ;base ECANCON value to map receive buffer 0
+                 ; 10------  select enhanced FIFO mode (mode 2)
+                 ; --0-----  FIFO interrupt when 4 buffers left (not used)
+                 ; ---10000  base value to map receive buffer 0
+;
+;   Derived constants.
+;
+/const   fcanclk real = freq_osc ;clock to CAN module, bit rate generator input
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+canwtask res     1           ;ID of the task that has the transmit buffer locked
+         ;
+         ;   Received CAN frame buffer.
+         ;
+canin_id res     4           ;frame ID
+canin_ndat res   1           ;number of data bytes, always 0-8
+canin_dat res    0           ;start of data bytes
+canin_d0 res     1           ;symbols of individual data bytes for debugging
+canin_d1 res     1
+canin_d2 res     1
+canin_d3 res     1
+canin_d4 res     1
+canin_d5 res     1
+canin_d6 res     1
+canin_d7 res     1
+
+         global  canin_id, canin_ndat, canin_dat
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+;
+;   Info about the current transmit message.
+;
+wr_flags res     1           ;<1> RTR, <0> EXT
+wr_id    res     4           ;identifier, either 11 or 29 bits
+wr_ndat  res     1           ;0-8 number of data bytes
+wr_dat   res     0           ;start address of transmit data bytes buffer
+wr_dat0  res     1           ;data bytes have individual labels for watch window
+wr_dat1  res     1
+wr_dat2  res     1
+wr_dat3  res     1
+wr_dat4  res     1
+wr_dat5  res     1
+wr_dat6  res     1
+wr_dat7  res     1
+;
+;   CAN receiving task data stack.  Since this is only accessed indirectly via
+;   pointer registers, the bank does not need to be known at assembly time.  It
+;   is therefore put in a separate section to allow the linker to place it
+;   separately from other variables.
+;
+.can_stack udata
+stack_can res    stacksz     ;CAN receiving task data stack
+
+
+.can     code
+
+;*******************************************************************************
+;
+;   Subroutine CAN_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  can_init, noregs
+
+         setreg  b'00110000', cancon ;disable the CAN module
+                 ; 001-----  disable mode
+                 ; ---1----  abort all pending transmissions
+                 ; ----XXXX  not relevant when module disabled
+
+         setreg  b'00100000', ciocon
+                 ; XX------  unused
+                 ; --1-----  CANTX pin will always be driven, recessive or not
+                 ; ---0----  disable CAN capture into CCP1
+                 ; ----XXXX  unused
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CAN_START
+;
+;   Set up the CAN hardware for operation and start up the CAN reading thread.
+;   The rest of the system must not attempt CAN operations before this routine
+;   is called.
+;
+         glbsub  can_start, regf0 | regf1 | regf2 | regf3 | regf4
+
+         dbankif gbankadr
+         bcf     flag_canin  ;init software received CAN frame buffer to empty
+;
+;   Set the CAN module into configuration mode.  Mode changes are requested via
+;   the CANCON register, but do not necessarily take effect immediately.  The
+;   actual mode is indicated in the CANSTAT register.
+;
+         setreg  b'10010000', cancon ;request configuration mode
+                 ; 100-----  request configuration mode
+                 ; ---1----  abort any pending transmissions
+                 ; ----XXXX  read-only bits in mode 2
+wait_cfgmode unbank          ;back here until entered configuration mode
+         dbankif canstat
+         movf    canstat, w
+         andlw   b'11100000' ;mask in only the current mode bits
+         xorlw   b'10000000' ;compare to config mode
+         bz      have_cfgmode ;in config mode ?
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    wait_cfgmode ;back to check current mode again
+have_cfgmode unbank          ;CAN module is in configuration mode
+
+         setreg  ecanconr0, ecancon ;set enhanced FIFO mode (mode 2)
+;
+;   Configure the bit timing.  The bit rate is defined by the constant BITRATE,
+;   and is derived from the clock into the CAN module, which is the instruction
+;   clock in this case.  The frequency of this oscillator is defined by the
+;   constant FCANCLK.
+;
+;   CAN bits are divided into time segments, each defined in terms of the number
+;   of time quanta.  The length of time quanta is determined by the oscillator
+;   frequency and the baud rate divider setup.  The MCP2515 requires a minimum
+;   of 5 time quanta per bit, but we require 9 for reliability.  The maximum
+;   allowed is 25 time quanta per bit.  The time quanta budget for a bit is
+;   allocated between the various bit segments as follows:
+;
+;     Sync  -  Always 1.
+;
+;     Propagation  -  1-8, we require at least 2.
+;
+;     Phase1  -  1-8, we require at least 3.
+;
+;     Phase2  -  2-8, we require at least 3.
+;
+;   See the manual for details on the meaning of these segments.
+;
+/var new tqbit integer       ;time quanta per whole bit, 9-25
+/var new tqprop integer      ;time quanta per propagation segment, 2-8
+/var new tqph1 integer       ;time quanta per phase 1 segment, 3-8
+/var new tqph2 integer       ;time quanta per phase 2 segment, 3-8
+/var new bdiv integer        ;Fosc/2 divider to make time quanta rate, 1-64
+/var new ferr real           ;CAN bit frequency error fraction
+
+/var new ii integer          ;scratch integers
+/var new jj integer
+/var new r real              ;scratch floating point
+/var new r2 real
+/var new r3 real
+/var new s1 string           ;scratch strings
+/var new s2 string
+/var new s3 string
+//
+//   Determine the bit rate setup.  The TQ frequency is (FCANCLK/2)/BDIV, with
+//   BDIV constrained to 1-64.  The BDIV value resulting in the smallest
+//   frequency error will be chosen, within the constraint that there must be
+//   9 to 25 time quanta per bit.
+//
+/set bdiv 0                  ;init to no usable BDIV value found
+/set ii 1                    ;init trial BDIV value
+/set ferr 1.0                ;init to large frequency error so far
+/block                       ;back here to try each new possible BDIV value
+  /set r [/ fcanclk [* 2 ii]] ;TQ frequency for the divisor value in II
+  /set jj [rnd [/ r bitrate]] ;best whole time quanta per bit for this divisor
+  /set jj [if [<= jj 25] jj 25] ;clip to max usable value
+  /set jj [if [>= jj 9] jj 9] ;clip to min usable value
+  /set r2 [/ r jj]           ;resulting actual bit frequency
+  /set r3 [/ [abs [- bitrate r2]] bitrate] ;make error fraction
+  /if [< r3 ferr] then       ;this is lower error than previous best ?
+    /set bdiv ii             ;save this divisor value
+    /set tqbit jj            ;save time quanta per bit
+    /set ferr r3             ;save error fraction of this configuration
+    /endif
+  /if debug_cancfg then      ;show results from individual BDIV choices ?
+    /show "  BDIV " [int ii "fw 2"] " TQBIT " [int jj "fw 2"] " err " [fp [* r3 100] "fw 6 zb mxl 9 rit 2"] "%"
+    /endif
+  /set ii [+ ii 1]
+  /if [<= ii 64] then
+    /repeat
+    /endif
+  /if debug_cancfg then
+    /show
+    /endif
+  /endblock
+
+/if [> ferr 0.015] then      ;bit rate error too large to work ?
+  /show "  ERROR: Bit rate of " [eng bitrate] "Hz not possible with CAN clock of " [eng fcanclk] "Hz."
+         error   CAN bit rate
+         end
+  /stop
+  /endif
+/if [> ferr 0.0085] then     ;error more than half allotted total of 1.7%
+  /show "  WARNING: High CAN bit rate error from desired."
+  /endif
+
+/set r [/ fcanclk [* 2 bdiv tqbit]] ;actual bit frequency, Hz
+/set s3 [fp [* ferr 100] "sig 1 mxl 6 rit 2"] ;bit frequence error in percent
+/show "  CAN clock " [eng fcanclk] "Hz, bit freq " [eng r] "Hz (" s3 "% err), " tqbit " TQ/bit"
+//
+//   The bit rate setup has been determined.  There are TQBIT time quanta per
+//   bit, which is guaranteed to be in the range of 9 to 25.
+//
+//   Now divvy up the time quanta to the various segements of the bit time.
+//
+/set tqprop 2                ;set the configurable segments to their minimum durations
+/set tqph1 3
+/set tqph2 3
+/set ii [- tqbit [+ 1 tqprop tqph1 tqph2]] ;left over availabe TQs.
+
+/block                       ;back here until all TQs are assigned
+  /if [< tqprop 8] then
+    /set tqprop [+ tqprop 1] ;one more TQ for propagation segment
+    /set ii [- ii 1]
+    /if [<= ii 0] then
+      /quit
+      /endif
+    /endif
+  /if [< tqph1 8] then
+    /set tqph1 [+ tqph1 1]   ;one more TQ for phase 1 segment
+    /set ii [- ii 1]
+    /if [<= ii 0] then
+      /quit
+      /endif
+    /endif
+  /if [< tqph2 8] then
+    /set tqph2 [+ tqph2 1]   ;one more TQ for phase 2 segment
+    /set ii [- ii 1]
+    /if [<= ii 0] then
+      /quit
+      /endif
+    /endif
+  /repeat
+  /endblock
+
+/show "  Total TQ " tqbit ": Sync 1, Prop " tqprop ", Phase1 " tqph1 ", Phase2 " tqph2
+
+/del s3                      ;done with temporary preprocessor variables
+/del s2
+/del s1
+/del r3
+/del r2
+/del r
+/del jj
+/del ii
+
+         setreg  b'00000000' | [- bdiv 1], brgcon1
+                 ; 00------  1 TQ synchronization jump width
+                 ; --XXXXXX  baud rate generator divider, from BDIV
+
+         setreg  b'10000000' | ([- tqph1 1] << 3) | [- tqprop 1], brgcon2
+                 ; 1-------  length of phase 2 explicitly set
+                 ; -0------  sample once at the sample point
+                 ; --XXX---  TQ length of phase 1 segment, from TQPH1
+                 ; -----XXX  TQ length of propagation segment, from TQPROP
+
+         setreg  b'10000000' | [- tqph2 1], brgcon3
+                 ; 1-------  disable CAN bus activity wakeup feature
+                 ; -0------  disable wakeup on CAN line filter
+                 ; --XXX---  unused
+                 ; -----XXX  TQ length of phase 2 segment, from TQPH2
+
+         setreg  b'00000000', rxb0con ;init dedicated receive buffer 0
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', rxb1con ;init dedicated receive buffer 1
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', bsel0
+                 ; 0-------  configure buffer B5 for receiving
+                 ; -0------  configure buffer B4 for receiving
+                 ; --0-----  configure buffer B3 for receiving
+                 ; ---0----  configure buffer B2 for receiving
+                 ; ----0---  configure buffer B1 for receiving
+                 ; -----0--  configure buffer B0 for receiving
+                 ; ------XX  unused
+
+         setreg  b'00000000', b0con ;init configurable buffer 0
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', b1con ;init configurable buffer 1
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', b2con ;init configurable buffer 2
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', b3con ;init configurable buffer 3
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', b4con ;init configurable buffer 4
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+
+         setreg  b'00000000', b5con ;init configurable buffer 5
+                 ; 0-------  clear any received message condition
+                 ; -1------  receive all messages regardless of filters
+                 ; -0------  receive all messages according to filters
+                 ; --XXXXXX  read-only status bits
+;
+;   Set up the mask and filters.  In the mode we are using this hardware, it has
+;   2 masks and 16 filters.  The masks indicate which filter bits are relevant.
+;   For a message to be accepted at least one filter has to match the relevant
+;   message ID bits, as indicated by its mask.
+;
+;   Filters 0-7 will be set up to work with mask 0 and will filter standard
+;   frames.  Filters 8-15 will be set up to work with mask 1 and will filter
+;   extended frames.  Only filters 0 and 8 will be enabled.  It seems the
+;   hardware will not let a message thru when no filters are enabled, even
+;   if all the mask bits are 0, which makes all the filter bits irrelevant.
+;
+;   For now, both masks will be set up to allow all messages.
+;
+         setreg  b'00001000', rxm0sidl
+                 ; 000-----  acceptance mask 0 bits <2:0>
+                 ; ---X----  unused
+                 ; ----1---  accept standard or extended according to filters
+                 ; -----X--  unused
+                 ; ------00  acceptance mask 0 bits <28:27>
+
+         setreg  b'00000000', rxm0sidh
+                 ; 00000000  acceptance mask 0 bits <10:3>
+
+         setreg  b'00000000', rxm0eidl
+                 ; 00000000  acceptance mask 0 bits <18:11>
+
+         setreg  b'00000000', rxm0eidh
+                 ; 00000000  acceptance mask 0 bits <26:19>
+
+         setreg  b'00001000', rxm1sidl
+                 ; 000-----  acceptance mask 1 bits <2:0>
+                 ; ---X----  unused
+                 ; ----1---  accept standard or extended according to filters
+                 ; -----X--  unused
+                 ; ------00  acceptance mask 1 bits <28:27>
+
+         setreg  b'00000000', rxm1sidh
+                 ; 00000000  acceptance mask 1 bits <10:3>
+
+         setreg  b'00000000', rxm1eidl
+                 ; 00000000  acceptance mask 1 bits <18:11>
+
+         setreg  b'00000000', rxm1eidh
+                 ; 00000000  acceptance mask 1 bits <26:19>
+
+         setreg  b'00000001', rxfcon0
+                 ; 0-------  disable filter 7
+                 ; -0------  disable filter 6
+                 ; --0-----  disable filter 5
+                 ; ---0----  disable filter 4
+                 ; ----0---  disable filter 3
+                 ; -----0--  disable filter 2
+                 ; ------0-  disable filter 1
+                 ; -------1  enable filter 0
+
+         setreg  b'00000001', rxfcon1
+                 ; 0-------  disable filter 15
+                 ; -0------  disable filter 14
+                 ; --0-----  disable filter 13
+                 ; ---0----  disable filter 12
+                 ; ----0---  disable filter 11
+                 ; -----0--  disable filter 10
+                 ; ------0-  disable filter 9
+                 ; -------1  enable filter 8
+
+         setreg  b'00000000', sdflc
+                 ; XXX-----  unused
+                 ; ---00000  number of data bits to compare to filter for standard message
+
+         setreg  b'00000000', msel0
+                 ; 00------  filter 3 associated with mask 0
+                 ; --00----  filter 2 associated with mask 0
+                 ; ----00--  filter 1 associated with mask 0
+                 ; ------00  filter 0 associated with mask 0
+
+         setreg  b'00000000', msel1
+                 ; 00------  filter 7 associated with mask 0
+                 ; --00----  filter 6 associated with mask 0
+                 ; ----00--  filter 5 associated with mask 0
+                 ; ------00  filter 4 associated with mask 0
+
+         setreg  b'01010101', msel2
+                 ; 01------  filter 11 associated with mask 1
+                 ; --01----  filter 10 associated with mask 1
+                 ; ----01--  filter 9 associated with mask 1
+                 ; ------01  filter 8 associated with mask 1
+
+         setreg  b'01010101', msel3
+                 ; 01------  filter 15 associated with mask 1
+                 ; --01----  filter 14 associated with mask 1
+                 ; ----01--  filter 13 associated with mask 1
+                 ; ------01  filter 12 associated with mask 1
+
+         setreg  b'00000000', rxf0sidl
+                 ; 000-----  standard ID bits <2:0>
+                 ; ---X----  unused
+                 ; ----0---  accept only standard IDs
+                 ; -----X--  unused
+                 ; ------00  extended ID bits <17:16>
+
+         setreg  b'00000000', rxf0sidh
+                 ; 00000000  standard ID bits <10:3>
+
+         setreg  b'00000000', rxf0eidl
+                 ; 00000000  extended ID bits <7:0>
+
+         setreg  b'00000000', rxf0eidh
+                 ; 00000000  extended ID bits <15:8>
+
+         setreg  b'00001000', rxf8sidl
+                 ; 000-----  standard ID bits <2:0>
+                 ; ---X----  unused
+                 ; ----1---  accept only extended IDs
+                 ; -----X--  unused
+                 ; ------00  extended ID bits <17:16>
+
+         setreg  b'00000000', rxf8sidh
+                 ; 00000000  standard ID bits <10:3>
+
+         setreg  b'00000000', rxf8eidl
+                 ; 00000000  extended ID bits <7:0>
+
+         setreg  b'00000000', rxf8eidh
+                 ; 00000000  extended ID bits <15:8>
+;
+;   Done configuring the CAN module.  Switch it from configuration mode to
+;   normal operating mode.
+;
+         setreg  b'00000000', cancon ;set up CAN module for normal operation
+                 ; 000-----  request normal operating mode
+                 ; ---0----  don't abort pending transmissions
+                 ; ----XXXX  read-only status bits
+;
+;   Start CAN receiving task.
+;
+         task_create can_task, stack_can
+
+         leaverest
+
+;*******************************************************************************
+;
+;   CAN receiving task.
+;
+can_task unbank              ;task start address
+;
+;   Wait for the software receive buffer to be empty.  Another task may be
+;   reading the last received frame from the buffer.  When done with the data
+;   in the receive buffer, FLAG_CANIN will be cleared.
+;
+wait_swbuf unbank            ;back here until software buffer ready for next frame
+         gcall   task_yield  ;give other tasks a chance to run
+         dbankif gbankadr
+         btfsc   flag_canin  ;software CAN frame receive buffer is empty ?
+         jump    wait_swbuf  ;no, back and check again
+;
+;   Clear the software receive buffer to all zeros.  This makes it easier later
+;   to assemble the fields in the buffer from the hardware registers.
+;
+         dbankif gbankadr
+         bcf     flag_canin_ext ;init to not extended frame
+         bcf     flag_canin_rtr ;init to not remote request frame
+
+         loadk32 canin_id, 0 ;set ID to 0
+         clrf    canin_ndat  ;init number of data bytes
+         clrf    canin_dat+0 ;init the data bytes
+         clrf    canin_dat+1
+         clrf    canin_dat+2
+         clrf    canin_dat+3
+         clrf    canin_dat+4
+         clrf    canin_dat+5
+         clrf    canin_dat+6
+         clrf    canin_dat+7
+
+wait_recv unbank             ;back here until a new CAN frame is received
+         gcall   task_yield  ;give other tasks a chance to run
+         dbankif comstat
+         btfss   comstat, 7  ;at least one message in receive FIFO ?
+         jump    wait_recv   ;no, go back and check again
+;
+;   Map the current receive buffer to the access bank region F60-F6Dh.  This is
+;   where the fixed receive buffer 0 is located in legacy mode.  The symbols
+;   RXB0xxx will therefore be used to access the buffer, even though it could
+;   be any of the 8 receive buffers.
+;
+         dbankif cancon
+         movf    cancon, w
+         andlw   b'00001111' ;mask in only ID of the current receive buffer
+         addlw   ecanconr0   ;merge with other control bits
+         dbankif ecancon
+         movwf   ecancon     ;map the current receiver buffer to access window
+;
+;   A new CAN frame has been received and hardware receive buffer containing it
+;   has been mapped into the access bank where the fixed receive buffer 0
+;   normally is.
+;
+         dbankif gbankadr
+         btfsc   rxb0con, rtrro ;this is data frame, not remote request ?
+         bsf     flag_canin_rtr ;is remote request frame
+         btfsc   rxb0sidl, exid ;standard frame, not extended ?
+         jump    recv_ext    ;extended frame
+         ;
+         ;   Standard frame.  Get the 11 bit frame ID.
+         ;
+         swapf   rxb0sidl, w
+         rrncf   wreg
+         andlw   b'00000111'
+         iorwf   canin_id+0  ;set ID bits <2:0>
+
+         rlncf   rxb0sidh, w
+         rlncf   wreg
+         rlncf   wreg
+         andlw   b'11111000'
+         iorwf   canin_id+0  ;set ID bits <7:3>
+
+         swapf   rxb0sidh, w
+         rrncf   wreg
+         andlw   b'00000111'
+         iorwf   canin_id+1  ;set ID bits <10:8>
+         jump    done_id     ;done assembling ID
+         ;
+         ;   Extended frame.  Get the 29 bit frame ID.  In this case, the
+         ;   extended ID bits form the low 18 bits of the ID and the standard
+         ;   ID bits the high 11.
+         ;
+recv_ext dbankis gbankadr
+         bsf     flag_canin_ext ;indicate extended frame
+
+         movf    rxb0eidl, w
+         iorwf   canin_id+0  ;set ID bits <7:0>
+
+         movf    rxb0eidh, w
+         iorwf   canin_id+1  ;set ID bits <15:8>
+
+         movf    rxb0sidl, w
+         andlw   b'00000011'
+         iorwf   canin_id+2  ;set ID bits <17:16>
+
+         swapf   rxb0sidl, w
+         rlncf   wreg
+         andlw   b'00011100'
+         iorwf   canin_id+2  ;set ID bits <20:18>
+
+         swapf   rxb0sidh, w
+         rlncf   wreg
+         andlw   b'11100000'
+         iorwf   canin_id+2  ;set ID bits <23:21>
+
+         rrncf   rxb0sidh, w
+         rrncf   wreg
+         rrncf   wreg
+         andlw   b'00011111'
+         iorwf   canin_id+3  ;set ID bits <28:24>
+
+done_id  dbankis gbankadr    ;done assembling ID bits into CANIN_ID
+;
+;   Get the data bytes.
+;
+         movf    rxb0dlc, w
+         andlw   b'00001111' ;mask in only the number of data bytes
+         bz      done_dat    ;no data bytes ?
+         movwf   reg2        ;save number data bytes in REG2
+         sublw   8           ;compare to max valid number
+         skip_wle            ;number of data bytes is within range ?
+         jump    done_dat    ;skip the data bytes, something is wrong
+         movf    reg2, w
+         movwf   canin_ndat  ;set 1-8 number of data bytes in frame
+         ;
+         ;   Copy the data bytes in a unrolled loop.  It would be faster for
+         ;   large frames to just copy all 8 bytes all the time.  Only the
+         ;   actual data bytes are copied mostly to aid in debugging.  The
+         ;   unused data bytes in the software buffer will therefore be zero.
+         ;
+         movff   rxb0d0, canin_dat+0
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d1, canin_dat+1
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d2, canin_dat+2
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d3, canin_dat+3
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d4, canin_dat+4
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d5, canin_dat+5
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d6, canin_dat+6
+         dcfsnz  reg2
+         jump    done_dat
+
+         movff   rxb0d7, canin_dat+7
+
+done_dat dbankis gbankadr    ;done copying all data bytes into the software buffer
+         bcf     rxb0con, rxful ;mark HW buffer as empty, allow it to be re-used
+;
+;   Tell the rest of the system that a new CAN frame has been received.
+;   FLAG_CANIN is always set.  This can be used by other parts of the system as
+;   a event flag to read the CAN frame in the CANIN buffer.  This other code
+;   must clear FLAG_CANIN when done so that this task can read the next received
+;   CAN frame into the buffer.
+;
+;   For some systems, waiting for FLAG_CANIN to be noticed may be too slow.  For
+;   such cases there is a callback mechnism.  When the preprocessor string
+;   constant CANIN_CALLBACK is not the empty string, it is taken as the name of
+;   a subroutine to call.  This routine can perform immediate action from this
+;   task.  In any case, whatever code in the rest of the system handles the
+;   received CAN frame must also clear FLAG_CANIN when it is done reading the
+;   CANIN buffer.
+;
+         dbankif gbankadr
+         bsf     flag_canin  ;indicate a new received frame is in the CANIN buffer
+
+/if [> [slen canin_callback] 0] then ;callback routine defined ?
+  /if callback_extern then
+         extern  [chars canin_callback]
+    /endif
+         call    [chars canin_callback]
+  /endif
+
+         jump    wait_swbuf  ;back to wait for done with this frame
+
+;*******************************************************************************
+;
+;   Subroutine CAN_SEND_INIT
+;
+;   Init the transmit frame state.  REG0 contains flag bits indicating the type
+;   of frame:
+;
+;     Bit 0  -  0 = standard frame, 11 bit ID
+;               1 = extended frame, 29 bit ID
+;
+;     Bit 1  -  0 = data frame
+;               1 = remote request frame
+;
+;   The transmit state frame has a interlock so that only one task at a time can
+;   attempt to send a frame.  This routine waits for the transmit frame state to
+;   be available, then locks it.  Since this routine must always be called each
+;   new CAN frame transmitted, the caller has exclusive access to the transmit
+;   state until it is released by CAN_SEND.
+;
+         glbsub  can_send_init, noregs
+;
+;   Wait for the transmit frame state to not be in use, then lock it for our
+;   use.
+;
+sendi_wait unbank
+         dbankif gbankadr
+         btfss   flag_cansend ;transmit frame still in use ?
+         jump    sendi_avail ;no, it is available
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    sendi_wait  ;back to check again
+sendi_avail dbankis gbankadr ;transmit frame state is not in use
+
+         bsf     flag_cansend ;indicate it is now in use
+         movff   currtask, canwtask ;save ID of task that has transmit state locked
+;
+;   Initialize the transmit frame state.
+;
+         dbankif lbankadr
+         movf    reg0, w     ;get the flags byte
+         andlw   b'00000011' ;mask in only the valid flags
+         movwf   wr_flags    ;init transmit frame flags byte
+
+         loadk32 wr_id, 0    ;init all the ID bits to 0
+         loadk8  wr_ndat, 0  ;init number of data bytes to 0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CAN_SEND_ID
+;
+;   Set the ID of the transmit frame state.  If this is a standard frame, then
+;   the ID is in the low 11 bits of REG1:REG0.  If this is a extended frame,
+;   then the ID is in the low 29 bits of REG3:REG2:REG1:REG0.
+;
+         glbsub  can_send_id, noregs
+
+         dbankif lbankadr
+         movff   reg0, wr_id+0 ;set low 8 bits of ID
+         btfsc   wr_flags, 0 ;this is a standard frame ?
+         jump    sid_ext     ;extended frame
+;
+;   Standard frame.  ID is 11 bits.
+;
+         movf    reg1, w
+         andlw   b'00000111' ;mask in valid ID bits only
+         movwf   wr_id+1     ;save ID high byte
+         clrf    wr_id+2     ;clear unused ID bytes
+         clrf    wr_id+3
+         jump    sid_leave
+;
+;   Extended frame.  ID is 29 bits.
+;
+sid_ext  dbankif lbankadr
+         movff   reg1, wr_id+1
+         movff   reg2, wr_id+2
+         movf    reg3, w
+         andlw   b'00011111' ;mask in valid ID bits of high byte only
+         movwf   wr_id+3
+
+sid_leave unbank             ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CAN_SEND_DAT
+;
+;   Add the byte in REG0 as the next data byte in the transmit frame state.
+;   Data bytes beyond what the CAN frame can contain are ignored.
+;
+         glbsub  can_send_dat, noregs
+
+         dbankif lbankadr
+         btfsc   wr_flags, 1 ;normal, not remote request frame
+         jump    sdat_leave  ;remote request frames don't have data bytes
+
+         movf    wr_ndat, w  ;get number of data bytes already stored
+         sublw   7           ;compare to max with any room left
+         skip_wle            ;still room for another data byte ?
+         jump    sdat_leave  ;no
+         lfsr    0, wr_dat   ;init pointer to first data byte
+         movf    wr_ndat, w
+         addwf   fsr0l       ;add offset to new data byte to write
+         movff   reg0, indf0 ;stuff the data byte into the transmit frame buffer
+         incf    wr_ndat     ;update number of data bytes stored
+
+sdat_leave unbank            ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CAN_SEND
+;
+;   Send the frame stored in the current transmit frame state.  This routine
+;   returns when the transmission has been initiated.  The actual transmission
+;   may not occur until later, and may fail.  However, after this call the
+;   information about the frame will have been transferred into the hardware and
+;   the lock on the software transmit frame state released.
+;
+         glbsub  can_send, noregs
+;
+;   Wait for any previous frame to finish transmission.
+;
+snd_wait unbank
+         dbankif txb0con
+         btfss   txb0con, txreq ;previous transmission still in progress ?
+         jump    snd_ready   ;no
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    snd_wait
+snd_ready unbank             ;HW is ready for next transmission
+;
+;   Load the transmit buffer control registers sequentially starting with
+;   TXB0SIDH.  The registers that will be loaded, in order, are:
+;
+;     SIDH
+;     SIDL
+;     EIDH
+;     EIDL
+;     DLC
+;
+         dbankif lbankadr
+         lfsr    0, txb0sidh ;init pointer to first sequential register
+         btfsc   wr_flags, 0
+         jump    snd_ext
+         ;
+         ;   This is a standard frame, 11 bit ID.
+         ;
+         rrncf   wr_id+0, w
+         rrncf   wreg
+         rrncf   wreg
+         andlw   b'00011111'
+         movwf   indf0       ;set standard address bits <7:3>
+         swapf   wr_id+1, w
+         rlncf   wreg
+         andlw   b'11100000'
+         iorwf   postinc0    ;set standard address bits <10:8>
+
+         swapf   wr_id+0, w
+         rlncf   wreg
+         andlw   b'11100000'
+         movwf   postinc0    ;set standard address bits <2:0>
+
+         clrf    postinc0    ;EIDH not used in standard address mode
+         clrf    postinc0    ;EIDL not used in standard address mode
+         jump    snd_doneadr ;done setting address bits
+         ;
+         ;   This is a extended frame, 29 bit ID.
+         ;
+snd_ext  dbankis lbankadr
+         rlncf   wr_id+3, w
+         rlncf   wreg
+         rlncf   wreg
+         andlw   b'11111000'
+         movwf   indf0       ;set ID bits <28:24>
+         swapf   wr_id+2, w
+         rrncf   wreg
+         andlw   b'00000111'
+         iorwf   postinc0    ;set ID bits <23:21>
+
+         rlncf   wr_id+2, w
+         rlncf   wreg
+         rlncf   wreg
+         andlw   b'11100000'
+         movwf   indf0       ;set ID bits <20:18>
+         bsf     indf0, exide ;indicate this is a extended frame
+         movf    wr_id+2, w
+         andlw   b'00000011'
+         iorwf   postinc0    ;set ID bits <17:16>
+
+         movff   wr_id+1, postinc0 ;set ID bits <15:8>
+         movff   wr_id+0, postinc0 ;set ID bits <7:0>
+snd_doneadr dbankis lbankadr ;done setting address bits
+
+         movf    wr_ndat, w  ;get number of data bytes
+         btfsc   wr_flags, 1 ;data frame ?
+         iorlw   b'01000000' ;no, remote request frame
+         movwf   postinc0
+;
+;   Load the data bytes.
+;
+         movff   wr_dat+0, postinc0
+         movff   wr_dat+1, postinc0
+         movff   wr_dat+2, postinc0
+         movff   wr_dat+3, postinc0
+         movff   wr_dat+4, postinc0
+         movff   wr_dat+5, postinc0
+         movff   wr_dat+6, postinc0
+         movff   wr_dat+7, postinc0
+;
+;   Write the transmit buffer control byte.  The TXREQ bit will be set to one,
+;   which starts the transmission.
+;
+         setreg  b'00001000', txb0con
+                 ; 0-------  clear transmit completed flag
+                 ; -XXX----  read-only status bits
+                 ; ----1---  request transmission
+                 ; -----X--  unused
+                 ; ------00  priority level
+
+         dbankif gbankadr
+         bcf     flag_cansend ;release lock on transmit frame state
+
+         leaverest

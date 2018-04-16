@@ -1,0 +1,26 @@
+;   Subroutine LOADB
+;
+;   Load a 32 bit value into the operand register (REG4-REG7).
+;
+;   FSR is pointing to the source value.  The current indirect register bank
+;   must be set for access to the value.  FSR is trashed.
+;
+.loadb   code
+         glbsub  loadb, noregs
+
+         movf    indf, w
+         movwf   reg4
+
+         incf    fsr
+         movf    indf, w
+         movwf   reg5
+
+         incf    fsr
+         movf    indf, w
+         movwf   reg6
+
+         incf    fsr
+         movf    indf, w
+         movwf   reg7
+
+         leave   noregs

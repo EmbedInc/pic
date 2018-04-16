@@ -1,0 +1,11 @@
+;   Subroutine SUBA
+;
+;   Subtract REGB from REGA.  The result is written into REGA.
+;
+.suba    code
+         glbsub  suba, regf8
+
+         dbankif reg8
+         sub32   rega, regb, reg8 ;REGA - REGB into REGA, use REG8 as temp
+
+         leaverest

@@ -1,0 +1,472 @@
+;   ***************************************************************
+;   * Copyright (C) 2012, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module implements the mechanics of the EmCan protocol, which is Embed
+;   Inc's multi-device protocol layered on CAN.  EmCan specific frames are
+;   processed silently in this module.  Application level frames are passed on
+;   to the application thru the dispatch tables defined below.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   emcan_getrole = ""  ;no app routine to get role ID
+/const   emcan_setrole = ""  ;no app routine to set new role, role is fixed
+/const   emcan_reset = ""    ;no app routine to notify of EmCan reset
+/const   emcan_upld_dat = "" ;routine for firmware upload byte
+/const   emcan_upld_start = "" ;routine for upload block start
+/const   emcan_upld_end = "" ;routine for upload block end
+/const   emcan_upld_run = "" ;routine for run new uploaded code
+
+/const   emcan_upld_sp0_st1 integer = 16#00000000 ;firmware upload adr range
+/const   emcan_upld_sp0_en1 integer = 16#FFFFFFFF
+
+lbank    equ     1           ;bank for local variables in this module
+
+/include "(cog)src/pic/emcan1.ins.aspic"
+
+;*******************************************************************************
+;
+;   CAN frame processing routines interface
+;
+;   The code in the EMCAN module inspects all received CAN frames.  Processing
+;   routines are run for valid frames when there is a corresponding entry in the
+;   appropriate dispatch table (see below).   These CAN frame processing
+;   routines are run from the EMCAN task, and all have the same interface and
+;   responsibilities:
+;
+;     1  -  All the REGn general registers may be trashed.
+;
+;     2  -  On entry, the opcode field extracted from the CAN frame ID is in
+;           REG1:REG0.
+;
+;     3  -  The received frame is in the CANIN_xxx variables and further defined
+;           by FLAG_CANIN_EXT and FLAG_CANIN_RTR.  See the description in the
+;           ECAN.INS.ASPIC file for details.
+;
+;           A copy of just the frame ID and whether it is standard or extended
+;           is saved before the frame processing routine is run.  This copy
+;           remains valid even after the received frame state is released.  The
+;           frame ID is in EMCMD_ID, and FLAG_EMCMD_EXT is set for extended
+;           frames and cleared for standard frames.
+;
+;     4  -  The received frame state should be released as soon as possible by
+;           calling EMCAN_RELEASE in this module.  Releasing the received frame
+;           state allows the state to be set up with the data from the next
+;           received frame.  If this is not done in a timely fashion, the frame
+;           receiving queue could be overrun and frames lost.
+;
+;           If the frame processing routine does not release the received frame
+;           state, it will be automatically released when it returns.  This
+;           mechanism should only be relied on if the processing routine is fast
+;           and does not wait on any other events.
+;
+;     5  -  Processing routine must return "quickly".  Even if the received
+;           frame is released (EMCAN_RELEASE called) quickly, received frames
+;           are still processed sequentially.  Frame processing routines are run
+;           from the internal EMCAN task, which must process other received
+;           frames and perform some timing-related tasks.
+;
+;     6  -  The Embed multi-tasking system is in use.  Routines should call
+;           TASK_YIELD in a loop when waiting on events, although waiting on
+;           external events is discouraged (see #5).
+;
+;     7  -  Routines are run with the data stack of the EMCAN processing task,
+;           which will be empty on entry.  The call stack will contain a single
+;           entry, which will be the address of the EMCMD_DONE return point.
+;           When the EMCMD_DONE return point is appropriate for the processing
+;           routine, the routine can therefore execute a RETURN from its top
+;           nesting level to end processing of the frame.
+;
+;     8  -  When done processing a frame, one of these actions must be taken:
+;
+;           Jump to EMCMD_ABORT.  This will release the received frame if it is
+;             not already released and end processing without performing any
+;             other action.  The call and data stacks will be reset, so they can
+;             be in any state when jumping here.  Jump here to abort processing
+;             the frame, or if done processing the frame and no other action
+;             needs to be taken.
+;
+;           Jump to EMCMD_ACKDONE.  Like EMCMD_ABORT, but a ACK reply will be
+;             sent if the received frame is a extened data frame, ACK was
+;             requested, and no ACK has already been sent in response to this
+;             frame.  Like EMCMD_ABORT, the call and data stacks will be reset
+;             and can be in any state.
+;
+;             If a acknowledge is sent, then the global flag EMCAN_NACK
+;             indicates to send a negative acknowledge (NACK) instead of a
+;             positive acknowledge (ACK).  This flag is cleared (default is ACK)
+;             before the frame processing routine is run.
+;
+;           Jump to EMCMD_DONE.  By default, this is the same as EMCMD_ABORT
+;             unless EMCAN_FRAMEOK was called by the frame processing routine,
+;             in which case it acts like EMCMD_AKDONE.
+;
+;           Execute a RETURN from the top nesting level.  Frame processing
+;             routines are run as subroutines with the return point set to
+;             EMCMD_DONE.  This provides a simpler single-instruction means of
+;             going to the normal frame processing done point.  On entry to the
+;             frame processing routine, this will abort processing.  Once it has
+;             been determined that the received frame is valid and that it will
+;             be processed as intended, EMCAN_FRAMEOK can be called to switch
+;             the behavior of EMCMD_DONE to be like EMCMD_ACKDONE (send ACK
+;             reply as appropriate).
+;
+;   The following utilities are available to CAN frame processing routines.
+;   This is only a brief list.  See the comment headers in the EMCAN1.INS.ASPIC
+;   file for details.
+;
+;     EMCMD_ID
+;
+;       4 byte variable containing the ID of the frame being processed.  The 11
+;       or 29 ID bits are right justfied into the 32 bit variable with the upper
+;       bits 0.  This state persists until the processing routine exits, whether
+;       the received CAN frame has already been released or not.
+;
+;     FLAG_EMCMD_EXT
+;
+;       Indicates that the frame ID saved in EMCMD_ID is for a extended frame,
+;       not for a standard frame.  This state persists until the processing
+;       routine exits, whether the received CAN frame has already been released
+;       or not.
+;
+;     EMCMD_ACK
+;
+;       Subroutine that sends a ACK frame if the received frame is extended and
+;       the ACK request bit in the frame ID is set.  This routine uses the saved
+;       frame ID state in EMCMD_ID, not CANIN_ID, so can be called after the
+;       received frame has already been released.
+;
+;     EMCAN_CHECKEXT
+;
+;       Subroutine that checks for a "normal" extended frame.  Aborts received
+;       frame processing if not.  See comment header for details.
+;
+
+;*******************************************************************************
+;
+;   CAN frames dispatch tables.
+;
+;   There are separate tables for different types of CAN frames, as defined in
+;   the EmCan specification.  Each table provides the addresses of routines to
+;   run to process frames for the opcodes within its range.
+;
+;   The name of each table must remain as shown, and each table must be ended
+;   with TBL_END.
+;
+;   To implement a command, add its entry to the appropriate table with the
+;   CANCMD macro.  This macro takes two parameters, the opcode and the address
+;   of the frame processing routine to run.  The processing routine must be
+;   external to this module.  Application code should not be added to this
+;   module since there is no guarantee what local symbol names may be defined in
+;   the EMCAN1.INS.ASPIC and EMCAN2.INS.ASPIC include files, which are included
+;   in this module.
+;
+;   For example, a valid table entry would be:
+;
+;      cancmd  12, ccmd_dostuff
+;
+;   In this example, when a frame is received with opcode 12 and that meets the
+;   conditions specified for the particular table, the EmCan routines will
+;   jump to CCMD_DOSTUFF to process the CAN frame.
+;
+;   The tables below are for the commands reserved for application use by EmCan.
+;   The commands used by EmCan are handled in the EMCAN2.INS.ASPIC file and not
+;   surfaced here.  For a routine to be run thru one of the tables here, all of
+;   the following conditions must be met:
+;
+;     1  -  The node has a valid address assigned.
+;
+;     2  -  The node address in the frame ID matches the assigned address or
+;           the address in the frame is 0 (broadcast).
+;
+;     3  -  The command is not reserved for the EmCan subsystem.
+;
+;     4  -  Application-specific interactions are enabled for this node.
+;
+
+;***************************************
+;
+;   Node-specific standard (11 bit ID) data frames.  The opcode is the high 4
+;   bits of the frame ID, so can be 0-15.
+;
+tbl_std
+         tbl_end
+;
+;   Remote request frames for the above.
+;
+tbl_stdrtr
+         tbl_end
+
+;***************************************
+;
+;   Broadcast frames.  These are extended (29 bit ID) data frames with the node
+;   address field in the ID set to 0.  The opcode is the high 10 bits of the ID,
+;   so can be 0-1023.
+;
+tbl_extb
+         tbl_end
+;
+;   Remote request frames for the above.
+;
+tbl_extbrtr
+         tbl_end
+
+;***************************************
+;
+;   Node-specific extended (29 bit ID) data frames.  The opcode is the high 10
+;   bits of the ID.
+;
+;   The last 32 opcodes (992 - 1023) are reserved for use by the EmCan
+;   subsystem.  EmCan-specific frames are handled separately and are not
+;   dispatched thru these tables.  Valid opcodes for these tables are therefore
+;   0 - 991.  Opcodes 960 - 991 are reserved for test mode, not normal
+;   operation.
+;
+tbl_ext
+         tbl_end
+;
+;   Remote request frames for the above.
+;
+tbl_extrtr
+         tbl_end
+
+;*******************************************************************************
+;
+;   Definitions of each of the EmCan ports defined by this device.  See the
+;   EmCan spec for a description of what EmCan ports are.
+;
+;   Each port is defined here by setting various preprocessor variables, then
+;   calling the prepocessor subroutine PORT_DEFINE.  The ports must be defined
+;   in sequence starting with port 0.  The port number must be explicitly set
+;   for each port to force each definition to be documented.  This port number
+;   is checked and the build is aborted with error if it is not the next
+;   expected port.
+;
+;   It is possible to skip ports by defining them as unused, but this is
+;   discouraged.  It is better to arrange for all the ports to be sequential
+;   without gaps.  All ports within the defined range, whether used or not, will
+;   consume some program memory to define them.
+;
+;   The preprocessor variables that can be set for each port definition are
+;   listed here.  These are initialized to defaults and reset to defaults after
+;   every port definition.  The preprocessor variables are:
+;
+;     PORT  -  The 0-N port number.  Ports must be defined sequentially.  The
+;       last defined port implicitly defines the number of defined ports.  This
+;       is initialized to invalid, so must be set for each port definition.  It
+;       is suggested that each port definition start with assigning PORT to the
+;       number of the port being defined.
+;
+;     PORT_IO  -  String that must be either "in", "out", "inout", or "unused"
+;       (case-insensitive).  This is initialized to a invalid value and must be
+;       set each port definition.  If set to "unused", then the port will be
+;       reported as unimplemented to the host and no other variables should be
+;       set.  Again, while unused ports within the defined range are allowed,
+;       they are discouraged.
+;
+;     PORT_TYPE  -  Integer, the low 14 bits of the EmCan PORTYPE "type"
+;       parameter.  It is best to use one of these pre-defined constants:
+;
+;         TYPE_BITS  -  The port value is just a bunch of bits.
+;
+;         TYPE_BOOL  -  Boolean.  The bit size defaults to 1.
+;
+;         TYPE_CNTBOOL  -  Counted boolean.
+;
+;     PORT_FORMAT  -  Integer.  This is the EmCan PORTYPE "dform" parameter.
+;       This is initialized to a invalid value to force it to be set.  If the
+;       port type requires a particular format, then that becomes the default.
+;       It is best to use one of these pre-defined constants:
+;
+;         FORMAT_UNSPEC  -  Unspecified.
+;
+;         FORMAT_UINT  -  Unsigned integer.
+;
+;         FORMAT_SINT  -  Twos complement signed integer.
+;
+;     PORT_SIZE  -  The size of the port data in bits.  This is initialized to
+;       a invalid value to force it to be set.  If the port type requires a
+;       particular bit size, then it defaults to that.  It is a error to set
+;       this to a bit size other than supported by the particular port type and
+;       data format.  EmCan allows for port data sizes from 1 to 256 bits.  This
+;       implementation only supports bit sizes from 1 to 48 bits.
+;
+;     PORT_DIM  -  Integer.  This is the EmCan PORTYPE "dim" parameter, which
+;       identifies the physical quantity, if any, represented by the port data.
+;       This value is initialized to invalid to force it to be set.  It is best
+;       to use one of these pre-defined constants:
+;
+;         DIM_NONE  -  The port data value does not represent a physical
+;           quantity.  This must be specified if the port data value is not
+;           a numeric value.  Offset and scale do not apply to this port.
+;
+;         DIM_UNSC  -  Unscaled numeric value.  The port value is raw numeric in
+;           its native format.  Offset and scale to not apply.  This is the DIM
+;           to use for values that are inherently integer, for example.
+;
+;         DIM_NUM  -  The port value is numeric, but it does not map linearly to
+;           a phyiscal quantity or that mapping is not known.  Offset and scale
+;           do apply.
+;
+;         DIM_DLESS  -  Dimensionless numeric value.  Offset and scale apply.
+;
+;         DIM_LENGTH  -  Length.  The reference is 1 meter.
+;
+;         DIM_MASS  -  Mass.  The reference is 1 kilogram.
+;
+;         DIM_TIME  -  Time.  The reference is 1 second.
+;
+;         DIM_FORCE  -  Force.  The reference is 1 newton.
+;
+;         DIM_EMF  -  Electromotive force.  The reference is 1 volt.
+;
+;         DIM_CURR  -  Electric current.  The reference is 1 ampere.
+;
+;         DIM_FREQ  -  Frequency.  The reference is 1 Hz.
+;
+;     PORT_OFFSET  -  Floating point.  This is only meaningful when the port
+;       value expresses a known physical quantity with a defined reference
+;       quantity.  The offset is the measure of the reference quantity when the
+;       port value is zero.  Whether a reference quantity exists, and if so,
+;       what it is, is defined separately for each DIM value.  The default
+;       offset is 0.0.
+;
+;     PORT_SCALE  -  Floating point.  This is valid the same as the offset.
+;       This is the change in the reference quantity for a 1 unit change of the
+;       port value.  For example, if the port data format is integer, then this
+;       is the resolution of the port value, sometimes referred to as the "LSB
+;       value".  The default is 1.0.
+;
+;     PORT_DESC  -  String.  This is the fixed manufacturer-defined description
+;       of the port.  The default is the empty string.
+;
+;     PORT_ROLEADR  -  Non-volatile memory address of the start of the role ID.
+;       The role ID is 32 bits and stored in low to high byte order.  The
+;       default is that this port does not have a settable role ID.
+;
+;       This value is a string, which will be passed to the assembler without
+;       modification.  It can therefore be a symbol defined by the linker, but
+;       since its value is not known when the preprocessor is run, preprocessor
+;       operations are not possible, other than to generate the string.
+;
+;     PORT_INITADR  -  Non-volatile memory address of the startup value for this
+;       port.  This is as many bytes long as the minimum to hold the number of
+;       bits.  If multiple bytes are used, they are stored in least to most
+;       significant order.  The default is that this port has no settable
+;       startup value.
+;
+;       This value is a string, which will be passed to the assembler without
+;       modification.  It can therefore be a symbol defined by the linker, but
+;       since its value is not known when the preprocessor is run, preprocessor
+;       operations are not possible, other than to generate the string.
+;
+;     PORT_CFGADR  -  Non-volatile memory address of the settable configuration
+;       data for this port.  The size and meaning of the configuration data, if
+;       any, is defined separately for each port type.  The port type is defined
+;       by the PORT_TYPE value (described above).  The individual type values
+;       are described in the EmCan spec for the "type" parameter to the PORTYPE
+;       frame.  The default is that this port has no settable configuration.
+;
+;       This value is a string, which will be passed to the assembler without
+;       modification.  It can therefore be a symbol defined by the linker, but
+;       since its value is not known when the preprocessor is run, preprocessor
+;       operations are not possible, other than to generate the string.
+;
+;     PORT_USEADR  -  Non-volatile memory address of the settable usage string
+;       for this port.  This string is intended to describe how the port is used
+;       or what its meaning is within the larger system.  The string is stored
+;       starting with a storage length byte, then the live length byte, followed
+;       by exactly the number of bytes indicated by the live length byte.  The
+;       default is that this port has no settable usage description string.
+;
+;       This value is a string, which will be passed to the assembler without
+;       modification.  It can therefore be a symbol defined by the linker, but
+;       since its value is not known when the preprocessor is run, preprocessor
+;       operations are not possible, other than to generate the string.
+;
+;     PORT_WRITE  -  Program memory address of the routine to call to write new
+;       data to the port.  The port number will be passed in REG7:REG6.  FSR0
+;       will be pointing to the sequence of data bytes as passed from the host
+;       in most to least significant byte order.  All the REGn general registers
+;       may be trashed.  This routine is responsible for any interpretation of
+;       the data depending on the port TYPE and the current configuration
+;       setting.  This address must point to a valid routine when the port is
+;       writable.
+;
+;       This value is a string, which will be passed to the assembler without
+;       modification.  It can therefore be a symbol defined by the linker, but
+;       since its value is not known when the preprocessor is run, preprocessor
+;       operations are not possible, other than to generate the string.
+;
+;     PORT_READ  -  Program memory address of the routine to call to read data
+;       from the port.  The port number will be passed in REG7:REG6 and FSR0
+;       will point to a byte buffer of where to write the port data, in most to
+;       least significant byte order.  All the REGn general registers may be
+;       trashed.  This routine is responsible for any interpretation of the data
+;       depending on the port TYPE and the current configuration setting.  This
+;       address must point to a valid routine when the port is readable.
+;
+;       This value is a string, which will be passed to the assembler without
+;       modification.  It can therefore be a symbol defined by the linker, but
+;       since its value is not known when the preprocessor is run, preprocessor
+;       operations are not possible, other than to generate the string.
+;
+;     PORT_FUNCID  -  String containing the values of the port function ID
+;       bytes, separated by spaces.  Each byte is specified by a separate token.
+;       Token values must be resolvable to integers in the range of -128 to
+;       +255.  The number of tokens sets the number of function ID bytes.  The
+;       default is the empty string, which means the port has no function ID
+;       defined for it.
+;
+;   Here is a example port definition that specifies all possible values:
+;
+;   /set port 5              ;port 5 is being defined
+;   /set port_io "in"        ;input port, the host can only read data, not write
+;   /set port_type type_bits ;type is collection of bits without special handling
+;   /set port_format format_uint ;value is a unsigned integer
+;   /set port_size 10        ;the port value is 10 bits wide
+;   /set port_dim dim_emf    ;the port value represents a voltage
+;   /set port_offset 0.0     ;port value of 0 means 0 volts
+;   /set port_scale [/ 3.3 1023] ;maximum value of 1023 represents 3.3 volts
+;   /set port_desc "A/D input 1, 0-3.3 volts" ;fixed manufacturer description string
+;   /set port_roleadr "port5_role" ;label that will be resolved by the linker
+;   /set port_initadr "port5_start"
+;   /set port_cfgadr "port5_cfg"
+;   /set port_useadr "port5_use"
+;   /set port_read "port_read_ad" ;routine to call to read data from the port
+;   /set port_funcid "11 13 16#3F -2" ;port function ID
+;   /call port_define        ;define port according to above, reset to defaults
+;
+;   This port definition could be appropriate for the internal 10-bit A/D
+;   reading of a processor that is running from 3.3 volts.
+;
+;   Note that preprocessor computational capabilities can be used to generate
+;   numeric values.  Instead of writing the explicit LSB value of 3.226 mV, it
+;   is easier, more accurate, and better documented by allowing the preprocessor
+;   to compute this value from the underlying parameters.
+;
+
+;   DEFINE ALL THE PORTS HERE:
+;
+tbl_ports:
+
+
+/include "(cog)src/pic/emcan2.ins.aspic"
+
+         end

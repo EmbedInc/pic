@@ -1,0 +1,28 @@
+;   Subroutine LOOKINC
+;
+;   Perform a table lookup at a specified address, and increment the address.
+;   On this processor, tables of constants are implemented as successive RETLW
+;   instructions, each encoded with the specific 8 bit value for that table
+;   entry.  The 8 bit value from the table is returned in W.  The address
+;   is passed as follows:
+;
+;     REG1  -  low byte of table entry address to look up
+;     REG2  -  high byte of table entry address to look up
+;
+;   The table entry address will be incremented by 1.  Successive calls to
+;   this routine will therefore return successive table values.  Note that
+;   all manner of destruction can occur if the passed address is not
+;   a valid table entry, and therefore not a RETLW instruction.
+;
+.lookinc code
+         glbsub  lookinc, noregs
+
+         movf    reg2, w     ;get entry address high byte
+         movwf   pclath      ;set high byte of computed goto
+
+         incf    reg1        ;make low byte address for next time
+         skip_nz             ;no carry into upper address byte ?
+         incf    reg2        ;propagate carry
+
+         decf    reg1, w     ;make low byte of this table address in W
+         movwf   pcl         ;jump to table entry, loads W and returns to caller

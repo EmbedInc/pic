@@ -1,0 +1,1001 @@
+;   ***************************************************************
+;   * Copyright (C) 2010, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Low level driver for the ENC28J60 MAC/PHY.  All direct interaction
+;   with the MAC/PHY is performed in this module.  The rest of the
+;   system accesses the MAC/PHY only thru the procedural interface
+;   presented by this module.  During normal operation, the wired
+;   ethernet MAC module is the only client of these routines.  However,
+;   the routines here are also called from debug and diagnostic
+;   commands.
+;
+;   Unless otherwise noted, the caller must have the network routines
+;   acquired when calling any routine in this module.
+;
+;   This module uses MSSP1 in SPI mode to communicate with the MAC/PHY.
+;   Other modules must not attempt to access or control MSSP1.
+;
+;   Subroutines called ENC_xxxx have the normal Embed Inc assembler
+;   interface conventions.  Subroutines called MAC_xxxx use C18 calling
+;   conventions and are intended to be called from the TCP/IP stack
+;   MAC module (which is in C18).
+;
+;***************************************
+;
+;   System resource requirements:
+;
+;     Hardware:
+;
+;       MSSP module.  Will be used in SPI master mode.  The ENC28J60 must be
+;       connected to the SPI lines controlled by the MSSP module.
+;
+;     I/O pins:
+;
+;       SPISYNC  -  SPI slave select of ENC28J60.
+;
+;     Global flags:
+;
+;       FLAG_MACLOCK  -  MAC/PHY locked for exclusive use by a task
+;
+;     Preprocessor symbols not defined in the NETWORK.INS.ASPIC include file:
+;
+;       DEBUG_SIM  -  Optional BOOL constant or variable.  FALSE for normal
+;         operation.  TRUE works around bug in simulator where SPI operation
+;         doesn't complete.  Fixed delay inserted instead.  This works on the
+;         real hardware too, but is not as efficient.  The default is FALSE.
+;
+/if [= mactype "28J60"] then
+
+  /include "(cog)src/pic/enc28j60_regs.ins.aspic"
+
+         extern  currtask    ;ID of the currently running task
+         extern  tick1ms     ;incremented every 1mS clock tick
+         extern_flags        ;declare global flag bits EXTERN
+;
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+lbank    equ     [v lbank_enc28j60] ;register bank for the local state of this module
+;
+;   Instruction opcodes of commands sent over the SPI bus.  These
+;   constants only contain the mandatory fixed bits for each of the
+;   operations.  Some opcodes require data values to be ORed with
+;   the opcode values defined here.
+;
+opc_rcr  equ     h'00'       ;read control register, adr in low 5 bits
+opc_rbm  equ     h'3A'       ;read buffer memory
+opc_wcr  equ     h'40'       ;write control register, adr in low 5 bits
+opc_wbm  equ     h'7A'       ;write buffer memory
+opc_bfs  equ     h'80'       ;bit field set, adr in low 5 bits
+opc_bfc  equ     h'A0'       ;bit field clear, adr in low 5 bits
+opc_sc   equ     h'FF'       ;system command (soft reset)
+;
+;   Derived constants.
+;
+  /if [not [exist "debug_sim"]] then
+    /const debug_sim bool = false
+    /endif
+debug_sim equ    [if debug_sim 1 0]
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+;
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+mac_locktsk res  1           ;ID of task that has the MAC/PHY locked
+
+         global  mac_locktsk
+;
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+econ1    res     1           ;local copy of MAC/PHY ECON1 register
+
+.enc     code
+;
+;*******************************************************************************
+;
+;   Subroutine ENC28J60_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+;   This routine is assumed to be called during module initialization
+;   before system startup.  The network routines can therefore not be
+;   acquired before calling this module.  However multi-tasking has
+;   not been enabled yet either, so this call is guaranteed to be
+;   single-threaded.
+;
+         glbsub  enc28j60_init, noregs
+;
+;   Initialize the SPI hardware.
+;
+         dbankif ssp1stat
+         movlw   b'01000000'
+                 ; 0-------  sample input data in middle of bit time
+                 ; -1------  change ouput on active to idle clock transition
+                 ; --XXXXXX  read only status bits
+         movwf   ssp1stat
+
+         dbankif ssp1con1
+         movlw   b'00100000'
+                 ; 0-------  clear write collision detected
+                 ; -0------  no slave mode overflow
+                 ; --1-----  enable the MSSP module
+                 ; ---0----  clock idle state is low
+                 ; ----0000  SPI master mode, select clock as Fosc/4
+         movwf   ssp1con1
+
+         dbankif pir1
+         bsf     pir1, ssp1if ;init flag to indicate SPI hardware is idle
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Macro WAIT_DONE
+;
+;   Wait for the previous SPI transaction to finish.  Each SPI transaction
+;   only takes about 8 instruction cycles, so this macro does a busy
+;   wait until the previous transaction finishes.
+;
+wait_done macro
+         local   wdloop
+;
+;   Special case for debugging with the simulator.  The simulator has a
+;   bug where PIR1,SSP1IF never gets set when the transfer completes.
+;   This causes the code to hang the second time WAIT_DONE is invoked.
+;   As a work around we just do a bunch of NOPs, which should also work
+;   on real hardware, although not optimally.
+;
+  if debug_sim
+         waitcy  12
+         exitm
+    endif
+
+
+         dbankif pir1
+wdloop
+         btfss   pir1, ssp1if ;previous transaction has completed ?
+         jump    wdloop      ;no, go back and check again
+
+         endm
+;
+;*******************************************************************************
+;
+;   Macro SPISTART
+;
+;   Start an SPI bus transfer to/from the MAC/PHY.  Any SPI transfers to/from
+;   MAC/PHY must be performed after SPISTART and before SPIEND.
+;
+spistart macro
+         dbankif spisync_reg
+         bcf     spisync_pinlat ;assert the MAC/PHY chip select line
+         endm
+;
+;*******************************************************************************
+;
+;   Macro SPIEND
+;
+;   END an SPI bus transfer to/from the MAC/PHY.  Any SPI transfers to/from
+;   MAC/PHY must be performed after SPISTART and before SPIEND.
+;
+spiend   macro
+         wait_done           ;make sure last transfer is complete
+         dbankif spisync_reg
+         bsf     spisync_pinlat ;release the MAC/PHY chip select line
+         endm
+;
+;*******************************************************************************
+;
+;   Local subroutine SPIPUT
+;
+;   Send the byte in REG0 to the MAC/PHY chip.  Bytes are always
+;   transferred in both directions simultaneously on an SPI bus.  The
+;   received byte is discarded.
+;
+;   An SPI transfer must have been previously started.
+;
+         locsub  spiput, noregs
+
+         wait_done           ;wait for previous transaction to finish
+
+         dbankif pir1
+         bcf     pir1, ssp1if ;init to this transaction not complete yet
+         movff   reg0, ssp1buf ;start the new transfer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Local subroutine SPIGET
+;
+;   Receive a byte from the MAC/PHY chip into REG0.  Bytes are always
+;   transferred in both directions simultaneously on an SPI bus.
+;   This routine always transmits a zero byte value.
+;
+;   An SPI transfer must have been previously started.
+;
+         locsub  spiget, noregs
+
+         wait_done           ;wait for previous transaction to finish
+
+         dbankif pir1
+         bcf     pir1, ssp1if ;init to this transaction not complete yet
+         dbankif ssp1buf
+         clrf    ssp1buf     ;start a new transaction, send 0
+
+         wait_done           ;wait for this transaction to complete
+         movff   ssp1buf, reg0 ;read and return the data
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Local subroutine WAIT_TICK
+;
+;   Wait for a minimum of one system clock tick interval.  The system clock
+;   has a 1mS period which is much longer than any timing required by the
+;   ENC28J60.  Other tasks will be run during the wait time.
+;
+         locsub  wait_tick, regf0
+
+         movlw   2
+         movwf   reg0        ;pass number of 1mS clock ticks to wait for
+         gcall   waitms1     ;do the wait
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_LOCK
+;
+;   Lock the MAC/PHY for exclusive access.  If it is already locked, then this
+;   routine will stall until it is available.  The routines in this module do
+;   not lock and unlock the MAC themselves.  That is the responsibility of the
+;   caller.  The lock/unlock mechanism is provided in this module as a service
+;   to higher level subsystems.
+;
+         glbsub  enc_lock, noregs
+
+lock_loop unbank             ;back here until lock is available
+         dbankif gbankadr
+         btfss   flag_maclock ;MAC locked by someone else ?
+         jump    lock_leave  ;no
+         gcall   task_yield_save ;give other tasks a chance to run
+         jump    lock_loop   ;back to check the lock again
+
+lock_leave dbankis gbankadr  ;common exit point
+         bsf     flag_maclock ;indicate the MAC is now locked
+         movff   currtask, mac_locktsk ;remember which task has the lock
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_UNLOCK
+;
+;   Release the lock on the MAC/PHY acquired by ENC_LOCK.
+;
+         glbsub  enc_unlock, noregs
+
+         dbankif gbankadr
+         bcf     flag_maclock ;indicate the MAC is not locked
+         setf    mac_locktsk ;invalidate ID of locking task
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_RESET
+;
+;   Reset the ENC28J60.  The reset is performed by sending a system command and
+;   then waiting for the chip to finish resetting.
+;
+;   Several reset commands are sent to work around a bug in early versions of
+;   the chip.  At least 1mS is left after the last reset before accessing the
+;   chip to work around another bug.  A PHY register is read after reset due to
+;   another bug.
+;
+         glbsub  enc_reset, regf0 | regf1 | regf2
+
+         spiend              ;make sure the SPI bus is held in idle state
+         nop
+         nop
+;
+;   Send several system commands (soft resets) in a row with a "long" wait
+;   time between them.
+;
+         movlw   4           ;number of system commands to send
+         movwf   reg1
+         movlw   opc_sc      ;get system command opcode in REG0
+         movwf   reg0
+stsys    unbank              ;back here each new system command to send
+         spistart
+         mcall   spiput      ;send the system command opcode
+         spiend
+         mcall   wait_tick   ;wait a "long" time
+         decfsz  reg1        ;count one less system command left to send
+         jump    stsys       ;back to send next one
+
+         dbankif lbankadr
+         clrf    econ1       ;update shadow copy of ECON1 resgister
+;
+;   Read a PHY register.  I'm not sure why this is necessary, but writes
+;   to PHY registers don't seem to work until after this is done.
+;
+         movlw   h'14'       ;pass address of PHY register to read
+         movwf   reg2
+         mcall   enc_phyget  ;read the PHY register value into REG1:REG0
+
+         popregs savedregs   ;restore data stack to what it was on entry
+         goto    wait_tick   ;wait for MAC/PHY to settle, will return to caller
+;
+;*******************************************************************************
+;
+;   Local subroutine SETBANK
+;
+;   Make sure the current bank is set for access to the control register
+;   at the 7 bit address in REG1.  REG1 is returned the offset into the
+;   selected bank.  This means REG1 is always returned in the range 0-31.
+;
+;   A SPI transfer must not currently be in progress.
+;
+         locsub  setbank, regf0 | regf2 | regf3
+;
+;   Check for address is in the unbanked region.  If so, there is nothing to
+;   do.
+;
+         movf    reg1, w     ;get desired register address
+         andlw   h'7F'       ;make sure it is a 7 bit address
+         movwf   reg0        ;save desired 7 bit address
+         andlw   h'1F'       ;make offset within bank
+         movwf   reg1        ;save offset within bank in REG1
+         sublw   h'19'       ;compare to last banked offset
+         skip_wle            ;desired register is in banked area ?
+         jump    sb_leave    ;in unbanked area, nothing more to do
+;
+;   The desired register is in the banked region.  REG1 contains the offset
+;   within the bank and REG0 contains the register's 7 bit address.
+;
+;   Check for desired register is in different bank than current.  If not,
+;   there is nothing more to do.
+;
+         swapf   reg0, w     ;get desired bank in low bits
+         rrncf   wreg
+         movwf   reg2        ;save desired bank in low bits of REG2
+         dbankif lbankadr
+         xorwf   econ1, w    ;compare to current bank bits
+         andlw   3           ;mask in only bank bit differences
+         skip_nz             ;desired bank differs from current bank ?
+         jump    sb_leave    ;no, nothing more to do
+;
+;   The bank needs to be changed.  The desired bank is in the low 2 bits of
+;   REG2, and the old bank is in the low 2 bits of ECON1.  REG1 contains
+;   the desired offset within the bank, and REG0 contains the desired full
+;   7 bit address.  W contains the mask of bank bits that need to change
+;   in the low 2 bits.
+;
+         movwf   reg3        ;save mask of bits that need to change
+         pushreg reg1        ;temp save REG1 around this section
+;
+;   Current egister contents:
+;
+;     REG0  -  available
+;
+;     REG1  -  available
+;
+;     REG2  -  Desired bank in low 2 bits, garbage in other bits
+;
+;     REG3  -  Mask of bank bits that need to change in low two bits
+;
+;   Send a BIT FIELD CLEAR command for any bank bits that need to be changed
+;   from 1 to 0.
+;
+         comf    reg2, w     ;get maks of bits that should be 0
+         andwf   reg3, w     ;mask in only the ones that need to change
+         andlw   3
+         skip_nz             ;at least one bit needs to be cleared ?
+         jump    sb_no0      ;no bits need to be changed to 0
+         ;
+         ;   W contains the mask of ECON1 bits to clear.
+         ;
+         movwf   reg1        ;save mask of bits to clear
+         movlw   opc_bfc + eth_econ1 ;pass BIT FIELD SET opcode for ECON1 register
+         movwf   reg0
+
+         spistart            ;start a new SPI transfer
+         mcall   spiput      ;send the opcode byte
+         movff   reg1, reg0  ;pass the data byte
+         mcall   spiput
+         spiend              ;end the SPI bus transfer
+
+sb_no0   unbank              ;done clearing ECON1 bits, if any
+;
+;   Send a BIT FIELD SET command for any bank bits that need to be changed
+;   from 1 to 0.
+;
+         movf    reg2, w     ;get mask bit bits that must be 1
+         andwf   reg3, w     ;mask in only the ones that need to change
+         andlw   3
+         skip_nz             ;at least one bit needs to be cleared ?
+         jump    sb_no1      ;no bits need to be changed to 0
+         ;
+         ;   W contains the mask of ECON1 bits to clear.
+         ;
+         movwf   reg1        ;save mask of bits to clear
+         movlw   opc_bfs + eth_econ1 ;pass BIT FIELD SET opcode for ECON1 register
+         movwf   reg0
+
+         spistart            ;start a new SPI transfer
+         mcall   spiput      ;send the opcode byte
+         movff   reg1, reg0  ;pass the data byte
+         mcall   spiput
+         spiend              ;end the SPI bus transfer
+
+sb_no1   unbank              ;done clearing ECON1 bits, if any
+;
+;   Update the local copy of ECON1 to the new bank setting.
+;
+         dbankif lbankadr
+         movlw   h'FC'       ;mask off bank bits in saved ECON1
+         andwf   econ1
+         movf    reg2, w     ;get new bank setting
+         andlw   3           ;mask in only bank bits
+         iorwf   econ1       ;update bank bits in saved ECON1
+
+         popreg  reg1        ;restored saved register
+
+sb_leave unbank              ;common exit point, REG1 contains offset within bank
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_REGSET
+;
+;   Write to a MAC/PHY control register.  The data to write is in REG0,
+;   and the 7 bit register address in REG1.
+;
+         glbsub  enc_regset, regf1
+
+         mcall   setbank     ;set bank, put offset within bank into REG1
+;
+;   Check for writing to ECON1.  If so, the local copy of ECON1 is updated.
+;
+         movf    reg1, w     ;get offset of register within bank
+         xorlw   eth_econ1   ;compare to ECON1 offset
+         skip_nz             ;not writing to ECON1 ?
+         movff   reg0, econ1 ;writing to ECON1, update local copy
+;
+;   Do the write.  The value to write is in REG0, the offset of the register
+;   within its bank is in REG1, and the bank is already set for access to
+;   the target register.
+;
+         pushreg reg0        ;save data value on stack
+
+         spistart            ;start a new SPI transfer
+         movlw   opc_wcr     ;pass WRITE CONTROL REGISTER opcode
+         iorwf   reg1, w     ;merge in register offset
+         movwf   reg0        ;pass it
+         mcall   spiput      ;send the opcode byte
+         popreg  reg0        ;restore data value into REG0
+         mcall   spiput      ;send the data byte
+         spiend              ;end the SPI transfer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_REGGET
+;
+;   Read a MAC/PHY control register.  The 7 bit register address is in REG1,
+;   and the data will be returned in REG0.  The data value is also returned
+;   in W for compatibility with C18.
+;
+         glbsub  enc_regget, regf1 | regf2
+
+         movff   reg1, reg2  ;save full 7 bit register address in REG2
+         mcall   setbank     ;set bank, register offset within bank into REG1
+
+         movlw   opc_rcr     ;get READ CONTROL REGISTER opcode
+         iorwf   reg1, w     ;merge in register offset
+         movwf   reg0        ;pass byte to send
+         spistart            ;start a new SPI transfer
+         mcall   spiput      ;send the opcode byte
+;
+;   The opcode byte, which contains the register offset within its
+;   bank, has been sent.  REG1 contains the offset of the target register
+;   within its bank, and REG2 contains the complete 7 bit target register
+;   address.
+;
+;   Detect MAC or MII register access as apposed to ETH register
+;   access.  The data from a ETH register is returned immediately,
+;   but for MAC and MII registers a dummy byte is returned first,
+;   then the data.  If the addressed register is MAC or MII, then
+;   do a dummy read here.
+;
+         btfss   reg2, 6     ;in banks 2 or 3 ?
+         jump    done_dummy  ;in banks 0-1, definitely ETH register
+         btfsc   reg2, 5     ;in bank 2 ?
+         jump    bank3       ;in bank 3
+         ;
+         ;   In bank 2.
+         ;
+         movf    reg1, w     ;get offset within bank
+         sublw   h'19'       ;compare to last non-ETH register in this bank
+         skip_wle            ;is non-ETH register ?
+         jump    done_dummy  ;is ETH register, skip dummy read
+         jump    do_dummy    ;do the dummy read
+         ;
+         ;   In bank 3.
+         ;
+bank3    unbank
+         movf    reg1, w     ;get register offset within bank
+         xorlw   h'0A'       ;check for MISTAT register special case
+         skip_nz             ;not MISTAT register ?
+         jump    do_dummy    ;is MISTAT, do the dummy read
+
+         movf    reg1, w     ;get offset within bank
+         sublw   h'05'       ;compare to last non-ETH register in this bank
+         skip_wle            ;is non-ETH register ?
+         jump    done_dummy  ;is ETH register, skip dummy read
+
+do_dummy unbank
+         mcall   spiget      ;do the dummy read
+done_dummy unbank            ;all done dealing with dummy read
+;
+;   Read the register value.
+;
+         mcall   spiget      ;read the data value into REG0
+         spiend              ;end the SPI transfer
+         movf    reg0, w     ;also pass back value in W for C18 compatibility
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_BUFPUT
+;
+;   Write an array of bytes to the MAC/PHY data buffer.  FSR0 contains the
+;   address of the first source byte and will be trashed.  REG2:REG1 contains
+;   the number of bytes to transfer.
+;
+;   It is the caller's responsibility to set up the MAC/PHY to receive data
+;   bytes in a meaningful way.  This includes setting the buffer write
+;   address, setting auto-increment if desired, and understanding how the
+;   addresses will increment and wrap in the MAC/PHY data buffer.
+;
+         glbsub  enc_bufput, regf0 | regf1 | regf2
+
+         spistart            ;start a new SPI bus transfer
+         movlw   opc_wbm     ;send the WRITE BUFFER MEMORY opcode
+         movwf   reg0
+         mcall   spiput
+
+bp_loop  unbank              ;back here to send each new byte
+         movf    reg1, w     ;make OR of both counter bytes
+         iorwf   reg2, w
+         skip_nz             ;at least one more byte left to do ?
+         jump    bp_done     ;no more bytes left, all done
+
+         decf    reg1        ;count one less byte left to do
+         skip_nborr
+         decf    reg2
+
+         movff   postinc0, reg0 ;get this data byte
+         mcall   spiput      ;send it
+         jump    bp_loop     ;back to do the next byte
+
+bp_done  unbank              ;done sending all bytes, common exit point
+         spiend              ;end the SPI transfer for this byte
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_WRITE_START
+;
+;   Set up for wrting sequential data buffer bytes to the MAC/PHY.  To write a
+;   sequence of bytes, call this routine, then ENC_WRITE for each byte, then
+;   ENC_WRITE_END.  No other calls are allowed between starting and ending the
+;   write sequence.
+;
+;   This method of writing a sequence of buffer bytes is more efficient than
+;   separate calls to ENC_BUFPUT1.
+;
+         glbsub  enc_write_start, regf0
+
+         spistart            ;start a new SPI bus transfer
+         movlw   opc_wbm     ;send the WRITE BUFFER MEMORY command
+         movwf   reg0
+         mcall   spiput
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_WRITE
+;
+;   Write the next buffer byte.  The value in REG0 is written to the buffer,
+;   then the buffer address incremented by 1.  A write sequence must have been
+;   previously started with ENC_WRITE_START.
+;
+         glbsub  enc_write, noregs
+
+         mcall   spiput      ;send the byte in REG0
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_WRITE_END
+;
+;   End the current sequential buffer write sequence started with
+;   ENC_WRITE_START.  Other calls to this module are allowed again after this
+;   call.
+;
+         glbsub  enc_write_end, noregs
+
+         spiend              ;terminate the SPI transfer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_BUFPUT1
+;
+;   Write the single byte in REG0 to the MAC/PHY data memory according to the
+;   current setup.
+;
+         glbsub  enc_bufput1, regf0
+
+         pushreg reg0        ;temp save data byte on stack
+         spistart            ;start a new SPI bus transfer
+
+         movlw   opc_wbm     ;send the WRITE BUFFER MEMORY opcode
+         movwf   reg0
+         mcall   spiput
+
+         popreg  reg0        ;get the data byte back into REG0
+         mcall   spiput      ;send it
+
+         spiend              ;end the SPI transfer for this byte
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_BUFGET
+;
+;   Read sequential bytes from the MAC/PHY data buffer into a local array.
+;   FSR0 contains the address of where to write the first data byte, and
+;   will be trahsed.  REG2:REG1 contains the number of data bytes to transfer.
+;
+;   It is the caller's responsibility to set up the MAC/PHY to read data
+;   bytes in a meaningful way.  This includes setting the buffer read
+;   address, setting auto-increment if desired, and understanding how the
+;   addresses will increment and wrap in the MAC/PHY data buffer.
+;
+;   The number of bytes actually read will be left in PRODH:PRODL, which is
+;   how a 16 bit value is returned by a C function.  This implementation
+;   always reads the requested number of bytes, so the same value passed
+;   in REG2:REG1 will be returned.
+;
+         glbsub  enc_bufget, regf0 | regf1 | regf2
+
+         spistart            ;start a new SPI bus transfer
+         movlw   opc_rbm     ;send the READ BUFFER MEMORY command
+         movwf   reg0
+         mcall   spiput
+
+bg_loop  unbank              ;back here to get each new byte
+         movf    reg1, w     ;make OR of both counter bytes
+         iorwf   reg2, w
+         skip_nz             ;at least one more byte left to do ?
+         jump    bg_done     ;no more bytes left, all done
+
+         decf    reg1        ;count one less byte left to do
+         skip_nborr
+         decf    reg2
+
+         mcall   spiget      ;get this data byte into REG0
+         movff   reg0, postinc0 ;stuff it into the buffer
+         jump    bg_loop     ;back to do the next byte
+
+bg_done  unbank              ;done with all bytes, common exit point
+         spiend              ;end the SPI transfer for this byte
+         popregs savedregs   ;restore all registers pushed on stack at entry
+         movff   reg1, prodl ;pass back number of bytes transferred
+         movff   reg2, prodh
+         return
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_READ_START
+;
+;   Start the reading of sequential data buffer bytes from the MAC/PHY.  To read
+;   a sequence of bytes, call this routine, then ENC_READ for each byte, then
+;   ENC_READ_END.  No other calls are allowed between starting and ending the
+;   read sequence.
+;
+;   This method of reading a sequence of buffer bytes is more efficient than
+;   separate calls to ENC_BUFGET1.
+;
+         glbsub  enc_read_start, regf0
+
+         spistart            ;start a new SPI bus transfer
+         movlw   opc_rbm     ;send the READ BUFFER MEMORY command
+         movwf   reg0
+         mcall   spiput
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_READ
+;
+;   Read the next MAC/PHY buffer byte.  A read sequence must have been
+;   previously started with ENC_READ_START.  The data byte is returned in REG0.
+;
+         glbsub  enc_read, noregs
+
+         mcall   spiget      ;get this data byte into REG0
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_READ_END
+;
+;   End the current sequential buffer read sequence started with ENC_READ_START.
+;   Other calls to this module are allowed again after this one.
+;
+         glbsub  enc_read_end, noregs
+
+         spiend              ;terminate the SPI transfer
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_BUFGET1
+;
+;   Read a single byte from the MAC/PHY data memory according to the current
+;   setup.  The byte is returned in REG0, and in W for C18 compatibility.
+;
+         glbsub  enc_bufget1, noregs
+
+         spistart            ;start a new SPI bus transfer
+         movlw   opc_rbm     ;send the READ BUFFER MEMORY command
+         movwf   reg0
+         mcall   spiput
+         mcall   spiget      ;read the data byte into REG0
+         spiend              ;end the SPI transfer for this byte
+
+         movf    reg0, w     ;return byte in W also for C18 compatibility
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_BSET
+;
+;   Set selected bits in a ETH register.  The mask of bits to set is in
+;   REG0 with the 7 bit ETH register address in REG1.  A 0 bit in REG0
+;   will cause the corresponding bit in the target register to be
+;   preserved, and a 1 will cause it to be set to 1.
+;
+;   This routine can only be used on ETH registers, not MAC or MII.  This
+;   is not checked and is the caller's responsibility to ensure.
+;
+         glbsub  enc_bset, regf1
+
+         mcall   setbank     ;set bank, offset within bank into REG1
+;
+;   Check for modifying ECON1.  The ECON1 value is cached locally for
+;   bank switching.  The cached value must be updated whenever ECON1 is
+;   udpated.
+;
+         movf    reg1, w     ;get register offset within its bank
+         xorlw   eth_econ1   ;compare to ECON1 offset
+         skip_z              ;is ECON1 ?
+         jump    bs_necon1   ;no, skip the rest of this section
+
+         dbankif lbankadr
+         movf    reg0, w     ;get mask of bits being set
+         iorwf   econ1       ;set them in the ECON1 shadow copy
+
+bs_necon1 unbank             ;skip to here if not modifying ECON1
+;
+;   Perform the bit set operation.
+;
+         spistart            ;start a new SPI sequence
+         pushreg reg0        ;temp save mask of bits to set
+         movlw   opc_bfs     ;get the BIT FIELD SET opcode
+         iorwf   reg1, w     ;merge in offset of target register within bank
+         movwf   reg0        ;pass it
+         mcall   spiput      ;send it
+         popreg  reg0        ;get mask of bits to set back into REG0
+         mcall   spiput      ;send it
+         spiend              ;end the SPI sequence
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_BCLR
+;
+;   Clear selected bits in a ETH register.  The mask of bits to clear is
+;   in REG0, with the 7 bit ETH register address in REG1.  A 0 bit in REG0
+;   will cause the corresponding bit in the target register to be
+;   preserved, and a 1 will cause it to be set to 0.
+;
+;   This routine can only be used on ETH registers, not MAC or MII.  This
+;   is not checked and is the caller's responsibility to ensure.
+;
+         glbsub  enc_bclr, regf1
+
+         mcall   setbank     ;set bank, offset within bank into REG1
+;
+;   Check for modifying ECON1.  The ECON1 value is cached locally for
+;   bank switching.  The cached value must be updated whenever ECON1 is
+;   udpated.
+;
+         movf    reg1, w     ;get register offset within its bank
+         xorlw   eth_econ1   ;compare to ECON1 offset
+         skip_z              ;is ECON1 ?
+         jump    bc_necon1   ;no, skip the rest of this section
+
+         dbankif lbankadr
+         comf    reg0, w     ;get mask of bits that will be preserved
+         andwf   econ1       ;clear remaining bits in ECON1 shadow copy
+
+bc_necon1 unbank             ;skip to here if not modifying ECON1
+;
+;   Perform the bit clear operation.
+;
+         spistart            ;start a new SPI sequence
+         pushreg reg0        ;temp save mask of bits to clear
+         movlw   opc_bfc     ;get the BIT FIELD CLEAR opcode
+         iorwf   reg1, w     ;merge in offset of target register within bank
+         movwf   reg0        ;pass it
+         mcall   spiput      ;send it
+         popreg  reg0        ;get mask of bits to clear back into REG0
+         mcall   spiput      ;send it
+         spiend              ;end the SPI sequence
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_MIDONE
+;
+;   Wait until the MII interface is idle.  The MII interface must be idle before
+;   any new MII operation is started.  The BUSY bit in MISTAT is checked
+;   repeatedly until is is found to be 0.  Since it takes at most 10.24uS for
+;   the MII interface to perform a operation, this routine does a busy wait
+;   until the MII interface is idle.
+;
+         glbsub  enc_midone, regf0 | regf1
+
+         movlw   eth_mistat  ;set REG1 to the address of the MISTAT register
+         movwf   reg1
+
+loop_midone unbank           ;back here to test busy bit again
+         mcall   enc_regget  ;read the MISTAT register into REG0
+         btfsc   reg0, 0     ;the MII interface is idle ?
+         jump    loop_midone ;no, go back and check again
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_PHYSET
+;
+;   Write to a PHY register.  The data to write is in REG1:REG0, and the PHY
+;   register address is in the low 5 bits of REG2.  The write to the PHY
+;   register thru the MII interface will be started, but will likely not
+;   complete before this routine returns.  The caller must wait for the write
+;   to complete before attempting to use any additional MII resources.  This
+;   routine waits for the MII interface to be idle before starting the write,
+;   and may therefore be called when the MII interface may still be busy.
+;
+         glbsub  enc_physet, noregs
+
+         mcall   enc_midone  ;wait for MII hardware to be idle
+
+         pushreg reg1        ;temp save registers on data stack
+         pushreg reg0
+
+         movf    reg2, w     ;get byte containing PHY register address
+         andlw   h'1F'       ;mask in only the valid PHY address bits
+         movwf   reg0        ;write the PHY address to the MIREGADR register
+         movlw   eth_miregadr
+         movwf   reg1
+         mcall   enc_regset
+
+         popreg  reg0        ;get low data byte into REG0
+         movlw   eth_miwrl   ;write low data byte to MIWRL register
+         movwf   reg1
+         mcall   enc_regset
+
+         popreg  reg0        ;get high data byte into REG0
+         movlw   eth_miwrh   ;write high data byte to MIWRH register
+         movwf   reg1
+         mcall   enc_regset
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine ENC_PHYGET
+;
+;   Read a PHY register.  The PHY register address is passed in the low 5 bits
+;   of REG2, and the result is returned in REG1:REG0.  This routine waits for
+;   the MII interface to be idle before performing the read.  The MII interface
+;   will be idle on return.  The result is also returned in PRODH:PRODL for
+;   compatibility with C18.
+;
+         glbsub  enc_phyget, noregs
+
+         mcall   enc_midone  ;wait for MII hardware to be idle
+;
+;   Write the PHY register address to the MIREGADR register.
+;
+         movf    reg2, w     ;get byte containing PHY register address
+         andlw   h'1F'       ;mask in only the valid PHY address bits
+         movwf   reg0        ;write the PHY address to the MIREGADR register
+         movlw   eth_miregadr
+         movwf   reg1
+         mcall   enc_regset
+;
+;   Set the MIIRD bit in the MICMD register to start the read.
+;
+         movlw   eth_micmd   ;pass address of MICMD register
+         movwf   reg1
+         movlw   1           ;pass value to write
+         movwf   reg0
+         mcall   enc_regset  ;write command to start the read
+;
+;   Wait for the operation to complete, then clear the read command bit.
+;   REG1 already contains the address of the MICMD command register.
+;
+         clrf    reg0        ;get value to clear the read command
+         mcall   enc_midone  ;wait for read complete
+         mcall   enc_regset  ;clear the read command
+;
+;   Read the data, which is now in the MIRDH:MIRDL registers.
+;
+         movlw   eth_mirdh
+         movwf   reg1
+         mcall   enc_regget  ;read the high byte into REG0
+         pushreg reg0        ;temp save it
+
+         movlw   eth_mirdl
+         movwf   reg1
+         mcall   enc_regget  ;read the low byte into REG0
+         popreg  reg1        ;get the saved high byte into REG1
+
+         movff   reg0, prodl ;also return value in PRODH:PRODL for C18
+         movff   reg1, prodh
+
+         leaverest
+
+  /endif                     ;end of MACTYPE = 28J60

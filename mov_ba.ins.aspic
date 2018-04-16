@@ -1,0 +1,17 @@
+;   Subroutine MOV_BA
+;
+;   Copy the value in REGB into REGA.
+;
+.mov_ba  code
+         glbsub  mov_ba, noregs
+
+         movf    regb+0, w
+         movwf   rega+0
+         movf    regb+1, w
+         movwf   rega+1
+         movf    regb+2, w
+         movwf   rega+2
+         movf    regb+3, w
+         movwf   rega+3
+
+         leave   noregs

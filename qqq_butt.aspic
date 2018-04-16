@@ -1,0 +1,361 @@
+;   ***************************************************************
+;   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Button decode logic.  The code in this module processes the debounced button
+;   state (FLAG_BUTT) to decode the next higher level events, like click, press,
+;   double click, etc.
+;
+;   The following global flags must be defined.  This section is meant to be
+;   copied into the project include file with the leading "; " removed.
+;
+; /flag    butt                ;debounced state of user button is pressed
+; /flag    click               ;single button click
+; /flag    press               ;single button press (longer hold than a click)
+; /flag    click2              ;button click-click sequence detected
+; /flag    click3              ;button click-click-click sequence detected
+; /flag    click1p             ;button click-press sequence detected
+; /flag    click2p             ;button click-click-press sequence detected
+; /flag    click3p             ;button click-click-click-press sequence detected
+;
+;   FLAG_BUTT is used as input to this module, with the remaining flags set by
+;   this module when the associated event is detected.
+;
+;   It is intended that BUTT_TICK be called regularly, usually by the main event
+;   loop.  The preprocessor constant BTICK must be set to the period of these
+;   calls, in seconds.
+;
+/include "qq2.ins.aspic"
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   presst  real = 330e-3 ;minimum time for button press, seconds
+/const   offt    real = 500e-3 ;minimum button up time for end of sequence, sec
+lbank    equ     0           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+presscnt equ     [rnd [/ presst btick]] ;button ticks for a press
+offcnt   equ     [rnd [/ offt btick]] ;button ticks for a full off
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+butt_ijump res   progadrb    ;address to restart interrupt routine at next tick
+cntev    res     1           ;ticks until next event threshold
+
+
+.butt    code
+;*******************************************************************************
+;
+;   Subroutine BUTT_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  butt_init, noregs
+;
+;   Init local state.
+;
+         dbankif lbankadr
+         movlw   low btsk_start ;init interrupt thread restart address
+         movwf   butt_ijump+0
+         movlw   high btsk_start
+         movwf   butt_ijump+1
+if progadrb > 2
+         movlw   upper btsk_start
+         movwf   butt_ijump+2
+  endif
+
+         mcall   butt_clear  ;clear all button event flags
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine BUTT_CLEAR
+;
+;   Clear all the button event flags.
+;
+butt_clear glbsub
+         clrflag click
+         clrflag press
+         clrflag click2
+         clrflag click3
+         clrflag click1p
+         clrflag click2p
+         clrflag click3p
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine BUTT_TICK
+;
+;   This routine interprets the debounced button state in FLAG_BUTT into the
+;   various button events.  It must be called periodically with a known period
+;   to perform its timing-related interpretation.  The period is expected to be
+;   BTICK seconds.  It is the caller's responsibility to ensure that.
+;
+butt_tick glbsub
+;
+;   Jump to the task thread restart address.
+;
+         dbankif lbankadr
+  if progadrb >= 3
+         movf    butt_ijump+2, w
+         movwf   pclatu
+    endif
+         movf    butt_ijump+1, w
+         movwf   pclath
+         movf    butt_ijump+0, w
+         movwf   pcl
+
+;*******************************************************************************
+;
+;   Macro NEXT_TICK
+;
+;   This macro is used from the button timing thread to wait for the next button
+;   tick.  It actually sets the thread restart address to immediately after the
+;   macro, then returns from BUTT_TICK.
+;
+next_tick macro
+         local   restart
+
+         dbankif lbankadr
+         movlw   low restart
+         movwf   butt_ijump+0 ;save restart address low byte
+         movlw   high restart ;get restart address high byte
+         movwf   butt_ijump+1
+  if progadrb >= 3
+         movlw   upper restart
+         movwf   butt_ijump+2
+    endif
+         return
+
+restart  dbankis lbankadr
+         endm
+
+;*******************************************************************************
+;
+;   Macro WAIT_BUP tout, ttarg
+;
+;   Wait for the debounced state of the button to be up (released).  If this
+;   happens before TOUT button ticks, then the macro falls thru.  After TOUT
+;   button ticks elapses, the macro jumps to TTARG.
+;
+wait_bup macro   tout, ttarg
+         local   loop
+
+         dbankif lbankadr
+         movlw   (tout)
+         movwf   cntev       ;init ticks left until timeout
+
+loop     unbank              ;back here each button tick
+         next_tick           ;wait for the next button tick
+         dbankif lbankadr
+         decf    cntev       ;count one less tick until timeout
+         skip_nz             ;not timed out yet ?
+         jump    ttarg       ;abort due to timeout
+
+         dbankif gbankadr
+         btfsc   flag_butt   ;button is up ?
+         jump    loop        ;no, go back to check again next tick
+         endm
+
+;*******************************************************************************
+;
+;   Macro WAIT_BDOWN tout, ttarg
+;
+;   Wait for the debounced state of the button to be down (pressed).  If this
+;   happens before TOUT button ticks, then the macro falls thru.  After TOUT
+;   button ticks elapses, the macro jumps to TTARG.
+;
+wait_bdown macro tout, ttarg
+         local   loop
+
+         dbankif lbankadr
+         movlw   (tout)
+         movwf   cntev       ;init ticks left until timeout
+
+loop     unbank              ;back here each button tick
+         next_tick           ;wait for the next button tick
+         dbankif lbankadr
+         decf    cntev       ;count one less tick until timeout
+         skip_nz             ;not timed out yet ?
+         jump    ttarg       ;abort due to timeout
+
+         dbankif gbankadr
+         btfss   flag_butt   ;button is down ?
+         jump    loop        ;no, go back to check again next tick
+         endm
+
+;*******************************************************************************
+;
+;   Button timing-dependent decoding logic.
+;
+;   This routine is implemented as a thread running in a infinite loop, and is
+;   given execution once every button tick.  This is done by external code
+;   calling BUTT_TICK periodically once per button tick.  The thread code uses
+;   the NEXT_TICK macro to wait for the next button tick (see NEXT_TICK
+;   description above).  This allows the timing decoding logic to be implemented
+;   as a state machine with the PC being the state variable.
+;
+;   The input to this routine is the debounced state of the button, which is
+;   indicated by FLAG_BUTT.  The code here decodes the timing of the debounced
+;   button states to determine the next level up information.
+;
+;   Button event timing is interpreted from these low level events:
+;
+;     CLICK  -  Button down for less than PRESST seconds
+;
+;     PRESS  -  Button down for PRESST or more seconds
+;
+;     PAUSE  -  Button released for less than OFFT seconds
+;
+;     OFF    -  Button released for OFFT or more seconds
+;
+;   This code will set the following flags when their associated sequences
+;   have been detected:
+;
+;     FLAG_CLICK  -  Click, off
+;
+;     FLAG_PRESS  -  Press
+;
+;     FLAG_CLICK2  -  Click, pause, click, off
+;
+;     FLAG_CLICK3  -  Click, pause, click, pause, click, off
+;
+;     FLAG_CLICK1P  -  Click, pause, press
+;
+;     FLAG_CLICK2P  -  Click, pause, click, pause, press
+;
+;     FLAG_CLICK3P  -  Click, pause, click, pause, click, pause, press
+;
+;   These flags are only set here.  They are event conditions intended to be
+;   cleared by external code that processes the events.
+;
+
+;
+;   Wait for the button to be up for long enough so that the next press is the
+;   start of a new sequence.
+;
+butt_abort unbank            ;jump here on invalid sequence
+         wait_bdown offcnt, butt_start ;restart decode logic on long up
+         jump    butt_abort  ;keep waiting for a long up
+;
+;   The button has been up for a long time.  Look for the start of the first
+;   press of a new sequence.
+;
+btsk_start unbank            ;interrupt thread initial execution point
+
+butt_start unbank
+         next_tick           ;wait for the next button tick
+         dbankif gbankadr
+         btfss   flag_butt   ;the button is now down ?
+         jump    butt_start  ;no, go back and check again
+;
+;   The initial press just occurred.
+;
+         wait_bup presscnt, press1 ;check for PRESS
+;
+;   Sequence: CLICK, button is up
+;
+         wait_bdown offcnt, click1 ;check for CLICK OFF
+;
+;   Sequence: CLICK PAUSE, button is down
+;
+         wait_bup presscnt, click1p ;check for CLICK PAUSE PRESS
+;
+;   Sequence: CLICK PAUSE CLICK, button is up
+;
+         wait_bdown offcnt, click2 ;check for CLICK PAUSE CLICK OFF
+;
+;   Sequence: CLICK PAUSE CLICK PAUSE, button is down
+;
+         wait_bup presscnt, click2p ;check for CLICK PAUSE CLICK PAUSE PRESS
+;
+;   Sequence: CLICK PAUSE CLICK PAUSE CLICK, button is up
+;
+         wait_bdown offcnt, click3 ;check for CLICK PAUSE CLICK PAUSE CLICK OFF
+;
+;   Sequence: CLICK PAUSE CLICK PAUSE CLICK PAUSE, button is down
+;
+         wait_bup presscnt, click3p ;check for CLICK PAUSE CLICK PAUSE CLICK PAUSE PRESS
+
+         jump    butt_abort  ;invalid button sequence
+;
+;   Sequence: PRESS, button is down
+;
+press1   unbank
+         dbankif gbankadr
+         bsf     flag_press  ;indicate PRESS event
+         jump    butt_abort
+;
+;   Sequence: CLICK OFF, button is up
+;
+click1   unbank
+         dbankif gbankadr
+         bsf     flag_click  ;indicate CLICK event
+         jump    butt_start
+;
+;   Sequence: CLICK PAUSE CLICK OFF, button is up
+;
+click2   unbank
+         dbankif gbankadr
+         bsf     flag_click2 ;indicate CLICK-CLICK event
+         jump    butt_start
+;
+;   Sequence: CLICK PAUSE CLICK PAUSE CLICK OFF, button is up
+;
+click3   unbank
+         dbankif gbankadr
+         bsf     flag_click3 ;indicate CLICK-CLICK-CLICK event
+         jump    butt_start
+;
+;   Sequence: CLICK PAUSE PRESS, button is down
+;
+click1p  unbank
+         dbankif gbankadr
+         bsf     flag_click1p ;indicate CLICK-PRESS
+         jump    butt_abort
+;
+;   Sequence: CLICK PAUSE CLICK PAUSE PRESS, button is down
+;
+click2p  unbank
+         dbankif gbankadr
+         bsf     flag_click2p ;indicate CLICK-CLICK-PRESS event
+         jump    butt_abort
+;
+;   Sequence: CLICK PAUSE CLICK PAUSE CLICK PRESS, button is down
+;
+click3p  unbank
+         dbankif gbankadr
+         bsf     flag_click3p ;indicate CLICK-CLICK-CLICK-PRESS event
+         jump    butt_abort
+
+         end

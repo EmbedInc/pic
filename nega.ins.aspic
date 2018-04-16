@@ -1,0 +1,22 @@
+;   Subroutine NEGA
+;
+;   Negate the integer value in REGA.
+;
+.nega    code
+         glbsub  nega, noregs
+
+         comf    rega+0      ;take two's complement
+         comf    rega+1
+         comf    rega+2
+         comf    rega+3
+
+         incfsz  rega+0      ;and increment it
+         goto    nega_dinc
+         incfsz  rega+1
+         goto    nega_dinc
+         incfsz  rega+2
+         goto    nega_dinc
+         incf    rega+3
+nega_dinc                    ;skip to here on no more carry due to increment
+
+         leaverest

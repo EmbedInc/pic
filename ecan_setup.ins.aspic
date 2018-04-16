@@ -1,0 +1,8 @@
+;   Define global symbols and possibly additional build-time setup required by
+;   the ECAN library file.  This file is intended to be included from the main
+;   include file of a project using the ECAN library module.
+;
+/flag    canin               ;CAN frame received, data held in CANIN_xxx variables
+/flag    canin_ext           ;received CAN frame is extended, not standard
+/flag    canin_rtr           ;received CAN frame is remote request, not data
+/flag    cansend             ;private to CAN routines, sending task mutex

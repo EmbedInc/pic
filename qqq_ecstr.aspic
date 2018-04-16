@@ -1,0 +1,113 @@
+;   ***************************************************************
+;   * Copyright (C) 2013, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module provides the basic infrastructure for interpreting and
+;   responding to commands over the EmCan byte stream interface.  The commands
+;   defined by EmCan are handled in this module, with hooks provided for the
+;   application to add its own commands to the application-specific opcode
+;   space.
+;
+;   This module is part of the EmCan subsystem for a bus node, but is in a
+;   separate file for easier maintainence and to avoid making the EMCAN module
+;   even larger.
+;
+;   Application-specific commands and other application-level resources required
+;   by this module are intended to be external.  The ECSTRA template is intended
+;   as a start for building the application-specific module related to
+;   processing the EmCan byte stream.
+;
+;   The canned code in this module can be customized by setting the following
+;   preprocessors state:
+;
+;     DEVMAN  -  String.  Contains the manufacturer's name.
+;
+;     DEVMOD  -  String.  Contains the manufacturer's model name of this device.
+;       The default is the empty string.
+;
+;     DEVDESC  -  String.  Contains the fixed device description string.  The
+;       default is the empty string.
+;
+;     DEVUSE  -  String.  Contains a assembler expression for the starting
+;       address of the user-settable device usage string in non-volatile memory.
+;       The default is the empty string, which indicates that no storage is
+;       supplied for the device usage string, in which case it will always be
+;       the empty string.
+;
+;       When existing, the first non-volatile memory byte must be the storage
+;       length of the string.  This is the maximum length the string can be, and
+;       is the size of the characters buffer in bytes.  The second byte is the
+;       actual length of the string as currently set.  Only this many valid data
+;       bytes follow.  If this value is less than the maximum length, then the
+;       the remaining bytes are ignored.
+;
+/include "qq2.ins.aspic"
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   devman string = ""  ;manufacturer's name
+/const   devmod string = ""  ;model name
+/const   devdesc string = "" ;fixed device description
+/const   devuse string = ""  ;non-volatile address of device usage string
+
+lbank    equ     1           ;register bank for the local state of this module
+
+
+/include "(cog)src/pic/ecstr.ins.aspic"
+
+;*******************************************************************************
+;
+;   Application-specific part of the commands dispatch table.  This table was
+;   started in ECSTR.INS.DSPIC, so this section must immediately follow where it
+;   is included.
+;
+;   The dispatch table is defined using the DSP_START, DSP_ENTRY, and DSP_END
+;   standard macros.  Each table entry defines the routine to jump to for a
+;   particular EmCan stream opcode.  The opcodes 0-63 are reserved for EmCan
+;   use.  Table entries for these opcodes have already been defined as needed,
+;   with the routines implemented in this module.
+;
+;   Any EmCan stream commands implemented by the application should be added
+;   below using the APPCMD macro.  This is a wrapper around the DSP_ENTRY macro
+;   that also declares the routine name symbol as external.  It is intended that
+;   application code not be added to this module, and that therefore all
+;   application EmCan stream command routines be external.  The ECSTRA module
+;   is provided as a template for holding application-level EmCan stream command
+;   routines.
+;
+;   A example use of the APPCMD macro is:
+;
+;       appcmd 64, cmd_dostuff
+;
+;   This will cause execution to jump to CMD_DOSTUFF when a new command opcode
+;   with the value 64 is received.  See the header comments in the ECSTRA
+;   module for a descriptions of the duties, restrictions, and resources
+;   available to EmCan stream command routines.
+;
+;   The table entries below must be in ascending opcode order, and in the range
+;   of 64 to 255.  Unimplemented commands must have no entry.  This is necessary
+;   for a command to be recognized as unimplemented and therefore correctly
+;   reported as such in the CMDS response.  The table must be ended with the
+;   DSP_END macro as provided in the template of this module.
+;
+;   All EmCan specific command routines are named ECSCM_xxx, and other symbols
+;   internal to this module are named ECSTR_xxx.  It is suggested to avoid such
+;   names to prevent a naming conflict.
+;
+         dsp_end ecstr_cmdtable ;end of commands dispatch table
+
+         end

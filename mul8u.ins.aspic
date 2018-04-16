@@ -1,0 +1,61 @@
+;   Subroutine MUL8U
+;
+;   Multiply the 8 bit unsigned value in the low byte of REGA (REG0) by the 8
+;   bit unsigned value in the low byte of REGB (REG4).  The 16 bit result
+;   is placed in the low bytes of REGA (REG0,REG1).
+;
+;   The value in REGB is expanded to 16 bits, and the original value in
+;   REG0 is saved in REG2.  For each of the 8 bits of REG2:
+;
+;     1  -  REGB is added to REGA (low 16 bits only) if the low bit of
+;           REG2 is set.
+;
+;     2  -  REG2 is shifted right one bit, and REGB (low 16 bits) is shifted
+;           left one bit.
+;
+;   Register useage:
+;
+;     REGA+0,REGA+1  -  Output value accumulator.
+;     REG2  -  Original REGA value shifted so next bit to test is bit 0.
+;     REG3  -  Loop counter.
+;     REGB+0,REGB+1  -  Original REGB value shifted for next add into REGA
+;
+.mul8u   code
+         glbsub  mul8u, regf2 | regf3 | regf4 | regf5
+
+         movf    rega+0, w   ;get value to multiply by
+         movwf   reg2        ;save it
+         movlw   8           ;init loop counter
+         movwf   reg3
+         clrf    rega+0      ;init product accumulator
+         clrf    rega+1
+         clrf    regb+1      ;expand REGB value to 16 bits
+;
+;   Back here each new bit poisition.
+;
+loop
+         btfss   reg2, 0     ;add REGB into REGA for this bit position ?
+         goto    done_add    ;bit not enabled, skip addition step
+;
+;   Add the 16 bit value in REGB into the 16 bit value in REGA.
+;
+         movf    regb+0, w
+         addwf   rega+0      ;add low byte
+         btfsc   status, c   ;no carry from low byte ?
+         incf    rega+1      ;propagate the carry into the high byte
+         movf    regb+1, w
+         addwf   rega+1      ;add the high byte
+done_add                     ;done adding REGB into REGA
+;
+;   Shift the REG2 value right one bit, and the REGB value left one bit.
+;
+         rrf     reg2        ;shift REG2 right one bit
+
+         bcf     status, c   ;set bit value to shift into REGB
+         rlf     regb+0      ;shift REGB left one bit
+         rlf     regb+1
+
+         decfsz  reg3        ;all done ?
+         goto    loop        ;back to do next bit position
+
+         leave   regf2 | regf3 | regf4 | regf5
