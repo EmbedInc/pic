@@ -213,9 +213,9 @@
 /if [and [= unam "MTMT"] [= udir "JOWA"]] then
   /set ty 50
   /endif
-
-// NOTE: 51 is unused.
-
+/if [and [= unam "CANSER"] [= udir "JOWA"]] then
+  /set ty 51
+  /endif
 /if [and [= unam "AGPAN"] [= udir "JOWA"]] then
   /set ty 52
   /endif
