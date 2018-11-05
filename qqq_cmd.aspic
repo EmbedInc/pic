@@ -169,9 +169,9 @@ skip_cmdbyte macro
 ;
          glbsub  cmd[chars name]_get16
 
-         mcall   cmd[chars name]_get8    ;get the high byte
+         mcall   cmd[chars name]_get8 ;get the high byte
          movff   reg0, reg1
-         mcall   cmd[chars name]_get8    ;get the low byte
+         mcall   cmd[chars name]_get8 ;get the low byte
 
          leaverest
 
@@ -185,11 +185,11 @@ skip_cmdbyte macro
 ;
          glbsub  cmd[chars name]_get24
 
-         mcall   cmd[chars name]_get8    ;get the high byte
+         mcall   cmd[chars name]_get8 ;get the high byte
          movff   reg0, reg2
          mcall   cmd[chars name]_get8
          movff   reg0, reg1
-         mcall   cmd[chars name]_get8    ;get the low byte
+         mcall   cmd[chars name]_get8 ;get the low byte
 
          leaverest
 
@@ -203,13 +203,13 @@ skip_cmdbyte macro
 ;
          glbsub  cmd[chars name]_get32
 
-         mcall   cmd[chars name]_get8    ;get the high byte
+         mcall   cmd[chars name]_get8 ;get the high byte
          movff   reg0, reg3
          mcall   cmd[chars name]_get8
          movff   reg0, reg2
          mcall   cmd[chars name]_get8
          movff   reg0, reg1
-         mcall   cmd[chars name]_get8    ;get the low byte
+         mcall   cmd[chars name]_get8 ;get the low byte
 
          leaverest
 
@@ -294,7 +294,7 @@ loop_drain unbank
          dbankif gbankadr
          skip_cmdbyte        ;a input byte is immediately available ?
          jump    done_drain  ;no, all buffered input bytes have been drained
-         mcall   cmd[chars name]_get8    ;read the buffered input byte
+         mcall   cmd[chars name]_get8 ;read the buffered input byte
          jump    loop_drain  ;back to check the buffer again
 done_drain dbankis gbankadr  ;input buffer has been completely drained
 
@@ -310,7 +310,7 @@ done_drain dbankis gbankadr  ;input buffer has been completely drained
          loadk8  reg1, [v nnop] ;init number of NOPs left to send
          loadk8  reg0, rsp_nop ;get the opcode to send
 loop_nop unbank
-         mcall   cmd[chars name]_put8    ;send this NOP response
+         mcall   cmd[chars name]_put8 ;send this NOP response
          decfsz  reg1        ;count one less NOP left to do
          jump    loop_nop    ;back to send next NOP
          mcall   cmd[chars name]_unlock_out ;release lock on the response stream
@@ -326,7 +326,7 @@ loop_nop unbank
 ;   Get the next command and process it.  The call and data stacks are empty.
 ;
 cmd_next unbank
-         mcall   cmd[chars name]_get8    ;get the opcode byte into REG0
+         mcall   cmd[chars name]_get8 ;get the opcode byte into REG0
          ;
          ;   Push the address of CMD_DONE onto the call stack.  This allows
          ;   command routines to be implemented as subroutines.

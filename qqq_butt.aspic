@@ -88,10 +88,10 @@ cntev    res     1           ;ticks until next event threshold
          movwf   butt_ijump+0
          movlw   high btsk_start
          movwf   butt_ijump+1
-if progadrb > 2
+  if progadrb > 2
          movlw   upper btsk_start
          movwf   butt_ijump+2
-  endif
+    endif
 
          mcall   butt_clear  ;clear all button event flags
          leaverest

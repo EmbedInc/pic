@@ -36,16 +36,16 @@ extern near unsigned FSR0;
 extern near char __FPFLAGS;
 #define RND 6
 
-void C18_INIT (void) {            //C18 runtime init, called from STRT module
+void C18_INIT (void) {                 //C18 runtime init, called from STRT module
   _asm
-    clrf TBLPTRU, 0               // 1st silicon doesn't do this on POR
-    bcf __FPFLAGS, RND, 0         // Initialize rounding flag for floating point libs
+    clrf TBLPTRU, 0                    // 1st silicon doesn't do this on POR
+    bcf __FPFLAGS, RND, 0              // Initialize rounding flag for floating point libs
     _endasm
   _do_cinit ();
 
   // If user defined __init is not found, the one in clib.lib will be used
   __init ();
-  }                               //end of C18_INIT
+  }                                    //end of C18_INIT
 
 
 /* MPLAB-C18 initialized data memory support */
@@ -154,9 +154,9 @@ _do_cinit (void)
   movlb curr_byte
   movf curr_byte, 1, 1
 copy_loop:
-  bnz 2                           // copy_one_byte
+  bnz 2                                // copy_one_byte
   movf curr_byte + 1, 1, 1
-  bz 7                            // done_copying
+  bz 7                                 // done_copying
 
 copy_one_byte:
   tblrdpostinc
@@ -165,9 +165,9 @@ copy_one_byte:
 
   // decrement byte counter
   decf curr_byte, 1, 1
-  bc -8                           // copy_loop
+  bc -8                                // copy_loop
         decf curr_byte + 1, 1, 1
-  bra -7                          // copy_one_byte
+  bra -7                               // copy_one_byte
 
 done_copying:
 

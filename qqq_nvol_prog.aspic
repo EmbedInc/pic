@@ -36,7 +36,7 @@
 ;   created here before the project include file is included.
 ;
 /writepush "nvol_adr.ins.aspic" ;make sure file exists and initialize it to empty
-/writepop                  ;pop back to previous output file
+/writepop                    ;pop back to previous output file
 
 /include "qq2.ins.aspic"
 

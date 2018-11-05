@@ -59,10 +59,10 @@
 ;
 ;   Configuration constants.
 ;
-/const   devman string = ""  ;manufacturer's name
-/const   devmod string = ""  ;model name
+/const   devman  string = "" ;manufacturer's name
+/const   devmod  string = "" ;model name
 /const   devdesc string = "" ;fixed device description
-/const   devuse string = ""  ;non-volatile address of device usage string
+/const   devuse  string = "" ;non-volatile address of device usage string
 
 lbank    equ     1           ;register bank for the local state of this module
 
