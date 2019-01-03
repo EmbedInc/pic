@@ -421,17 +421,17 @@ otherwise                              {anything else, like .ASPIC}
   {
   *   Install our unique intrinsic commands.
   }
-  addcmd ('FLAG', addr(prepic_icmd_flag));
-  addcmd ('INBIT', addr(prepic_icmd_inbit));
-  addcmd ('INANA', addr(prepic_icmd_inana));
-  addcmd ('OUTBIT', addr(prepic_icmd_outbit));
+  addcmd ('flag', addr(prepic_icmd_flag));
+  addcmd ('inbit', addr(prepic_icmd_inbit));
+  addcmd ('inana', addr(prepic_icmd_inana));
+  addcmd ('outbit', addr(prepic_icmd_outbit));
   {
   *   Install our unique intrinsic functions.
   }
-  addfunc ('FP24I', addr(prepic_ifun_fp24i));
-  addfunc ('FP24_INT', addr(prepic_ifun_fp24_int));
-  addfunc ('FP32F', addr(prepic_ifun_fp32f));
-  addfunc ('FP32F_INT', addr(prepic_ifun_fp32f_int));
+  addfunc ('fp24i', addr(prepic_ifun_fp24i));
+  addfunc ('fp24_int', addr(prepic_ifun_fp24_int));
+  addfunc ('fp32f', addr(prepic_ifun_fp32f));
+  addfunc ('fp32f_int', addr(prepic_ifun_fp32f_int));
 {
 *   Do the pre-processing.
 }
