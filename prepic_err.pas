@@ -117,7 +117,7 @@ procedure err_parm_last_bad;           {last parameter parsed was bad}
   options (val_param, noreturn);
 
 begin
-  err_parm_bad (e_p^.lparm);
+  err_parm_bad (e_p^.parse_p^.lparm);
   end;
 {
 ****************************************************************************
