@@ -234,6 +234,9 @@
 /if [and [= unam "JCURR"] [= udir "JOWA"]] then
   /set ty 57
   /endif
+/if [and [= unam "MMDSP"] [= udir "JOWA"]] then
+  /set ty 58
+  /endif
 
 /if [= ty -1] then
   /show "  No ID assigned in FWTYPE.ALL to firmware " unam " from the source directory " udir
