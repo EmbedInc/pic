@@ -23,11 +23,11 @@ call src_lib %srcdir% %prog%_prog
 
 if "%1"=="-dbg" goto build_prog_dbg
 set dbg_promote=true
-call build_prog %prog% %prog% %prog%_prog.lib
+call src_link %prog% %prog% %prog%_prog.lib
 goto done_build_prog
 :build_prog_dbg
 set dbg_promote=local
-call build_prog %prog% %prog% /debug %prog%_prog.lib
+call src_link %prog% %prog% /debug %prog%_prog.lib
 :done_build_prog
 if not exist %prog%.exe goto :eof
 
