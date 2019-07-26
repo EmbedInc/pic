@@ -1,39 +1,29 @@
 {   Program LIBPIC <filename>
 *
-*   This program runs the Microchip library manager MPLIB.  MPLIB requires
-*   all arguments on the command line, including the list of object files
-*   to put into a library.
-*
-*   This program runs MPLIB in the directory where the input file is
-*   stored.  Each line in the input file is added as one additional
-*   argument to MPLIB.  The input file is deleted if MPLIB completes
-*   without errors.
-*
-*   The environment variable MPLABDir is assumed to be set to the directory
-*   containing the Microchip executables.  If this variable is not present
-*   or empty, then the Microchip executables are assumed to be in the
-*   executables search path, in other words they can be run directly without
-*   having to specify the full path name.
+*   Wrapper program for Microchip MPLIB.  The command line arguments to MPLIB
+*   are taken from the input file instead of the command line.
 }
 program libpic;
-%include '/cognivision_links/dsee_libs/sys/sys.ins.pas';
-%include '/cognivision_links/dsee_libs/util/util.ins.pas';
-%include '/cognivision_links/dsee_libs/string/string.ins.pas';
-%include '/cognivision_links/dsee_libs/file/file.ins.pas';
+%include 'base.ins.pas';
 
 const
-  envvar_com = 'MPLABDir';             {environment var of Microchip executables dir}
-  prog_name = 'mplib';                 {program executable name}
+  prog_name = '(cog)extern/mplab/mplib.exe'; {MPLIB executable pathname}
   max_msg_parms = 1;                   {max parameters we can pass to a message}
 
 var
-  fnam: string_treename_t;             {input file pathname}
-  tnam: string_treename_t;             {scratch pathname}
+  fnam:                                {input file pathname}
+    %include '(cog)lib/string_treename.ins.pas';
+  tnam:                                {scratch pathname}
+    %include '(cog)lib/string_treename.ins.pas';
+  oldir:                               {old working directory}
+    %include '(cog)lib/string_treename.ins.pas';
+  dir:                                 {directory containing input file}
+    %include '(cog)lib/string_treename.ins.pas';
+  cmd:                                 {full command line to execute}
+    %include '(cog)lib/string8192.ins.pas';
+  buf:                                 {scratch string buffer}
+    %include '(cog)lib/string8192.ins.pas';
   conn: file_conn_t;                   {connection to input file}
-  oldir: string_treename_t;            {old working directory}
-  dir: string_treename_t;              {directory containing input file}
-  cmd: string_var8192_t;               {full command line to execute}
-  buf: string_var8192_t;               {scratch string buffer}
   exstat: sys_sys_exstat_t;            {program exit status code}
   tf: boolean;                         {TRUE/FALSE flag from running program}
   msg_parm:                            {parameter references for messages}
@@ -44,65 +34,39 @@ var
 label
   loop_line, done_lines, abort;
 {
-*************************************************************************
+********************************************************************************
 *
 *   Subroutine SET_COMMAND (S)
 *
-*   Set the target program executable name as the first token of S.
-*   The generic name of the executable is set by the constant PROG_NAME.
-*   The environment variable set by constant ENVVAR_COM is assumed to
-*   contain the name of the directory holding the executable program if
-*   the variable exists is its value is not empty.
+*   Set S to the the target program executable name.
 }
 procedure set_command (                {set executable command name}
   in out  s: univ string_var_arg_t);   {command will be first and only token}
   val_param;
 
 var
-  vprog: string_leafname_t;            {var string version of executable name}
   tnam, tnam2: string_treename_t;      {scratch treenames}
 
 begin
-  vprog.max := size_char(vprog.str);   {init local var strings}
-  tnam.max := size_char(tnam.str);
+  tnam.max := size_char(tnam.str);     {init local var strings}
   tnam2.max := size_char(tnam2.str);
 
-  string_vstring (vprog, prog_name, size_char(prog_name)); {var string prog name}
-  s.len := 0;                          {init command line string to empty}
+  string_vstring (tnam, prog_name, size_char(prog_name)); {var string prog name}
+  string_treename (tnam, tnam2);       {expand to full absolute pathname}
 
-  sys_envvar_get (                     {get executables dir environment var value}
-    string_v(envvar_com),              {environment variable name}
-    tnam,                              {returned value}
-    stat);
-  if sys_error(stat) then tnam.len := 0; {no specific pathname on no envvar}
-  if tnam.len > 0                      {check executable directory name}
-    then begin                         {we have executable directory name}
-      string_treename (tnam, tnam2);   {make full expansion of envvar value}
-      string_pathname_join (tnam2, vprog, tnam); {make full pathname}
-      string_append_token (s, tnam);   {add as token to S}
-      end
-    else begin                         {there is no executable directory name}
-      string_append_token (s, vprog);  {add unqualified name as token to S}
-      end
-    ;
+  s.len := 0;                          {init the return string to empty}
+  string_append_token (s, tnam2);      {write pathname as single token to S}
   end;
 {
-*************************************************************************
+********************************************************************************
 *
 *   Start of main routine.
 }
 begin
-  fnam.max := size_char(fnam.str);     {init local var strings}
-  tnam.max := size_char(tnam.str);
-  oldir.max := size_char(oldir.str);
-  dir.max := size_char(dir.str);
-  cmd.max := size_char(cmd.str);
-  buf.max := size_char(buf.str);
-
   string_cmline_init;                  {init for reading the command line}
   string_cmline_token (fnam, stat);    {get input file name}
   string_cmline_req_check (stat);      {input file name is required}
-  string_cmline_end_abort;             {no additional command line ars allowed}
+  string_cmline_end_abort;             {no additional command line args allowed}
 
   file_open_read_text (fnam, '', conn, stat); {open input file for text read}
   sys_msg_parm_vstr (msg_parm[1], fnam);

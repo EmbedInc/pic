@@ -1,0 +1,49 @@
+                            Program LINKPIC
+                             26 July 2019
+
+linkpic <gpath>
+
+This program is a wrapper that runs the Microchip MPLINK linker.  GPATH is
+the generic pathname for this link.  Implicit and default file names will
+start with <gpath>.  For example, the HEX output file name will be
+<gpath>.HEX, the map file <gpath>.MAP, etc.
+
+The MPLINK assembler executable is assumed to be at
+(cog)extern/mplab/mplink.exe.  This is intended to be a symbolic link
+pointing to the actual executable, the location of which depends on how
+MPLAB was installed.  The EMBED_EXTOOL program automates creation of this
+link.
+
+The following files will be read or created/overwritten:
+
+  <gpath>.lkr
+
+    This is the MPLINK linker command input file.  It must be present.
+    This command file is the only way to specify object modules and
+    libraries to link.  It also contains other control information.  See
+    the Microchip MPLINK documentation for details.
+
+  <gpath>.picname
+
+    Contains a single line that is the name of the particular PIC the
+    firmware is built for.  A example is "16F1786".  When this file is
+    present, its contents are passed to the linker with the /p option.
+    This option is used to tell the linker which PIC is being targeted.
+
+  <gpath>.out
+
+    Absolute executable created as a result of the link operation.
+
+  <gpath>.map
+
+    Memory map output file.
+
+  <gpath>.hex
+
+    HEX output file.  This file will be in Intel INHX32 format.
+
+  <gpath>.cod
+
+    Output file in Microchip format.  This file is required by the
+    Microchip debugger.  Some of the other output files are derived from
+    the .cod file after the .cod file is created.

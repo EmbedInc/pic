@@ -1,87 +1,59 @@
 {   Program LINKPIC gpath
 *
-*   This program is a wrapper that runs the Microchip MPLINK linker.  GPATH is
-*   the generic pathname for files associated with this build.  For example,
-*   GPATH could be "(cog)src/stuff/myproj".  In that case, the files for this
-*   build will be assumed to be in "(cog)src/stuff", and their names will start
-*   with "myproj".  For example, the HEX output file name will be <gpath>.HEX,
-*   the map file <gpath>.MAP, etc.
-*
-*   The linker will be run in the directory containing GPATH.  The linker
-*   control file <gpath>.lkr must exist.
-*
-*   The environment variable MPLABDir is assumed to be set to the directory
-*   containing the Microchip executables.  If this variable is not present
-*   or empty, then the Microchip executables are assumed to be in the
-*   executables search path, in other words they can be run directly without
-*   having to specify the full path name.
+*   Wrapper around the Microchip MPLINK program.  See the documentation file for
+*   details.
 }
 program linkpic;
 %include '(cog)lib/base.ins.pas';
 
 const
-  envvar_com = 'MPLABDir';             {environment var of Microchip executables dir}
+  prog_name = '(cog)extern/mplab/mplink.exe'; {linker executable pathname}
   max_msg_parms = 1;                   {max parameters we can pass to a message}
 
 var
-  gpath: string_treename_t;            {input pathname}
-  gnam: string_leafname_t;             {generic leafname of linker files}
-  tnam: string_treename_t;             {scratch pathname}
-  oldir: string_treename_t;            {old working directory}
-  dir: string_treename_t;              {directory containing input file}
-  picname: string_var32_t;             {PIC model name}
-  cmd: string_var8192_t;               {full command line to execute}
+  gpath:                               {input pathname}
+    %include '(cog)lib/string_treename.ins.pas';
+  gnam:                                {generic leafname of linker files}
+    %include '(cog)lib/string_leafname.ins.pas';
+  tnam:                                {scratch pathname}
+    %include '(cog)lib/string_treename.ins.pas';
+  oldir:                               {old working directory}
+    %include '(cog)lib/string_treename.ins.pas';
+  dir:                                 {directory containing input file}
+    %include '(cog)lib/string_treename.ins.pas';
+  picname:                             {PIC model name}
+    %include '(cog)lib/string32.ins.pas';
+  cmd:                                 {full command line to execute}
+    %include '(cog)lib/string8192.ins.pas';
   conn: file_conn_t;                   {scratch connection to a file}
   exstat: sys_sys_exstat_t;            {program exit status code}
   tf: boolean;                         {TRUE/FALSE flag from running program}
   msg_parm:                            {parameter references for messages}
     array[1..max_msg_parms] of sys_parm_msg_t;
   stat: sys_err_t;                     {subroutine completion status code}
-  stat2: sys_err_t;                    {extra status code to avoid corrupting STAT}
 {
 ********************************************************************************
 *
-*   Subroutine SET_COMMAND (S, PROG)
+*   Subroutine SET_COMMAND (S)
 *
-*   Set the target program executable name as the first token of S.  PROG is the
-*   generic name of the executable, which is assumed to be in the directory
-*   containing the MPLINK and related executable.  The environment variable set
-*   by constant ENVVAR_COM is assumed to contain the name of the directory
-*   holding the executable program if the variable exists and its value is not
-*   empty.
+*   Set S to the the target program executable name.
 }
 procedure set_command (                {set executable command name}
-  in out  s: univ string_var_arg_t;    {command will be first and only token}
-  in      prog: string);               {generic MPLAB/MPASM executable name}
+  in out  s: univ string_var_arg_t);   {command will be first and only token}
   val_param;
 
 var
-  vprog: string_leafname_t;            {var string version of executable name}
   tnam, tnam2: string_treename_t;      {scratch treenames}
 
 begin
-  vprog.max := size_char(vprog.str);   {init local var strings}
-  tnam.max := size_char(tnam.str);
+  tnam.max := size_char(tnam.str);     {init local var strings}
   tnam2.max := size_char(tnam2.str);
 
-  string_vstring (vprog, prog, 80);    {var string prog name}
-  s.len := 0;                          {init command line string to empty}
+  string_vstring (tnam, prog_name, size_char(prog_name)); {var string prog name}
+  string_treename (tnam, tnam2);       {expand to full absolute pathname}
 
-  sys_envvar_get (                     {get executables dir environment var value}
-    string_v(envvar_com),              {environment variable name}
-    tnam,                              {returned value}
-    stat);
-  if sys_error(stat) then tnam.len := 0; {no specific pathname on no envvar}
-  if tnam.len > 0                      {check executable directory name}
-    then begin                         {we have executable directory name}
-      string_treename (tnam, tnam2);   {make full expansion of envvar value}
-      string_pathname_join (tnam2, vprog, tnam); {make full pathname}
-      string_append_token (s, tnam);   {add as token to S}
-      end
-    else begin                         {there is no executable directory name}
-      string_append_token (s, vprog);  {add unqualified name as token to S}
-      end
-    ;
+  s.len := 0;                          {init the return string to empty}
+  string_append_token (s, tnam2);      {write pathname as single token to S}
   end;
 {
 ********************************************************************************
@@ -89,14 +61,6 @@ begin
 *   Start of main routine.
 }
 begin
-  gpath.max := size_char(gpath.str);   {init local var strings}
-  gnam.max := size_char(gnam.str);
-  tnam.max := size_char(tnam.str);
-  oldir.max := size_char(oldir.str);
-  dir.max := size_char(dir.str);
-  picname.max := size_char(picname.str);
-  cmd.max := size_char(cmd.str);
-
   string_cmline_init;                  {init for reading the command line}
   string_cmline_token (gpath, stat);   {get input pathname}
   string_cmline_req_check (stat);      {this argument is required}
@@ -136,7 +100,7 @@ begin
 {
 *   Set CMD to the command line to execute.
 }
-  set_command (cmd, 'mplink');         {init command line to executable name}
+  set_command (cmd);                   {init command line to executable name}
 
   string_copy (gnam, tnam);            {pass linker control file name}
   string_appends (tnam, '.lkr');
@@ -175,5 +139,6 @@ begin
     sys_exit_error;                    {return indicating error}
     end;
 
-  file_currdir_set (oldir, stat2);     {try to go back to the original directory}
+  file_currdir_set (oldir, stat);      {try to go back to the original directory}
+  sys_error_abort (stat, '', '', nil, 0);
   end.

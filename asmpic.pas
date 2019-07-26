@@ -1,25 +1,32 @@
 {   Program ASMPIC <source file> <opt1> ... <optN>
 }
 program asmpic;
-%include '(cog)lib/base.ins.pas';
+%include 'base.ins.pas';
 
 const
-  envvar_com = 'MPLABDir';             {environment var of Microchip executables dir}
-  prog_name = 'mpasmx.exe';            {assembler executable name}
+  prog_name = '(cog)extern/mplab/mpasm.exe'; {assembler executable name}
   max_msg_parms = 1;                   {max parameters we can pass to a message}
 
 var
   errnum: sys_int_machine_t;           {error number from ERR file}
   delim_pick: sys_int_machine_t;       {number of delimiter picked from list}
   pick: sys_int_machine_t;             {number of token picked from list}
-  srcdir: string_treename_t;           {full pathname of source code directory}
-  tnam: string_treename_t;             {scratch pathname}
-  errname: string_leafname_t;          {error file name}
-  oldir: string_treename_t;            {old working directory}
-  cmd: string_var8192_t;               {full assembler command line to execute}
-  preparm: string_var8192_t;           {parameters to pass to PREPIC from our command line}
-  buf: string_var8192_t;               {scratch string buffer}
-  tk: string_var32_t;                  {scratch token}
+  srcdir:                              {full pathname of source code directory}
+    %include '(cog)lib/string_treename.ins.pas';
+  tnam:                                {scratch pathname}
+    %include '(cog)lib/string_treename.ins.pas';
+  errname:                             {error file name}
+    %include '(cog)lib/string_leafname.ins.pas';
+  oldir:                               {old working directory}
+    %include '(cog)lib/string_treename.ins.pas';
+  cmd:                                 {full assembler command line to execute}
+    %include '(cog)lib/string8192.ins.pas';
+  preparm:                             {parameters to pass to PREPIC from our command line}
+    %include '(cog)lib/string8192.ins.pas';
+  buf:                                 {scratch string buffer}
+    %include '(cog)lib/string8192.ins.pas';
+  tk:                                  {scratch token}
+    %include '(cog)lib/string32.ins.pas';
   p: string_index_t;                   {parse index}
   echo: boolean;                       {TRUE if echo ERR file line to output}
   conn: file_conn_t;                   {connection to an input file}
@@ -40,57 +47,35 @@ label
 *
 *   Subroutine SET_COMMAND (S)
 *
-*   Set S to the the target program executable name.  The generic name of the
-*   executable is set by the constant PROG_NAME.  The environment variable set
-*   by constant ENVVAR_COM is assumed to contain the name of the directory
-*   holding the executable program if the variable exists or its value is not
-*   empty.
+*   Set S to the the target program executable name.
 }
 procedure set_command (                {set executable command name}
   in out  s: univ string_var_arg_t);   {command will be first and only token}
   val_param;
 
 var
-  vprog: string_leafname_t;            {var string version of executable name}
   tnam, tnam2: string_treename_t;      {scratch treenames}
-  stat: sys_err_t;                     {subroutine completion status}
 
 begin
-  vprog.max := size_char(vprog.str);   {init local var strings}
-  tnam.max := size_char(tnam.str);
+  tnam.max := size_char(tnam.str);     {init local var strings}
   tnam2.max := size_char(tnam2.str);
 
-  string_vstring (vprog, prog_name, size_char(prog_name)); {var string prog name}
-  s.len := 0;                          {init return string to empty}
+  string_vstring (tnam, prog_name, size_char(prog_name)); {var string prog name}
+  string_treename (tnam, tnam2);       {expand to full absolute pathname}
 
-  sys_envvar_get (                     {get executables dir environment var value}
-    string_v(envvar_com),              {environment variable name}
-    tnam,                              {returned value}
-    stat);
-  if sys_error(stat) then tnam.len := 0; {no specific pathname on no envvar}
-  if tnam.len > 0                      {check executable directory name}
-    then begin                         {we have executable directory name}
-      string_treename (tnam, tnam2);   {make full expansion of envvar value}
-      string_pathname_join (tnam2, vprog, tnam); {make full pathname}
-      string_treename (tnam, tnam2);   {resolve any symbolic links}
-      string_append_token (s, tnam2);  {add as token to S}
-      end
-    else begin                         {there is no executable directory name}
-      string_append_token (s, vprog);  {add unqualified name as token to S}
-      end
-    ;
+  s.len := 0;                          {init the return string to empty}
+  string_append_token (s, tnam2);      {write pathname as single token to S}
   end;
 {
-*************************************************************************
+********************************************************************************
 *
 *   Subroutine PREPROCESS (FNAM)
 *
-*   Pre-process the input source indicated by FNAM.  The result will be
-*   a raw MPASM assembler source file with the same generic name in the
-*   current directory.  The result file name always ends in '.asm'.
+*   Pre-process the input source indicated by FNAM.  The result will be a raw
+*   MPASM assembler source file with the same generic name in the current
+*   directory.  The result file name always ends in '.asm'.
 *
-*   This routine runs the PREPIC program to perform the preprocess
-*   operation.
+*   This routine runs the PREPIC program to perform the preprocess operation.
 }
 procedure preprocess (                 {preprocess ASPIC file to ASM file}
   in    fnam: univ string_var_arg_t);  {ASPIC file name}
@@ -127,20 +112,11 @@ begin
   if exstat > 0 then sys_exit_error;
   end;
 {
-*************************************************************************
+********************************************************************************
 *
 *   Start of main routine.
 }
 begin
-  srcdir.max := size_char(srcdir.str); {init local var strings}
-  tnam.max := size_char(tnam.str);
-  errname.max := size_char(errname.str);
-  oldir.max := size_char(oldir.str);
-  cmd.max := size_char(cmd.str);
-  buf.max := size_char(buf.str);
-  tk.max := size_char(tk.str);
-  preparm.max := size_char(preparm.str);
-
   string_cmline_init;                  {init for reading the command line}
 
   string_cmline_token (tnam, stat);    {get input file name}
@@ -150,6 +126,7 @@ begin
 
   string_pathname_split (conn.tnam, srcdir, tnam); {make dir and file leafnames}
   string_fnam_extend (conn.gnam, '.err', errname); {make error file name}
+  file_close (conn);                   {close the input file}
 {
 *   The following variables have been set:
 *
@@ -166,7 +143,6 @@ begin
   file_currdir_set (srcdir, stat);     {go to the source code directory}
   sys_msg_parm_vstr (msg_parm[1], srcdir);
   sys_error_abort (stat, 'file', 'curr_dir_set', msg_parm, 1);
-  file_close (conn);
 {
 *   Build the full assembler command line to execute in CMD, and save any
 *   command line parameters to PREPIC in PREPARM.

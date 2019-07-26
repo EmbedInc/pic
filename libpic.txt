@@ -1,0 +1,52 @@
+                             Program LIBPIC
+                              26 July 2019
+
+libpic <input file name>
+
+This program runs the Microchip library manager MPLIB.  MPLIB requires all
+arguments on the command line, including the list of object files to put
+into a library.  This program takes the MPLIB command line arguments from
+the input file.
+
+This program runs MPLIB in the directory where the input file is stored.
+Each line in the input file is added as one additional argument to MPLIB.
+The input file is deleted if MPLIB completes without errors.
+
+The MPLIB assembler executable is assumed to be at
+(cog)extern/mplab/mplib.exe.  This is intended to be a symbolic link
+pointing to the actual executable, the location of which depends on how
+MPLAB was installed.  The EMBED_EXTOOL program automates creation of this
+link.
+
+The input file commands are:
+
+  /c
+
+       Create a new library file.
+
+  /t
+
+       List the members of a library.
+
+  /d
+
+       Delete members from a library.
+
+  /r
+
+       Replace members in a library.  If a member does not previously
+       exist in a library then it is added.
+
+  /x
+
+       Extract members from a library.  If no members are specified, then
+       all are extracted.
+
+  /q
+
+       Quiet mode.  No output is displayed.
+
+  <filename>
+
+       The first file name is the name of the library to manipulate.
+       Additional file names form the list of members.

@@ -1,0 +1,141 @@
+                             Program ASMPIC
+                              26 July 2019
+
+asmpic <source file> <opt1> ... <optN>
+
+This program is a wrapper around the Microchip MPASM assembler.  The
+assembler always sets the program status code to zero, whether errors were
+encountered or not.  It does, however, produce a .ERR file which is empty
+if all went well and contains error messages when all did not go well.
+This file is used to set the exit status of ASMPIC.
+
+The first command line argument must be the name of the source file to
+assemble.  The source file name must end in ".asm" if it is in native
+Microchip PIC assembler format, or ".aspic" if it is in preprocessor
+format.  In the latter case, the preprocessor is run to produce the .asm
+file, which is then passed to the Microchip assembler.  The input file
+name suffix may be omitted, in which case a .aspic file is used in
+preference to a .asm file if both are present.
+
+The /q switch is always passed to the assembler, and should not be passed
+on the command line.  This causes the assembler to run in "batch" mode
+without requiring user input.
+
+The /e switch is always passed to the assembler, and should not be passed
+on the command line.  This causes the assembler to create an error output
+file if errors are encountered.  This program will not function correctly
+if the error output file is disabled.  The error output file is the only
+evidence the assembler provides as to whether assembly was successful or
+not.  The return status from ASMPIC is derived from the error output file,
+which is always deleted before ASMPIC returns.
+
+The assembler will be run in the directory containing the source file.
+This is also where output files will be put by default.  If errors are
+found, they will be listed to standard output and the program exit status
+will be set to ERROR.  If no errors are encountered, the program exit
+status will be OK.  The .ERR file is deleted in any case.
+
+The MPASM assembler executable is assumed to be at
+(cog)extern/mplab/mpasm.exe.  This is intended to be a symbolic link
+pointing to the actual executable, the location of which depends on how
+MPLAB was installed.  The EMBED_EXTOOL program automates creation of this
+link.
+
+All the command line options after the source file name are passed to the
+assembler up to but non including the -P command line option.  Options
+after -P are passed to PREPIC if it is run.  If the input file is a MPASM
+source file and not a preprocessor source file (.ASM suffix instead of
+.ASPIC suffix), then any preprocessor command line options are ignored.
+
+The MPASM command line options not fixed by ASMPIC are:
+
+  /a <hex format>
+
+       Set the HEX output file format.  HEX output files are only produced
+       by the assembler in absolute mode.  In relocatable mode the linker
+       produces the HEX file.  Choices of HEX file format are INHX8M,
+       INHX8S, and INHX32.  The default is INHX8M or INHX32, depending on
+       the processor selected.
+
+  /c+
+  /c-
+
+       Enable (+) or disable (-) case sensitivity.  Case sensitivity is
+       enabled by default.  Note that most of the symbols in the Microchip
+       processor-specific include files are upper case.  This means they
+       have to be entered in the source code in upper case when case
+       sensitivity is enabled.
+
+  /d<symbol>[=<value>]
+
+       Define a symbolic constant.  This has the same effect as an EQU
+       directive defining the same constant at the beginning of the file.
+
+  /l+
+  /l-
+  /l <filename>
+
+       Enable, disable, or set listing output file.  The default is to
+       produce a listing file with the same generic pathname as the input
+       file.
+
+  /m+
+  /m-
+
+       Enable or disable macro expansion in the listing file.  Macro
+       expansion is enabled by default.
+
+  /o+
+  /o-
+  /o <filename>
+
+       Enable, disable, or set object output file.  Enabling object file
+       output also sets relocatable, as apposed to absolute, mode.  Object
+       file output is disabled by default (absolute mode).
+
+  /p<processor>
+
+       Set processor type.  The processor types are the PIC model names,
+       like "PIC16C54" for example.  There is no default.
+
+  /r<radix>
+
+       Set the default radix for numeric constants.  Choices are HEX, DEC,
+       or OCT.  The default is HEX.
+
+  /t<size>
+
+       Set listing file tab column widths.
+
+  /w<level>
+
+       Set output messages level.  Choices of LEVEL are:
+
+       0 - Show all messages.
+
+       1 - Show only error and warning messages.
+
+       2 - Show only error messages.
+
+       The default is 0.
+
+  /x+
+  /x-
+  /x <filename>
+
+       Enable, disable, or set cross reference file.  Cross reference file
+       output is disabled by default.
+
+  /y+
+  /y-
+
+       Enable or disable the PIC18 extended instruction set.  The default
+       is disabled.
+
+  -P opt ... opt
+
+       The -P command line option indicates that subsequent options are
+       passed to PREPIC, if run, as apposed to MPASM.  -P and any options
+       following it are ignored if PREPIC is not run.  The -P keyword is
+       case-insensitive.  See the PREPIC documentation file for the list
+       of command line options it supports.
