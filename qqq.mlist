@@ -1,8 +1,10 @@
 qq2_cmd.o
+qq2_cmds.o
 qq2_init.o
 qq2_intr.o
 qq2_main.o
 qq2_port.o
 qq2_regs.o
 qq2_stack.o
+qq2_task.o
 qq2_uart.o
