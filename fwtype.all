@@ -240,6 +240,9 @@
 /if [and [= unam "MMCOM"] [= udir "JOWA"]] then
   /set ty 59
   /endif
+/if [and [= unam "S5CAN"] [= udir "JOWA"]] then
+  /set ty 60
+  /endif
 
 /if [= ty -1] then
   /show "  No ID assigned in FWTYPE.ALL to firmware " unam " from the source directory " udir
