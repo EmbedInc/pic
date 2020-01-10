@@ -14,6 +14,22 @@
 ;   New projects use this file to get the firmware ID.  Some firmware IDs are
 ;   documented here even if the project is old and does not include this file.
 ;
+;   There are four cases of FWTYPE previously defined, and the firwmare ID known
+;   here from FWNAME and SRCDIR:
+;
+;                           ID unknown                      ID known
+;                ---------------------------------------------------------------
+;                |                              |                              |
+;        FWTYPE  |        FWTYPE set to         |        FWTYPE set to         |
+;     undefined  |             0                |              ID              |
+;                |                              |                              |
+;                ---------------------------------------------------------------
+;                |                              |                              |
+;        FWTYPE  |            FWTYPE            |            FWTYPE            |
+;       defined  |          unaltered           |         must match ID        |
+;                |                              |                              |
+;                ---------------------------------------------------------------
+;
 /if [not [exist "fwname"]] then
   /show "  FWNAME is not defined but FWTYPE.ALL was included."
   /stop
@@ -244,14 +260,23 @@
   /set ty 60
   /endif
 
-/if [= ty -1] then
-  /show "  No ID assigned in FWTYPE.ALL to firmware " unam " from the source directory " udir
-         error   No FWTYPE
-         end
-  /stop
+/if [= ty -1]
+  /then                      //ID is not known here
+    /if [not [exist "fwtype:vcon"]] then
+      /const fwtype integer = 0
+      /endif
+  /else                      //ID is known here, in TY
+    /if [exist "fwtype:vcon"]
+      /then                  //ID known, FWTYPE defined
+        /if [<> fwtype ty] then
+          /show "  Predefined FWTYPE of " fwtype " does not match ID " ty " in FWTYPE.ALL."
+          /show "  *** Module not built ***"
+          /stop 3
+          /endif
+      /else                  //ID known, FWTYPE undefined
+        /const fwtype integer = ty
+      /endif
   /endif
-
-/const   fwtype  integer = ty ;set the firmware type
 
 /del ty                      ;delete temporary variables
 /del udir
