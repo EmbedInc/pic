@@ -4,10 +4,10 @@
 *   number and show its value in normal decimal representation.
 }
 program hfx;
-%include '/cognivision_links/dsee_libs/sys/sys.ins.pas';
-%include '/cognivision_links/dsee_libs/util/util.ins.pas';
-%include '/cognivision_links/dsee_libs/string/string.ins.pas';
-%include '/cognivision_links/dsee_libs/file/file.ins.pas';
+%include 'sys.ins.pas';
+%include 'util.ins.pas';
+%include 'string.ins.pas';
+%include 'file.ins.pas';
 
 var
   fp: double;                          {the value in floating point}

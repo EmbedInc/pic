@@ -4,11 +4,11 @@
 *   its value.
 }
 program hfp;
-%include '/cognivision_links/dsee_libs/sys/sys.ins.pas';
-%include '/cognivision_links/dsee_libs/util/util.ins.pas';
-%include '/cognivision_links/dsee_libs/string/string.ins.pas';
-%include '/cognivision_links/dsee_libs/file/file.ins.pas';
-%include '/cognivision_links/dsee_libs/pic/pic.ins.pas';
+%include 'sys.ins.pas';
+%include 'util.ins.pas';
+%include 'string.ins.pas';
+%include 'file.ins.pas';
+%include 'pic.ins.pas';
 
 var
   fp: real;                            {the floating point value}

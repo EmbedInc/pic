@@ -93,7 +93,7 @@ blkty_block_k: (                       {BLOCK command}
 
 var
   fnam_in, fnam_out:                   {input and output file names}
-    %include '/cognivision_links/dsee_libs/string/string_treename.ins.pas';
+    %include '(cog)lib/string_treename.ins.pas';
   iname_set: boolean;                  {TRUE if the input file name already set}
   oname_set: boolean;                  {TRUE if the output file name already set}
   asmdir_p: asmdir_p_t;                {points to list of assembler directives}
@@ -126,15 +126,15 @@ var
   popcmd: boolean;                     {pop the current preproc command block after this cmd}
   pcmd: boolean;                       {curr line is a preprocessor command}
   buf:                                 {one line in/out buffer}
-    %include '/cognivision_links/dsee_libs/string/string8192.ins.pas';
+    %include '(cog)lib/string8192.ins.pas';
   eolcomm:                             {end of line comment start sequence}
-    %include '/cognivision_links/dsee_libs/string/string4.ins.pas';
+    %include '(cog)lib/string4.ins.pas';
   asmnest0col: sys_int_machine_t;      {column for 0 nested ASM directive}
 
   opt:                                 {upcased command line option}
-    %include '/cognivision_links/dsee_libs/string/string_treename.ins.pas';
+    %include '(cog)lib/string_treename.ins.pas';
   parm:                                {command line option parameter}
-    %include '/cognivision_links/dsee_libs/string/string8192.ins.pas';
+    %include '(cog)lib/string8192.ins.pas';
   pick: sys_int_machine_t;             {number of token picked from list}
   msg_parm:                            {references arguments passed to a message}
     array[1..max_msg_args] of sys_parm_msg_t;

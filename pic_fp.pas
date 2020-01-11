@@ -5,7 +5,7 @@ define pic_fp24_f_real;
 define pic_fp24_t_real;
 define pic_fp32f_f_real;
 define pic_fp32f_t_real;
-%include '/cognivision_links/dsee_libs/pic/pic2.ins.pas';
+%include 'pic2.ins.pas';
 {
 ********************************************************************************
 *
