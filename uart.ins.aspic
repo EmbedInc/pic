@@ -115,6 +115,8 @@ lbankadr equ     bankadr(lbank) ;address within local state register bank
 
          uart_baud baud      ;set asm constants for UART configuration
 /if show_baud then
+         messg   UART type #v(uart_type)
+         messg   SPBRG #v(val_spbrg)
          messg   Baud rate #v(baud_real)
   /endif
 ;
