@@ -259,6 +259,9 @@
 /if [and [= unam "S5CAN"] [= udir "JOWA"]] then
   /set ty 60
   /endif
+/if [and [= unam "RELAY"] [= udir "JOWA"]] then
+  /set ty 61
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
