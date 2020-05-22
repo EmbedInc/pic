@@ -227,7 +227,6 @@ next_opt:
     e_p^,                              {ESCR script system state}
     parm,                              {name of variable to create}
     escr_dtype_bool_k,                 {data type of the variable}
-    0,                                 {length, not used with this data type}
     true,                              {make global, not local}
     sym_p,                             {returned pointer to the new symbol}
     stat);
@@ -255,7 +254,6 @@ next_opt:
     e_p^,                              {ESCR script system state}
     tk,                                {name of variable to create}
     escr_dtype_int_k,                  {data type of the variable}
-    0,                                 {length, not used with this data type}
     true,                              {make global, not local}
     sym_p,                             {returned pointer to the new symbol}
     stat);
@@ -283,7 +281,6 @@ next_opt:
     e_p^,                              {ESCR script system state}
     tk,                                {name of variable to create}
     escr_dtype_fp_k,                   {data type of the variable}
-    0,                                 {length, not used with this data type}
     true,                              {make global, not local}
     sym_p,                             {returned pointer to the new symbol}
     stat);
@@ -309,14 +306,13 @@ next_opt:
     e_p^,                              {ESCR script system state}
     tk,                                {name of variable to create}
     escr_dtype_str_k,                  {data type of the variable}
-    parm.len,                          {string length}
     true,                              {make global, not local}
     sym_p,                             {returned pointer to the new symbol}
     stat);
   sys_msg_parm_vstr (msg_parm[1], tk);
   sys_error_abort (stat, 'escr', 'var_new', msg_parm, 1);
 
-  string_copy (parm, sym_p^.var_val.str); {set variable value}
+  strflex_copy_f_vstr (parm, sym_p^.var_val.stf); {set variable value}
   end;
 {
 *   -NOT name
@@ -331,7 +327,6 @@ next_opt:
     e_p^,                              {ESCR script system state}
     parm,                              {name of variable to create}
     escr_dtype_bool_k,                 {data type of the variable}
-    0,                                 {length, not used with this data type}
     true,                              {make global, not local}
     sym_p,                             {returned pointer to the new symbol}
     stat);

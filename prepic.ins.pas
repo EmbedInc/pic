@@ -1,6 +1,7 @@
 {   Private include file for all the modules of the PREPIC program.
 }
 %include 'base.ins.pas';
+%include 'strflex.ins.pas';
 %include 'escr.ins.pas';
 %include 'pic.ins.pas';
 

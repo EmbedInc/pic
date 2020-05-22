@@ -202,12 +202,11 @@ done_parms:                            {done reading command parameters}
     e,                                 {script system state}
     syname,                            {name of the constant}
     escr_dtype_str_k,                  {value will be a string}
-    tk.len,                            {string length}
     true,                              {make this new symbol global}
     sym_p,                             {returned pointer to the new symbol}
     stat);
   if sys_error(stat) then return;
-  string_copy (tk, sym_p^.const_val.str); {set the constant's value}
+  strflex_copy_f_vstr (tk, sym_p^.const_val.stf); {set the constant's value}
 {
 *   Create the preprocessor constant
 *
@@ -239,12 +238,11 @@ done_parms:                            {done reading command parameters}
     e,                                 {script system state}
     syname,                            {name of the constant}
     escr_dtype_str_k,                  {value will be a string}
-    tk.len,                            {string length}
     true,                              {make this new symbol global}
     sym_p,                             {returned pointer to the new symbol}
     stat);
   if sys_error(stat) then return;
-  string_copy (tk, sym_p^.const_val.str); {set the constant's value}
+  strflex_copy_f_vstr (tk, sym_p^.const_val.stf); {set the constant's value}
 {
 *   Create the preprocessor constant
 *
@@ -272,7 +270,6 @@ done_parms:                            {done reading command parameters}
     e,                                 {script sstem state}
     syname,                            {name of the constant}
     escr_dtype_int_k,                  {value will be integer}
-    0,                                 {unused for integer data type}
     true,                              {make this new symbol global}
     sym_p,                             {returned pointer to the new symbol}
     stat);
