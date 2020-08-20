@@ -72,7 +72,11 @@ type
     blkty_if_k,                        {IF command}
     blkty_subr_k,                      {subroutine}
     blkty_macro_k,                     {macro}
-    blkty_block_k);                    {block started with BLOCK command}
+    blkty_block_k,                     {block started with BLOCK command}
+    blkty_cmd_k,                       {command definition}
+    blkty_func_k,                      {function definition}
+    blkty_pick_k,                      {PICK block}
+    blkty_case_k);                     {CASExxx within PICK block}
 
   precmd_block_p_t = ^precmd_block_t;
   precmd_block_t = record              {info for one nested preprocessor commands block}
@@ -88,6 +92,8 @@ blkty_subr_k: (                        {subroutine}
 blkty_macro_k: (                       {macro}
       );
 blkty_block_k: (                       {BLOCK command}
+      );
+blkty_pick_k: (                        {PIC block}
       );
     end;
 
@@ -713,6 +719,114 @@ begin
 {
 ********************************************************************************
 *
+*   Subroutine HANDLE_PCMD_CMD (CMD_P)
+*
+*   Special handler for the COMMAND preprocessor command.
+}
+procedure handle_pcmd_cmd (            {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  pblock_push;                         {create new nested cmd context}
+  pblock_p^.blkty := blkty_cmd_k;
+  end;
+{
+********************************************************************************
+*
+*   Subroutine HANDLE_PCMD_ENDCMD (CMD_P)
+*
+*   Special handler for the ENDCMD preprocessor command.
+}
+procedure handle_pcmd_endcmd (         {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  if (pblock_p <> nil) and then (pblock_p^.blkty = blkty_cmd_k) then begin
+    pblock_pop;
+    end;
+  end;
+{
+********************************************************************************
+*
+*   Subroutine HANDLE_PCMD_FUNC (CMD_P)
+*
+*   Special handler for the FUNCTION preprocessor command.
+}
+procedure handle_pcmd_func (           {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  pblock_push;                         {create new nested func context}
+  pblock_p^.blkty := blkty_func_k;
+  end;
+{
+********************************************************************************
+*
+*   Subroutine HANDLE_PCMD_ENDFUNC (CMD_P)
+*
+*   Special handler for the ENDFUNC preprocessor command.
+}
+procedure handle_pcmd_endfunc (        {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  if (pblock_p <> nil) and then (pblock_p^.blkty = blkty_func_k) then begin
+    pblock_pop;
+    end;
+  end;
+{
+********************************************************************************
+*
+*   Subroutine HANDLE_PCMD_PICK (CMD_P)
+*
+*   Special handler for the PICK preprocessor command.
+}
+procedure handle_pcmd_pick (           {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  pblock_push;                         {create new nested pick context}
+  pblock_p^.blkty := blkty_pick_k;
+  end;
+{
+********************************************************************************
+*
+*   Subroutine HANDLE_PCMD_CASE (CMD_P)
+*
+*   Special handler for a CASExxx preprocessor command.
+}
+procedure handle_pcmd_case (           {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  if preind > 0 then preind := preind - 1;
+  preindinc := preindinc + 1;
+  end;
+{
+********************************************************************************
+*
+*   Subroutine HANDLE_PCMD_ENDPICK (CMD_P)
+*
+*   Special handler for the ENDPICK preprocessor command.
+}
+procedure handle_pcmd_endpick (        {custom preprocessor command handler}
+  in      cmd_p: precmd_p_t);          {pointer to commands list entry}
+  val_param; internal;
+
+begin
+  if (pblock_p <> nil) and then (pblock_p^.blkty = blkty_pick_k) then begin
+    pblock_pop;
+    end;
+  end;
+{
+********************************************************************************
+*
 *   Start of main routine.
 }
 begin
@@ -795,17 +909,29 @@ begin
   asmdir ('.MACRO',    dirtype_inest_k);
 
   precmd_p := nil;                     {init list of preprocessor commands to empty}
+  precmd ('APPEND',     nil);
   precmd ('BLOCK',      addr(handle_pcmd_block));
   precmd ('CALL',       nil);
+  precmd ('CASE',       addr(handle_pcmd_case));
+  precmd ('CASEELSE',   addr(handle_pcmd_case));
+  precmd ('CASEMATCH',  addr(handle_pcmd_case));
+  precmd ('COMMAND',    addr(handle_pcmd_cmd));
   precmd ('CONST',      addr(handle_pcmd_tabbed));
   precmd ('DEL',        nil);
+  precmd ('DIR',        nil);
   precmd ('ELSE',       addr(handle_pcmd_then));
   precmd ('ENDBLOCK',   addr(handle_pcmd_endblock));
+  precmd ('ENDCMD',     addr(handle_pcmd_endcmd));
+  precmd ('ENDFUNC',    addr(handle_pcmd_endfunc));
   precmd ('ENDIF',      addr(handle_pcmd_endif));
   precmd ('ENDLOOP',    addr(handle_pcmd_endblock));
   precmd ('ENDMAC',     addr(handle_pcmd_endmac));
+  precmd ('ENDPICK',    addr(handle_pcmd_endpick));
   precmd ('ENDSUB',     addr(handle_pcmd_endsub));
   precmd ('FLAG',       addr(handle_pcmd_tabbed));
+  precmd ('FUNCSTR',    nil);
+  precmd ('FUNCTION',   addr(handle_pcmd_func));
+  precmd ('FUNCVAL',    nil);
   precmd ('IF',         addr(handle_pcmd_if));
   precmd ('INANA',      addr(handle_pcmd_tabbed));
   precmd ('INBIT',      addr(handle_pcmd_tabbed));
@@ -813,10 +939,14 @@ begin
   precmd ('LOOP',       addr(handle_pcmd_block));
   precmd ('MACRO',      addr(handle_pcmd_macro));
   precmd ('OUTBIT',     addr(handle_pcmd_tabbed));
+  precmd ('PICK',       addr(handle_pcmd_pick));
   precmd ('QUIT',       nil);
+  precmd ('QUITCASE',   nil);
+  precmd ('QUITPICK',   nil);
   precmd ('QUITMAC',    nil);
   precmd ('REPEAT',     nil);
   precmd ('RETURN',     nil);
+  precmd ('RUN',        nil);
   precmd ('SET',        nil);
   precmd ('SHOW',       nil);
   precmd ('STOP',       nil);
@@ -1075,6 +1205,7 @@ eof_in:                                {end of input file encountered}
   oline1 := true;                      {init to processing first output line}
   nblank := 0;                         {init to no unwritten blank output lines}
   pblock_p := nil;                     {init to not within a preprocessor command block}
+  preind := 0;                         {init to not indented}
 
 loop_newoline:                         {back here each new out line}
   tktype := tktype_first_k;            {init expected type of next token}
