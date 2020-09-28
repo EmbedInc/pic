@@ -796,11 +796,11 @@ begin
 {
 ********************************************************************************
 *
-*   Subroutine HANDLE_PCMD_CASE (CMD_P)
+*   Subroutine HANDLE_PCMD_OPTION (CMD_P)
 *
-*   Special handler for a CASExxx preprocessor command.
+*   Special handler for a OPTIONxxx preprocessor command.
 }
-procedure handle_pcmd_case (           {custom preprocessor command handler}
+procedure handle_pcmd_option (         {custom preprocessor command handler}
   in      cmd_p: precmd_p_t);          {pointer to commands list entry}
   val_param; internal;
 
@@ -912,9 +912,6 @@ begin
   precmd ('APPEND',     nil);
   precmd ('BLOCK',      addr(handle_pcmd_block));
   precmd ('CALL',       nil);
-  precmd ('CASE',       addr(handle_pcmd_case));
-  precmd ('CASEELSE',   addr(handle_pcmd_case));
-  precmd ('CASEMATCH',  addr(handle_pcmd_case));
   precmd ('COMMAND',    addr(handle_pcmd_cmd));
   precmd ('CONST',      addr(handle_pcmd_tabbed));
   precmd ('DEL',        nil);
@@ -938,10 +935,13 @@ begin
   precmd ('INCLUDE',    nil);
   precmd ('LOOP',       addr(handle_pcmd_block));
   precmd ('MACRO',      addr(handle_pcmd_macro));
+  precmd ('OPTION',     addr(handle_pcmd_option));
+  precmd ('OPTIONELSE', addr(handle_pcmd_option));
+  precmd ('OPTIONIF',   addr(handle_pcmd_option));
   precmd ('OUTBIT',     addr(handle_pcmd_tabbed));
   precmd ('PICK',       addr(handle_pcmd_pick));
   precmd ('QUIT',       nil);
-  precmd ('QUITCASE',   nil);
+  precmd ('QUITOPT',    nil);
   precmd ('QUITPICK',   nil);
   precmd ('QUITMAC',    nil);
   precmd ('REPEAT',     nil);
