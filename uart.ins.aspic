@@ -54,6 +54,9 @@
 /if [not [exist "using_txie"]] then
   /const using_txie bool = [> fousz 0]
   /endif
+/if [not [exist "txie_pin"]] then
+  /const txie_pin string = ""
+  /endif
 /if [not [exist "tasking"]] then
   /const tasking bool = false
   /endif
@@ -89,6 +92,9 @@
   /endif
 /if [not [exist "nsend_int"]] then
   /const nsend_int integer = 0
+  /endif
+/if [not [exist "nsend_high"]] then
+  /const nsend_high bool = true
   /endif
 ;
 ;   Derived constants.
@@ -274,6 +280,31 @@ bank_fifout macro
 /if [<> recv_ready ""] then
          set_[chars recv_ready]_on ;indicate ready to receive
   /endif
+;
+;   Set up the NSEND interrupt, if used.  The NSEND line is connected to one of
+;   the INTn inputs.  We take an interrupt when the line is deasserted, meaning
+;   that it is OK to send again.
+;
+/if [<> nsend_name ""] then  ;NSEND input is in use ?
+         dbankif intcon2
+  /if nsend_high
+    /then                    ;allowed to send when low
+         bcf     intcon2, intedg[v nsend_int] ;interrupt on falling edge
+    /else                    ;allowed to send when high
+         bsf     intcon2, intedg[v nsend_int] ;interrupt on rising edge
+    /endif
+
+  /pick one by nsend_int     ;which INTn input is being used ?
+  /option 0                  ;INT0
+         dbankif intcon
+         bcf     intcon, tmr0if ;clear any pending interrupt condition
+         bsf     intcon, int0ie ;enable the interrupt
+  /optionelse                ;INT1 to INTn
+         dbankif intcon3
+         bcf     intcon3, int[v nsend_int]if ;clear any pending interrupt condition
+         bsf     intcon3, int[v nsend_int]ie ;enable the interrupt
+    /endpick
+  /endif                     ;end of NSEND input is used
 
          leaverest
 
@@ -696,6 +727,9 @@ put_wait
       /if using_txie then
          dbankif txie_reg
          bsf     txie_flag   ;make sure UART transmit interrupt is enabled
+        /if [<> txie_pin ""] then
+         set_[chars txie_pin]_on ;show TXIE state on output pin
+          /endif
         /endif
 ;
 ;   Clear FLAG_SOUT if the FIFO is full.  FLAG_SOUT is currently set.
@@ -842,15 +876,22 @@ pch_leave unbank
 ;   characters in the output FIFO.
 ;
 
+;   Disable this interrupt and leave if the not-send flow control input is
+;   asserted.  The interrupt will be re-enabled when the line is de-asserted.
+;
         /if [<> nsend_name ""] then
-;
-;   Disable this interrupt and leave if the not-send flow control input is high.
-;   The interrupt will be re-enabled when the line goes low.
-;
          dbankif [chars nsend_name "_reg"]
+
+          /if nsend_high
+            /then
          btfsc   [chars nsend_name "_pin"] ;we are allowed to send ?
+            /else
+         btfss   [chars nsend_name "_pin"] ;we are allowed to send ?
+            /endif
+
          jump    xmit_off    ;no, disable UART xmit interrupt and leave
-          /endif
+          /endif             ;end of not-send input exists
+
 
          dbankif gbankadr
          bsf     flag_sout[chars n] ;FIFO guaranteed not to be full after this interrupt
@@ -880,6 +921,9 @@ pch_leave unbank
 xmit_off unbank              ;disable the UART transmit ready interrupt
          dbankif txie_reg
          bcf     txie_flag   ;disable this interrupt
+        /if [<> txie_pin ""] then
+         set_[chars txie_pin]_off ;echo TXIE state on output pin
+          /endif
          gjump   intr_ret_uart
 
       /else
@@ -918,7 +962,7 @@ xmit_byte                    ;there is a byte to transmit
 ;   indicating the INTn interrupt number.
 ;
   /if [<> nsend_name ""] then ;using not_send flow control input ?
-         glbent  uart[chars n]_intr_nsend
+         glbent  uart[chars n]_intr_send
 
     /if [= nsend_int 0]
       /then
@@ -931,7 +975,9 @@ xmit_byte                    ;there is a byte to transmit
 
          dbankif txie_reg
          bsf     txie_flag   ;re-enable the UART transmit interrupt
-
+    /if [<> txie_pin ""] then
+         set_[chars txie_pin]_on ;show TXIE state on output pin
+      /endif
          gjump   intr_ret_uart
 
     /endif                   ;end of using not-send flow control input

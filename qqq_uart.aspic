@@ -132,8 +132,9 @@
 /const   enab_outflag bool = true ;maintain FLAG_SOUT
 /const   fousz   integer = 16 ;output FIFO size, 0 disables FIFO and interrupt
 /const   use_txmt bool = false ;disable transmit ready bug workaround using TXMT
-/const   nsend_name string = "" ;name of input pin that allows sending when low
+/const   nsend_name string = "" ;name of input pin to inhibit sending
 /const   nsend_int integer = 0 ;INTn input number NSEND_NAME is connected to
+/const   nsend_high bool = true ;NSEND line high to inhibit sending
 
 /include "(cog)src/pic/uart.ins.aspic"
 
