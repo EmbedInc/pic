@@ -3100,7 +3100,7 @@ setreg   macro   val, reg
          movwf   (reg)
          endm
 
-;********************
+;*****************************
 ;
 ;   Macro TIMER0_PER cy
 ;
@@ -3125,53 +3125,170 @@ timer0_per macro cy
          addwf   tmr0
          endm
 
-;********************
-;
-;   Macro TIMER2_CYCLES tmr2ncy
-;
-;   Calculate a timer 2 setup to achieve the interrupt period of TMR2NCY
-;   instruction cycles.  This macro generates no code, but sets the following
-;   assembler variables:
-;
-;     TMR2_PRE  -  timer 2 prescaler value: 1, 4, or 16
-;
-;     TMR2_PER  -  timer 2 period divide value: 1 - 256
-;
-;     TMR2_POS  -  timer 2 postscaler value: 1 - 16
-;
-;   The postscaler is set to the maximum possible value that results in the
-;   specified period.  This minimizes the PWM period for the given overall
-;   period.  Within this constraint, the smallest possible prescaler is used,
-;   thereby maximizing the PWM frequency.  This results in the maximum possible
-;   PWM resolution given the overall interrupt period constraint.
-;
-;   The hardware PWM period, if used, is defined by the prescaler and period
-;   values only.  The number of instructions per PWM period is therefore
-;   TMR2_PRE * TMR2_PER, whereas the number of instructions per timer 2
-;   interrupt (if enabled) is TMR2_PRE * TMR2_PER * TMR2_POS.
-;
-;   An error is generated if the indicated period can not be attained exactly
-;   within the constraints of the timer 2 hardware.
-;
-timer2_cycles macro tmr2ncy
+//////////////////////////////
+//
+//   Subroutine TIMER2_CONFIG_SET pre per pos [desper]
+//
+//   Set the timer 2 configuration constants according to the call arguments:
+//
+//     PRE  -  Prescaler: 1, 4, 16
+//
+//     PER  -  period after prescaler: 1 - 256
+//
+//     POS  -  Postscaler: 1 - 16
+//
+//     DESPER  -  Desired overall period, seconds.  This parameter is optional.
+//       The constant TMR2_ERROR (see below) is created if DESPER is given.
+//
+//   The arguments will be checked, and assembly bombed with error on any
+//   invalid values.
+//
+//   The following preprocessor constants will be set:
+//
+//     TMR2_PRE, integer -  timer 2 prescaler value: 1, 4, or 16
+//
+//     TMR2_PER, integer  -  timer 2 period divide value: 1 - 256
+//
+//     TMR2_POS, integer  -  timer 2 postscaler value: 1 - 16
+//
+//     TMR2_PERIOD, real  -  Actual timer 2 period in seconds.
+//
+//     TMR2_ERROR  -  Relative error of actual period with respect to the
+//       desired period.  This value times 100 would be the percent error.  This
+//       constant is only created when the DESPER call argument is provided.
+//
+//     TMR2_PERPWM, real  -  Period delivered to CCP module for PWM, seconds.
+//       This is the period without the postscaler, taking into account only the
+//       prescaler and period settings.
+//
+//     TMR2_CYCLES, integer  -  Actual timer 2 period in instruction cycles.
+//
+//     TMR2_FREQ, real  -  Actual timer 2 frequency, Hz.
+//
+//   Assembly constants will also be created: TMR2_PRE, TMR2_PER, TMR2_POS.
+//
+/subroutine timer2_config_set
+  /var local pre integer = [vnl [arg 1]]
+  /var local per integer = [vnl [arg 2]]
+  /var local pos integer = [vnl [arg 3]]
+  /var local desper_given bool = [exist 4 arg]
+  /if desper_given then
+    /var local desper real = [vnl [arg 4]]
+    /endif
+  //
+  //   Validate the call arguments.
+  //
+  /pick first by pre
+  /option 1 4 16
+  /optionelse
+    /show "  Invalid timer 2 prescaler of " pre
+         error   "Timer 2 prescaler"
+         end
+    /stop
+    /endpick
+  /if [or [< per 1] [> per 256]] then
+    /show "  Invalid timer 2 period value of " per
+         error   "Timer 2 period"
+         end
+    /stop
+    /endif
+  /if [or [< pos 1] [> pos 16]] then
+    /show "  Invalid timer 2 postscaler of " pos
+         error   "Timer 2 postscaler"
+         end
+    /stop
+    /endif
+  //
+  //   Create the basic timer 2 configuration constants.
+  //
+  /if [exist "tmr2_pre:vcon"] then
+    /show "  TMR2_PRE previously created"
+         error   TMR2_PRE
+         end
+    /stop
+    /endif
+  /const tmr2_pre integer = pre
 
-tmr2_pos set     16          ;init the postscaler to maximum
-  while tmr2_pos >= 1        ;loop thru decreasing postscaler values
-tmr2_pre set     1           ;init the prescaler to minimum
-    while tmr2_pre <= 16     ;loop thru increasing prescaler values
-tmr2_per set     tmr2ncy / (tmr2_pre * tmr2_pos) ;make period value with this pre/post
-      if (tmr2_per >= 1) && (tmr2_per <= 256) ;period within range ?
-        if (tmr2_pre * tmr2_per * tmr2_pos) == tmr2ncy ;result achieved exactly ?
-         exitm               ;found exact result, all done
-          endif
-        endif
-tmr2_pre set     tmr2_pre * 4 ;advance to next prescaler value to try
-      endw                   ;back to try with this new prescaler value
-tmr2_pos set     tmr2_pos - 1 ;advance to next postscaler value to try
-    endw                     ;back to try with this new postscaler value
+  /if [exist "tmr2_per:vcon"] then
+    /show "  TMR2_PER previously created"
+         error   TMR2_PER
+         end
+    /stop
+    /endif
+  /const tmr2_per integer = per
 
-         error   "Requested timer 2 period can not be achieved in TIMER2_CYCLES."
-         endm
+  /if [exist "tmr2_pos:vcon"] then
+    /show "  TMR2_POS previously created"
+         error   TMR2_POS
+         end
+    /stop
+    /endif
+  /const tmr2_pos integer = pos
+
+tmr2_pre equ     [v tmr2_pre] ;make assembly constants of the same names
+tmr2_per equ     [v tmr2_per]
+tmr2_pos equ     [v tmr2_pos]
+  //
+  //   Compute the derived values.
+  //
+  /const tmr2_cypwm integer = [* tmr2_pre tmr2_per] ;PWM period, cycles
+  /const tmr2_perpwm real = [/ tmr2_cypwm freq_inst] ;PWM period, seconds
+  /const tmr2_cycles integer = [* tmr2_cypwm tmr2_pos] ;full period, cycles
+  /const tmr2_period real = [/ tmr2_cycles freq_inst] ;full period, seconds
+  /const tmr2_freq real = [/ 1 tmr2_period] ;timer 2 frequency, Hz
+
+  /if desper_given then //desired period is known ?
+    /const tmr2_error real = [/ [- tmr2_period desper] desper] ;period error
+    /endif
+  /endsub
+
+//////////////////////////////
+//
+//   Macro TMR2CY_CLOSEPER period
+//
+//   Computes the timer 2 setup to result in the desired period as close as
+//   possible.  PERIOD is the desired timer 2 period in floating point seconds.
+//
+//   This macro produces no code.  It only creates preprocessor and assembler
+//   constants.  See subroutine TIMER2_CONFIG_SET for a list of the constants.
+//
+//   The configuration resulting in the closest period to PERIOD is always
+//   chosen.  When multiple configurations result in the same lowest error, then
+//   the PWM period is minimized (the postscaler maximized).  Otherwise, the PWM
+//   resolution is maximized by minimizing the prescaler.
+//
+/macro tmr2cy_closeper
+  /var local dper real = [vnl [arg 1]] ;desired period, seconds
+  /var local pre integer     ;current prescaler: 1, 4, 16
+  /var local percy integer   ;current period, cycles
+  /var local period real     ;current period, seconds
+  /var local err real        ;current error
+  /var local best_err real   ;best error so far
+  /var local best_pre integer ;best prescaler so far
+  /var local best_per integer ;best period divider so far
+  /var local best_pos integer ;best postscaler so far
+
+  /set best_err 1e35         ;init to out of range error so far
+
+  /loop with pos from 16 to 1 by -1 ;try the various postscalers
+    /loop with pren from 0 to 2 ;try prescalers in ascending order
+      /set pre [exp 4 pren]  ;actual prescaler, power of 4
+      /loop with per from 1 to 256
+        /set percy [* pre per pos] ;total period, cycles
+        /set period [/ percy freq_inst] ;total period, seconds
+        /set err [abs [/ [- period dper] dper]] ;error at this setting
+        /if [< err best_err] then ;found better config than previous ?
+          /set best_pre pre  ;update best config found so far
+          /set best_per per
+          /set best_pos pos
+          /set best_err err
+          /endif
+        /endloop             ;back for next higher period divider
+      /endloop               ;back for next higher prescaler
+    /endloop                 ;back for next lower postscaler
+
+  /call timer2_config_set best_pre best_per best_pos dper
+  /endmac
 
 ;********************
 ;
@@ -3224,12 +3341,13 @@ tmr2_pos set     [v tmr2_pos] ;postscaler: 1 - 16
 
 ;********************
 ;
-;   Macro TMR2CY_CLOSEPER period
+;   Macro TIMER2_CYCLES tmr2ncy
 ;
-;   Computes the timer 2 setup to result in the desired period as close as
-;   possible.  PERIOD is the desired timer 2 period in floating point seconds.
+;   *** WARNING: Legacy, not for new code ***
 ;
-;   The following assembler and preprocessor variables are set:
+;   Calculate a timer 2 setup to achieve the interrupt period of TMR2NCY
+;   instruction cycles.  This macro generates no code, but sets the following
+;   assembler variables:
 ;
 ;     TMR2_PRE  -  timer 2 prescaler value: 1, 4, or 16
 ;
@@ -3237,77 +3355,40 @@ tmr2_pos set     [v tmr2_pos] ;postscaler: 1 - 16
 ;
 ;     TMR2_POS  -  timer 2 postscaler value: 1 - 16
 ;
-;   The following preprocessor variables are also set:
+;   The postscaler is set to the maximum possible value that results in the
+;   specified period.  This minimizes the PWM period for the given overall
+;   period.  Within this constraint, the smallest possible prescaler is used,
+;   thereby maximizing the PWM frequency.  This results in the maximum possible
+;   PWM resolution given the overall interrupt period constraint.
 ;
-;     TMR2_PERIOD  -  Actual timer 2 period in seconds.
+;   The hardware PWM period, if used, is defined by the prescaler and period
+;   values only.  The number of instructions per PWM period is therefore
+;   TMR2_PRE * TMR2_PER, whereas the number of instructions per timer 2
+;   interrupt (if enabled) is TMR2_PRE * TMR2_PER * TMR2_POS.
 ;
-;     TMR2_CYCLES  -  Actual timer 2 period in instruction cycles.
+;   An error is generated if the indicated period can not be attained exactly
+;   within the constraints of the timer 2 hardware.
 ;
-;     TMR2_ERROR  -  Relative error of actual period with respect to the
-;       desired period.  This value times 100 would be the percent error.
-;
-;     TMR2_FREQ  -  Actual timer 2 frequency, Hz.
-;
-/macro tmr2cy_closeper
-  /var local dper real = [arg 1] ;desired period, seconds
-  /var exist tmr2_pre integer ;prescaler value: 1, 4, or 16
-  /var exist tmr2_per integer ;period value: 1 - 256
-  /var exist tmr2_pos integer ;postscaler value: 1 - 16
-  /var exist tmr2_period real ;resulting period, seconds
-  /var exist tmr2_cycles integer ;resulting period, instruction cycles
-  /var exist tmr2_error real ;resulting relative period error
-  /var exist tmr2_freq real  ;resulting frequency, Hz
+timer2_cycles macro tmr2ncy
 
-  /var local pre integer     ;candidate prescaler, 1,4,16
-  /var local per integer     ;candidate period register value, 1-256
-  /var local pos integer     ;candidate postscaler 1-16
-  /var local period real     ;current period, seconds
-  /var local error real      ;current error
-  /var local ii integer      ;scratch integer
-  /var local r real          ;scratch floating point
+tmr2_pos set     16          ;init the postscaler to maximum
+  while tmr2_pos >= 1        ;loop thru decreasing postscaler values
+tmr2_pre set     1           ;init the prescaler to minimum
+    while tmr2_pre <= 16     ;loop thru increasing prescaler values
+tmr2_per set     tmr2ncy / (tmr2_pre * tmr2_pos) ;make period value with this pre/post
+      if (tmr2_per >= 1) && (tmr2_per <= 256) ;period within range ?
+        if (tmr2_pre * tmr2_per * tmr2_pos) == tmr2ncy ;result achieved exactly ?
+         exitm               ;found exact result, all done
+          endif
+        endif
+tmr2_pre set     tmr2_pre * 4 ;advance to next prescaler value to try
+      endw                   ;back to try with this new prescaler value
+tmr2_pos set     tmr2_pos - 1 ;advance to next postscaler value to try
+    endw                     ;back to try with this new postscaler value
 
-  /set tmr2_error 1e35       ;init to out of range error so far
-  /set pre 1                 ;init prescaler to try
-  /block                     ;back here each new prescaler
-    /set pos 1               ;init postscaler to try
-    /block                   ;back here each new postscaler value
-      /set per 1             ;init period divider to try
+         error   "Requested timer 2 period can not be achieved in TIMER2_CYCLES."
+         endm
 
-      /block                 ;back here each new period divider
-        /set ii [* pre per pos] ;total divider chain value
-        /set period [/ ii freq_inst] ;resulting period, seconds
-        /set error [/ [- period dper] dper] ;relative error
-        /if [< [abs error] [abs tmr2_error]] then ;found better combination ?
-          /set tmr2_pre pre  ;update best state for this configuration
-          /set tmr2_per per
-          /set tmr2_pos pos
-          /set tmr2_period period
-          /set tmr2_cycles ii
-          /set tmr2_error error
-          /set tmr2_freq [/ 1 tmr2_period]
-          /endif
-        /set per [+ 1 per]   ;update period divider
-        /if [<= per 256] then
-          /repeat
-          /endif
-        /endblock
-
-      /set pos [+ 1 pos]     ;update postscaler
-      /if [<= pos 16] then
-        /repeat
-        /endif
-      /endblock
-
-    /set pre [* 4 pre]       ;update prescaler
-    /if [<= pre 16] then
-      /repeat
-      /endif
-    /endblock
-
-tmr2_pre set     [v tmr2_pre] ;prescaler: 1, 4, 16
-tmr2_per set     [v tmr2_per] ;period: 1 - 256
-tmr2_pos set     [v tmr2_pos] ;postscaler: 1 - 16
-  /endmac
 
 ;********************
 ;
@@ -3420,7 +3501,7 @@ t2con_val set    t2con_val | 2 ;merge in value for prescaler divide by 16
 ;
 ;   Macro TIMER2_SETUP_INTR
 ;
-;   Same ast TIMER2_SETUP (above), but also enables the timer 2
+;   Same as TIMER2_SETUP (above), but also enables the timer 2
 ;   interrupt.
 ;
 timer2_setup_intr macro
