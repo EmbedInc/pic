@@ -262,6 +262,9 @@
 /if [and [= unam "RELAY"] [= udir "JOWA"]] then
   /set ty 61
   /endif
+/if [and [= unam "ISCAN"] [= udir "JOWA"]] then
+  /set ty 62
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
