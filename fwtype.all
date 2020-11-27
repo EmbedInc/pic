@@ -265,8 +265,8 @@
 /if [and [= unam "ISCAN"] [= udir "JOWA"]] then
   /set ty 62
   /endif
-/if [and [= unam "S5MAIN"] [= udir "JOWA"]] then
-  /set ty 63
+/if [and [= unam "S5DIG"] [= udir "JOWA"]] then
+  /set ty 64
   /endif
 
 /if [= ty -1]
