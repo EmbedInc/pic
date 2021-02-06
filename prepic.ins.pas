@@ -2,6 +2,7 @@
 }
 %include 'base.ins.pas';
 %include 'strflex.ins.pas';
+%include 'fline.ins.pas';
 %include 'escr.ins.pas';
 %include 'pic.ins.pas';
 

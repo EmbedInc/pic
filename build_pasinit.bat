@@ -13,5 +13,6 @@ call src_getfrom util util.ins.pas
 call src_getfrom string string.ins.pas
 call src_getfrom file file.ins.pas
 call src_getfrom strflex strflex.ins.pas
+call src_getfrom fline fline.ins.pas
 
 call src_builddate "%srcdir%"
