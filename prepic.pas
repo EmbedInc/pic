@@ -430,7 +430,7 @@ otherwise                              {anything else, like .ASPIC}
 {
 *   Do the pre-processing.
 }
-  escr_out_open (e_p^, fnam_out, stat); {open pre-processed output file}
+  escr_out_open_file (e_p^, fnam_out, stat); {open pre-processed output file}
   sys_error_abort (stat, '', '', nil, 0);
 
   escr_run_conn (                      {run the input file}
