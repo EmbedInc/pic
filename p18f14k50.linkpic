@@ -10,7 +10,7 @@ CODEPAGE NAME=code0 START=0 END=0x3FFF //program memory
 //
 //   RAM banks.
 //
-ACCESSBANK NAME=accessram START=0x0  END=0x5F PROTECTED //RAM part of access bank
+ACCESSBANK NAME=accessram START=0x0  END=0x5F //RAM part of access bank
 DATABANK NAME=bank0 START=0x60 END=0xFF //general use part of bank 0
 DATABANK NAME=bank1 START=0x100 END=0x1FF //register bank 1
 DATABANK NAME=usbbuf START=0x200 END=0x2FF //usb HW RAM, bank 2
