@@ -157,12 +157,35 @@ false    equ     0
 ;   only performed here if the PREPIC constant PROCESSOR does not exist but
 ;   PICNAME does.
 ;
-/if [and [exist "picname"] [not [exist "processor"]]] then ;using new proc setup method ?
+/block
+  /if [not [exist "picname"]] then //quit if using the old method
+    /quit
+    /endif
+  /if [exist "processor"] then
+    /quit
+    /endif
+  /var local tnam
   /const processor = picname
          processor [chars processor]
-         include [str "p" [lcase processor] ".inc"]
+
+  /set tnam [dir "(cog)extern/mplab/mpasm.exe"] //directory include files are in
+  /append tnam "/p" [lcase processor] ".inc" //full include file name
+  /set tnam [tnam tnam] //fixed absolute pathname of the include file
+  /write
+  /write ";*******************************************************************************"
+  /write ";   Starting Microchip include file"
+  /write ";   " tnam
+  /write ";*******************************************************************************"
+  /write
+  /include tnam
+  /write
+  /write ";*******************************************************************************"
+  /write ";   Back from Microchip include file"
+  /write ";   " tnam
+  /write ";*******************************************************************************"
+  /write
          radix   dec         ;make sure default radix still decimal after include file
-  /endif
+  /endblock
 
 ;*******************************************************************************
 ;
