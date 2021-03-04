@@ -1,11 +1,10 @@
 ;   Subroutine COMPA
 ;
-;   Compare REGA and REGB.  The arithmetic flags will be set for REGA
-;   compared to REGB.  For example, the GT flag will be set if REGA = 5
-;   and REGB = 3.
+;   Compare REGA and REGB.  The arithmetic flags will be set for REGA compared
+;   to REGB.  For example, the GT flag will be set if REGA = 5 and REGB = 3.
 ;
 .compa   code
-         glbsub  compa, noregs
+         glbsub  compa
 
          movlw   ~flag_ar    ;get mask for all but arithmetic flags
          andwf   flags       ;init all the arithmetic flags to unset

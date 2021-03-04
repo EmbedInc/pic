@@ -1,20 +1,20 @@
 ;   Subroutine ADDOFS
 ;
-;   Add REG0 to the 16 bit value in REG1,REG2.  The format of REG1,REG2
-;   is the same as that required by subroutine LOOKINC.  This routine
-;   can be useful for computing a lookup address, given the table start
-;   address and the entry offset.  Arguments are passed as follows.
+;   Add REG0 to the 16 bit value in REG1,REG2.  The format of REG1,REG2 is the
+;   same as that required by subroutine LOOKINC.  This routine can be useful for
+;   computing a lookup address, given the table start address and the entry
+;   offset.  Arguments are passed as follows.
 ;
 ;     REG0  -  Amount to add to the value in REG1,REG2.
 ;     REG1  -  16 bit value, low byte.  Will be updated.
 ;     REG2  -  16 bit value, high byte.  Will be updated.
 ;
 .addofs  code
-         glbsub  addofs, noregs
+         glbsub  addofs
 
          movf    reg0, w     ;get the increment value
          addwf   reg1        ;add to low byte, set carry
          btfsc   status, c   ;no carry to high byte ?
          incf    reg2        ;propagate carry into high byte
 
-         leave   noregs
+         leaverest

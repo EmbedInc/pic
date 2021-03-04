@@ -14,45 +14,42 @@
 ;   * its use.                                                    *
 ;   ***************************************************************
 ;
-;   This source file contains routines for 24 bit floating point add
-;   and subtract.  These routines are in the same module because the
-;   subtract routine just flips the sign of a number and jumps into
-;   the ADD routine.
+;   This source file contains routines for 24 bit floating point add and
+;   subtract.  These routines are in the same module because the subtract
+;   routine just flips the sign of a number and jumps into the ADD routine.
 ;
-;   See the comments in FP24FLT for a description of the floating point
-;   format.
+;   See the comments in FP24FLT for a description of the floating point format.
 ;
          extern  shiftra     ;shift REGA right arithmetically by REG4 bits
          extern  shiftrab    ;shift REGB right arithmetically by REG8 bits
          extern  fp24flt     ;convert REGA with REG8 fraction bits to 24 bit FP
-;
+
 ;*******************************************************************************
 ;
 ;   Configuration constants.
 ;
 saved    equ     regf3 | regfb | regf8 | regf9 | regf10 ;regs saved by both routines
 
+
 .fp24add code
-;
 ;*******************************************************************************
 ;
 ;   Subroutine FP24ADD
 ;
 ;   Add the 24 bit floating point value in the low 3 bytes of REGA to the
-;   floating point value in the low 3 bytes of REGB and put the result
-;   in the low 3 bytes of REGA.
+;   floating point value in the low 3 bytes of REGB and put the result in the
+;   low 3 bytes of REGA.
 ;
          glbsub  fp24add, saved
 ;
-;   Check for 0.0 in REGB.  If so, just return with the original value
-;   in REGA.
+;   Check for 0.0 in REGB.  If so, just return with the original value in REGA.
 ;
          movf    regb+2      ;set Z if REGB is zero
          skip_nz             ;REGB not 0 ?
          goto    add_leave   ;REGB is 0, return with original REGA number
 ;
-;   Check for 0.0 in REGA.  If so, copy the REGB number into REGA and
-;   return with it.
+;   Check for 0.0 in REGA.  If so, copy the REGB number into REGA and return
+;   with it.
 ;
 addsub                       ;subtract subroutine jumps here after negating REGB
          movf    rega+2      ;set Z if REGA is zero
@@ -80,9 +77,9 @@ a_not_zero                   ;skip to here if REGA not zero
          skip_wle            ;REG10 already set to the larger value ?
          movwf   reg10       ;no, set it to the larger value from REGB
 ;
-;   Convert REGA to fixed point and adjust the number of fraction bits so
-;   that it is shifted left 13 bits if the EXP field matches the max
-;   EXP value in REG10.
+;   Convert REGA to fixed point and adjust the number of fraction bits so that
+;   it is shifted left 13 bits if the EXP field matches the max EXP value in
+;   REG10.
 ;
          movf    rega+2, w   ;get REGA byte containing EXP field
          andlw   h'7F'       ;mask in only the EXP field
@@ -115,14 +112,14 @@ rega_neg
          incf    rega+2      ;propagate carry into byte 2
 rega_ext                     ;REGA is fixed point and extended to 32 bits
          ;
-         ;   REGA has been converted to fixed point and sign extended to
-         ;   the full 32 bits.  Now shift it left 13 bits minus the amount
-         ;   the REGA EXP value was below the maximum of the two EXP values.
-         ;   The maximum EXP value is in REG10, and the REGA EXP value is
-         ;   temporarily saved in REG9.
+         ;   REGA has been converted to fixed point and sign extended to the
+         ;   full 32 bits.  Now shift it left 13 bits minus the amount the REGA
+         ;   EXP value was below the maximum of the two EXP values.  The maximum
+         ;   EXP value is in REG10, and the REGA EXP value is temporarily saved
+         ;   in REG9.
          ;
-         ;   Compute the number of bits to shift REGA right in REG4.  REG4
-         ;   will first be saved in REG8.
+         ;   Compute the number of bits to shift REGA right in REG4.  REG4 will
+         ;   first be saved in REG8.
          ;
          movf    reg4, w     ;temp save REG4 in REG8
          movwf   reg8
@@ -138,9 +135,9 @@ rega_ext                     ;REGA is fixed point and extended to 32 bits
          movf    reg8, w     ;restore the original REG4 value
          movwf   reg4
 ;
-;   Convert REGB to fixed point and adjust the number of fraction bits so
-;   that it is shifted left 13 bits if the EXP field matches the max
-;   EXP value in REG10.
+;   Convert REGB to fixed point and adjust the number of fraction bits so that
+;   it is shifted left 13 bits if the EXP field matches the max EXP value in
+;   REG10.
 ;
          movf    regb+2, w   ;get REGB byte containing EXP field
          andlw   h'7F'       ;mask in only the EXP field
@@ -173,11 +170,11 @@ regb_neg
          incf    regb+2      ;propagate carry into byte 2
 regb_ext                     ;REGB is fixed point and extended to 32 bits
          ;
-         ;   REGB has been converted to fixed point and sign extended to
-         ;   the full 32 bits.  Now shift it left 13 bits minus the amount
-         ;   the REGB EXP value was below the maximum of the two EXP values.
-         ;   The maximum EXP value is in REG10, and the REGB EXP value is
-         ;   temporarily saved in REG9.
+         ;   REGB has been converted to fixed point and sign extended to the
+         ;   full 32 bits.  Now shift it left 13 bits minus the amount the REGB
+         ;   EXP value was below the maximum of the two EXP values.  The maximum
+         ;   EXP value is in REG10, and the REGB EXP value is temporarily saved
+         ;   in REG9.
          ;
          ;   Compute the number of bits to shift REGB right in REG8
          ;
@@ -189,10 +186,10 @@ regb_ext                     ;REGB is fixed point and extended to 32 bits
          movwf   reg8        ;set number of bits to shift REGB right
          gcall   shiftrab    ;do the shift
 ;
-;   REGA and REGB are signed fixed point numbers and have been normalized
-;   to an additional 13 fraction bits than that implied by the EXP value
-;   in REG10.  This provides the maximum bits while still guaranteeing that
-;   no overflow can occur from the add operation.
+;   REGA and REGB are signed fixed point numbers and have been normalized to an
+;   additional 13 fraction bits than that implied by the EXP value in REG10.
+;   This provides the maximum bits while still guaranteeing that no overflow can
+;   occur from the add operation.
 ;
 ;   Now add the two normalized numbers into REGA.
 ;
@@ -201,8 +198,8 @@ regb_ext                     ;REGB is fixed point and extended to 32 bits
 ;   The fixed point sum is in REGA which has 13 additional fraction bits than
 ;   that implied by the EXP value in REG10.
 ;
-;   Now convert the fixed point value in REGA back to floating point.  REG8
-;   will be set to the number of fraction bits in REGA.  This is
+;   Now convert the fixed point value in REGA back to floating point.  REG8 will
+;   be set to the number of fraction bits in REGA.  This is
 ;
 ;     16 + 13 - (REG10 - 64)
 ;
@@ -217,14 +214,14 @@ regb_ext                     ;REGB is fixed point and extended to 32 bits
 
 add_leave                    ;common exit point
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine FP24SUB
 ;
-;   Perform a subtract of the 24 bit floating point value in the low 3
-;   bytes of REGA minus the floating point value in the low 3 bytes of
-;   REGB and put the result into the low 3 bytes of REGA.
+;   Perform a subtract of the 24 bit floating point value in the low 3 bytes of
+;   REGA minus the floating point value in the low 3 bytes of REGB and put the
+;   result into the low 3 bytes of REGA.
 ;
          glbsub  fp24sub, saved
 ;

@@ -1,17 +1,16 @@
 ;   Subroutine FILT
 ;
 ;   Filter the value in REGB into REGA.  REGB will be left unchanged.  The
-;   filter fraction in bits is in REG8.  REG8 must be zero or a positive
-;   number which determines the weighting fraction of the new value in
-;   REGB.  This is a single pole filter operation described by the
-;   following equations:
+;   filter fraction in bits is in REG8.  REG8 must be zero or a positive number
+;   which determines the weighting fraction of the new value in REGB.  This is a
+;   single pole filter operation described by the following equations:
 ;
 ;     W = 2 ** -N
 ;     RESULT = OLD * (1 - W) + NEW * W
 ;
-;   W is the weighting fraction for the new value in REGB.  W is determined
-;   from N, which is the REG8 value.  REGA contains OLD on entry, and
-;   contains RESULT on return.
+;   W is the weighting fraction for the new value in REGB.  W is determined from
+;   N, which is the REG8 value.  REGA contains OLD on entry, and contains RESULT
+;   on return.
 ;
          extern  shiftrlb    ;shift right logical of REGB by REG8 bits
          extern  suba        ;subtract REGA - REGB into REGA
@@ -20,9 +19,8 @@
 .filt    code
          glbsub  filt, regfb
 ;
-;   Remove the W fraction of REGA from itself.  REGA is copied into
-;   REGB, REGB is then shifted the selected amount right and subtracted
-;   from REGA.
+;   Remove the W fraction of REGA from itself.  REGA is copied into REGB, REGB
+;   is then shifted the selected amount right and subtracted from REGA.
 ;
          movf    rega+0, w   ;copy REGA into REGB
          movwf   regb+0

@@ -73,13 +73,12 @@
 ;       callback routine named in CANIN_CALLBACK is external to this module.
 ;       The default is TRUE (is external).  This constant must be created and
 ;       set to FALSE if the callback routine is local to prevent the code in
-;       this file from generating a EXTERN reference to it, which will produce
-;       a assembler error.
+;       this file from generating a EXTERN reference to it, which will produce a
+;       assembler error.
 ;
 ;     DEBUG_CANCFG  -  Preprocessor constant, type BOOL.  TRUE causes detailed
-;       information to be shown about the automatic CAN bit timing
-;       configuration calculations.  The default is FALSE, which just shows the
-;       final result.
+;       information to be shown about the automatic CAN bit timing configuration
+;       calculations.  The default is FALSE, which just shows the final result.
 ;
 ;     LBANK  -  MPASM constant.  0-15 bank number for local state of this
 ;       module.  No default, required.
@@ -121,8 +120,8 @@ lbankadr equ     bankadr(lbank) ;address within local state register bank
 
 ;*******************************************************************************
 ;
-;   Global state.  All this state is assumed to be in the GBANK register
-;   bank by other modules.
+;   Global state.  All this state is assumed to be in the GBANK register bank by
+;   other modules.
 ;
          defram  gbankadr
 
@@ -270,8 +269,8 @@ have_cfgmode unbank          ;CAN module is in configuration mode
 //
 //   Determine the bit rate setup.  The TQ frequency is (FCANCLK/2)/BDIV, with
 //   BDIV constrained to 1-64.  The BDIV value resulting in the smallest
-//   frequency error will be chosen, within the constraint that there must be
-//   9 to 25 time quanta per bit.
+//   frequency error will be chosen, within the constraint that there must be 9
+//   to 25 time quanta per bit.
 //
 /set bdiv 0                  ;init to no usable BDIV value found
 /set ii 1                    ;init trial BDIV value
@@ -433,16 +432,16 @@ have_cfgmode unbank          ;CAN module is in configuration mode
                  ; -0------  receive all messages according to filters
                  ; --XXXXXX  read-only status bits
 ;
-;   Set up the mask and filters.  In the mode we are using this hardware, it has
-;   2 masks and 16 filters.  The masks indicate which filter bits are relevant.
-;   For a message to be accepted at least one filter has to match the relevant
-;   message ID bits, as indicated by its mask.
+;   Set up the mask and filters.  In the mode we are using this hardware, it
+;   has 2 masks and 16 filters.  The masks indicate which filter bits are
+;   relevant.  For a message to be accepted at least one filter has to match the
+;   relevant message ID bits, as indicated by its mask.
 ;
 ;   Filters 0-7 will be set up to work with mask 0 and will filter standard
 ;   frames.  Filters 8-15 will be set up to work with mask 1 and will filter
 ;   extended frames.  Only filters 0 and 8 will be enabled.  It seems the
-;   hardware will not let a message thru when no filters are enabled, even
-;   if all the mask bits are 0, which makes all the filter bits irrelevant.
+;   hardware will not let a message thru when no filters are enabled, even if
+;   all the mask bits are 0, which makes all the filter bits irrelevant.
 ;
 ;   For now, both masks will be set up to allow all messages.
 ;
@@ -579,8 +578,8 @@ have_cfgmode unbank          ;CAN module is in configuration mode
 can_task unbank              ;task start address
 ;
 ;   Wait for the software receive buffer to be empty.  Another task may be
-;   reading the last received frame from the buffer.  When done with the data
-;   in the receive buffer, FLAG_CANIN will be cleared.
+;   reading the last received frame from the buffer.  When done with the data in
+;   the receive buffer, FLAG_CANIN will be cleared.
 ;
 wait_swbuf unbank            ;back here until software buffer ready for next frame
          gcall   task_yield  ;give other tasks a chance to run
@@ -614,8 +613,8 @@ wait_recv unbank             ;back here until a new CAN frame is received
 ;
 ;   Map the current receive buffer to the access bank region F60-F6Dh.  This is
 ;   where the fixed receive buffer 0 is located in legacy mode.  The symbols
-;   RXB0xxx will therefore be used to access the buffer, even though it could
-;   be any of the 8 receive buffers.
+;   RXB0xxx will therefore be used to access the buffer, even though it could be
+;   any of the 8 receive buffers.
 ;
          dbankif cancon
          movf    cancon, w
@@ -654,8 +653,8 @@ wait_recv unbank             ;back here until a new CAN frame is received
          jump    done_id     ;done assembling ID
          ;
          ;   Extended frame.  Get the 29 bit frame ID.  In this case, the
-         ;   extended ID bits form the low 18 bits of the ID and the standard
-         ;   ID bits the high 11.
+         ;   extended ID bits form the low 18 bits of the ID and the standard ID
+         ;   bits the high 11.
          ;
 recv_ext dbankis gbankadr
          bsf     flag_canin_ext ;indicate extended frame

@@ -1,7 +1,7 @@
 ;   Subroutine DIVSQA
 ;
-;   Perform an signed integer divide.  REGA is divided by REGB, and the
-;   quotient written to REGA.
+;   Perform an signed integer divide.  REGA is divided by REGB, and the quotient
+;   written to REGA.
 ;
          extern  divu        ;low level unsigned integer divide
          extern  nega        ;negate REGA

@@ -53,9 +53,9 @@ false    equ     0
 ;
 ;   If the boolean variable MAKE_VERSION exists and is set to TRUE, then the
 ;   version include file is always made and the preprocessing is aborted
-;   immediately afterwards.  Otherwise, the version include file is only made
-;   if it does not already exist.  In that case, processing continues and uses
-;   the new version include file.  The sequence number is updated whenever the
+;   immediately afterwards.  Otherwise, the version include file is only made if
+;   it does not already exist.  In that case, processing continues and uses the
+;   new version include file.  The sequence number is updated whenever the
 ;   version include file is written.  MAKE_VERSION is intended to be set from
 ;   the command line by the build script to explicitly create the version
 ;   include file before any modules are built for real.
@@ -189,9 +189,8 @@ false    equ     0
 
 ;*******************************************************************************
 ;
-;   Set global defaults.  These values are always defined, but may be
-;   altered below depending on the specific processor type this code is
-;   running on.
+;   Set global defaults.  These values are always defined, but may be altered
+;   below depending on the specific processor type this code is running on.
 ;
 ;   See the comments at the beginning of STD.INS.ASPIC for a detailed
 ;   description of these settings.
@@ -282,10 +281,10 @@ pullups_portd set pullups_portd | h'80000000' ;indicate all together on or off
 ;*******************************************************************************
 ;
 ;   Set INTR_OFF_BUG appropriately.  This should really be handled by the
-;   specific section for each processor.  However, we received the list
-;   of processors that exhibit this bug and don't want to look up all the
-;   other details of each of these processors and make a custom section
-;   for them right now.
+;   specific section for each processor.  However, we received the list of
+;   processors that exhibit this bug and don't want to look up all the other
+;   details of each of these processors and make a custom section for them right
+;   now.
 ;
 intr_off_bug set false       ;init to this processor does not have interrupt off bug
 
@@ -331,15 +330,15 @@ intr_off_bug set true
 
 ;*******************************************************************************
 ;
-;   Determine the processor family.  Exactly one of the following symbols
-;   will be set to 1 (true) while the remaining ones will be set to 0 (false).
+;   Determine the processor family.  Exactly one of the following symbols will
+;   be set to 1 (true) while the remaining ones will be set to 0 (false).
 ;
 ;   FAM_12  -  12 bit instruction word like 12C508, ...
 ;
 ;   FAM_16C5  -  12 bit instruction word like 16C54, ...
 ;
-;   FAM_16  -  14 bit instruction word.  All the remaining 16xxx devices
-;     like 16C77, ...
+;   FAM_16  -  14 bit instruction word.  All the remaining 16xxx devices like
+;     16C77, ...
 ;
 ;   FAM_16B  -  Enhanced 14 bit core, like 16F1823.
 ;

@@ -9,18 +9,18 @@
 ;     FLAGB_REMA  -  Store the remainder in REGA
 ;     FLAGB_REMC  -  Store the remainder in REGC
 ;
-;   Results are undefined if the flag bits specify storing more than one
-;   value into any one register.  The REGC and REGA registers are preserved
-;   if nothing is being returned in them.
+;   Results are undefined if the flag bits specify storing more than one value
+;   into any one register.  The REGC and REGA registers are preserved if nothing
+;   is being returned in them.
 ;
 ;   Algorithm:
 ;
-;     The REGB value is first left shifted as far as it can go without
-;     losing any bits, and REGC is cleared.  For each bit position REGB was
-;     shifted left, the REGB is compared to REGA and subtracted from REGA
-;     if smaller.  If so, the low bit of REGC is set.  REGB is then shifted
-;     right one, and REGC is shifted left one and the process is repeated for
-;     the new bit position.  This results in the quotient in REGC.
+;     The REGB value is first left shifted as far as it can go without losing
+;     any bits, and REGC is cleared.  For each bit position REGB was shifted
+;     left, the REGB is compared to REGA and subtracted from REGA if smaller.
+;     If so, the low bit of REGC is set.  REGB is then shifted right one, and
+;     REGC is shifted left one and the process is repeated for the new bit
+;     position.  This results in the quotient in REGC.
 ;
          extern  suba
 .divu    code
@@ -58,8 +58,8 @@ divu_nsava
          dbankif reg12       ;set bank for general regs access, if required
 divu_nsavc
 ;
-;   Shift the operand left in whole chunks of 8 bits until the upper byte
-;   is not zero.  The shift amount is kept track of in REG12.
+;   Shift the operand left in whole chunks of 8 bits until the upper byte is not
+;   zero.  The shift amount is kept track of in REG12.
 ;
          clrf    reg12       ;init to operand not shifted
 divu_loop_shift8             ;back here to try shift another 8 bits left
@@ -91,8 +91,7 @@ divu_loop_shift1             ;back here to try shift another single bit left
 divu_done_shift1
 ;
 ;   The operand has been shifted left as far as possible without loosing any
-;   bits.  The number of bits the operand has been shifted left is in
-;   REG12.
+;   bits.  The number of bits the operand has been shifted left is in REG12.
 ;
 ;   Now init before entering the main compare/subtract loop.
 ;
@@ -105,10 +104,10 @@ divu_done_shift1
 ;
 ;   Main divide loop.  Compare the operand to the accumulator.  If OP <= ACC
 ;   then subtract the operand out of the accumulator and set the low quotient
-;   bit.  For each additional bit position, shift the operand right one,
-;   the quotient left one and repeat.  The total number of these compare
-;   and subtract operations to perform is in REG12.  This is the number of
-;   bits the operand was shifted left, plus one for the original position.
+;   bit.  For each additional bit position, shift the operand right one, the
+;   quotient left one and repeat.  The total number of these compare and
+;   subtract operations to perform is in REG12.  This is the number of bits the
+;   operand was shifted left, plus one for the original position.
 ;
 divu_loop
          getf    regb+3
@@ -153,8 +152,8 @@ divu_next                    ;advance to next bit position
 
 divu_done                    ;done with main compare/subtract loop
 ;
-;   All done with the compare/subtract loop.  The final quotient is in the
-;   C register (REG8-11), and the remainder is in the A register (REG0-3).
+;   All done with the compare/subtract loop.  The final quotient is in the C
+;   register (REG8-11), and the remainder is in the A register (REG0-3).
 ;
 divu_flip_ac equ (1 << flagb_quoa) | (1 << flagb_remc) ;FLAGS mask for flip A and C
          movlw   divu_flip_ac
@@ -163,8 +162,8 @@ divu_flip_ac equ (1 << flagb_quoa) | (1 << flagb_remc) ;FLAGS mask for flip A an
          skip_z              ;need to flip A and C registers ?
          goto    divu_nflipac
 ;
-;   The caller wants the quotient in A and the remainder in C.  This is
-;   exactly opposite of what these registers contain now.
+;   The caller wants the quotient in A and the remainder in C.  This is exactly
+;   opposite of what these registers contain now.
 ;
          getf    rega+0      ;flip byte 0
          xorwf   regc+0, w
@@ -217,8 +216,8 @@ divu_nquoa                   ;skip to here if not returning quotient in A
          movwf   regc+3
 divu_nremc                   ;skip to here if not returning remainder in C
 ;
-;   Restore the A and C registers if nothing is being returned in them.
-;   A was pushed onto the stack before C if both were pushed.
+;   Restore the A and C registers if nothing is being returned in them.  A was
+;   pushed onto the stack before C if both were pushed.
 ;
          btfsc   flags, flagb_quoc ;not returning quotient in C ?
          goto    divu_nresc  ;returning data in C
