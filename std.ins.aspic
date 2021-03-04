@@ -15,38 +15,37 @@
 ;   ***************************************************************
 ;
 ;   Standard include file assumed by most PIC source modules.  The specifics
-;   must be configured to the particular processor and application.  This
-;   is done by setting assembly values before this file is included.  The
-;   include file STD_DEF.INS.ASPIC is provided to set defaults for all
-;   the required assembly values.  An application should include STD_DEF.INS.ASPIC,
-;   then set any values it knows and cares about, then include STD.INS.ASPIC.
-;   In this way, applications are protected from changes to this include
-;   file that may require additional values to be set.
+;   must be configured to the particular processor and application.  This is
+;   done by setting assembly values before this file is included.  The include
+;   file STD_DEF.INS.ASPIC is provided to set defaults for all the required
+;   assembly values.  An application should include STD_DEF.INS.ASPIC, then set
+;   any values it knows and cares about, then include STD.INS.ASPIC.  In this
+;   way, applications are protected from changes to this include file that may
+;   require additional values to be set.
 ;
 ;   The following assembly values are assumed by this file, some of these
 ;   are set to default values in STD_DEF.INS.ASPIC.
 ;
-;     NREGBANKS  -  Number of register banks the processor has.  This
-;       configures macros that set the direct and indirect register banks.
+;     NREGBANKS  -  Number of register banks the processor has.  This configures
+;       macros that set the direct and indirect register banks.
 ;
-;     NCODEPAGES  -  Number of code pages the processor has.  A
-;       value of 1 disables code page selection code.
+;     NCODEPAGES  -  Number of code pages the processor has.  A value of 1
+;       disables code page selection code.
 ;
-;     STACKLAST  -  The address of the last (highest) software stack byte.
-;       This is where the first pushed byte is written.  On the 18 family,
-;       this is actually lowest address of the stack since the stack grows
-;       towards higher addresses on that family.
+;     STACKLAST  -  The address of the last (highest) software stack byte.  This
+;       is where the first pushed byte is written.  On the 18 family, this is
+;       actually lowest address of the stack since the stack grows towards
+;       higher addresses on that family.
 ;
 ;     STACKSIZE  -  Number of bytes to allocate for the stack.
 ;
-;     FREQ_OSC  -  Processor oscillator frequency in Hz.  This is the
-;       effective oscillator frequency on the 18 family, after the PLL,
-;       if enabled, is applied.  The instruction clock is FREQ_OSC / 4.
+;     FREQ_OSC  -  Processor oscillator frequency in Hz.  This is the effective
+;       oscillator frequency on the 18 family, after the PLL, if enabled, is
+;       applied.  The instruction clock is FREQ_OSC / 4.
 ;
-;     FAM_12  -  1 if the processor is a 12xxx, meaning 12 bit core,
-;       0 otherwise.  Some PICs, like the 12F629, are really 16 family
-;       devices using the 14 bit core.  These should have FAM_16, not
-;       FAM_12 set to 1.
+;     FAM_12  -  1 if the processor is a 12xxx, meaning 12 bit core, 0
+;       otherwise.  Some PICs, like the 12F629, are really 16 family devices
+;       using the 14 bit core.  These should have FAM_16, not FAM_12 set to 1.
 ;
 ;     FAM_16c5  -  1 if the processor is a 16C5x, 0 otherwise.
 ;
@@ -64,31 +63,29 @@
 ;
 ;     FAM_18  -  1 if the processor is a 18xxx, 0 otherwise.
 ;
-;     REGSTART  -  Starting address of general registers (REG0 address).
-;       The remaining registers immediately follow REG0 at higher addresses.
+;     REGSTART  -  Starting address of general registers (REG0 address).  The
+;       remaining registers immediately follow REG0 at higher addresses.
 ;
 ;     NUMREGS  -  Number of general registers.
 ;
-;     COMMREGS_FIRST, COMMREGS_LAST  -  These indicate the range of
-;       address offsets within each bank that are mapped to the same
-;       memory.  For example, many 16 family processors have 70h - 7Fh
-;       within each bank mapped to the same physical registers.
-;       COMMREGS_FIRST > COMMREGS_LAST indicates this processor has
-;       no such common mapped registers.
+;     COMMREGS_FIRST, COMMREGS_LAST  -  These indicate the range of address
+;       offsets within each bank that are mapped to the same memory.  For
+;       example, many 16 family processors have 70h - 7Fh within each bank
+;       mapped to the same physical registers.  COMMREGS_FIRST > COMMREGS_LAST
+;       indicates this processor has no such common mapped registers.
 ;
 ;     N_IREGS  -  The number of IREG0 - IREGn register to allocate.  These
-;       registers are for the exclusive use by interrupt code, since it
-;       would be impractical for that code to use the general registers
-;       REG0 - REGn.  This constant will be created and set to 0 if it
-;       does not already exist.
+;       registers are for the exclusive use by interrupt code, since it would be
+;       impractical for that code to use the general registers REG0 - REGn.
+;       This constant will be created and set to 0 if it does not already exist.
 ;
-;     INTR_OFF_BUG  -  Set to TRUE if the processor has the interrupt
-;       disable bug where the interrupt bit must be checked in a loop
-;       to make sure interrupts really got disabled.  FALSE indicates
-;       interrupt bit can be altered without checking.
+;     INTR_OFF_BUG  -  Set to TRUE if the processor has the interrupt disable
+;       bug where the interrupt bit must be checked in a loop to make sure
+;       interrupts really got disabled.  FALSE indicates interrupt bit can be
+;       altered without checking.
 ;
-;     UART_TYPE  -  Indicates the type of USART this part has.  The
-;       possible values are:
+;     UART_TYPE  -  Indicates the type of USART this part has.  The possible
+;       values are:
 ;
 ;       0  -  This part has no UART.
 ;
@@ -98,69 +95,64 @@
 ;
 ;       3  -  Advanced USART on some 18 family, like 18F1320.
 ;
-;     ADR_WORD  -  Number of address increments per program memory word.
-;       This is 1 for 12, 16, and 17 family PICs, and 2 for 18 family.
+;     ADR_WORD  -  Number of address increments per program memory word.  This
+;       is 1 for 12, 16, and 17 family PICs, and 2 for 18 family.
 ;
-;     PULLUPS_PORTx  -  Mask of which bits of port X (PORTA, PORTB, etc)
-;       have passive pullups that can be enabled.  A 1 bit indicates that
-;       the I/O pin at that bit position can have an internal passive
-;       pullup.  If the high bit (80000000h) is set, then all pullups
-;       of this port can only be enabled or disabled together.  If a
-;       symbol of this name does not exist for a port, then it is assumed
-;       that the port has not passive pullups at all.
+;     PULLUPS_PORTx  -  Mask of which bits of port X (PORTA, PORTB, etc) have
+;       passive pullups that can be enabled.  A 1 bit indicates that the I/O pin
+;       at that bit position can have an internal passive pullup.  If the high
+;       bit (80000000h) is set, then all pullups of this port can only be
+;       enabled or disabled together.  If a symbol of this name does not exist
+;       for a port, then it is assumed that the port has not passive pullups at
+;       all.
 ;
-;     EE_START  -  Starting address of the EEPROM mapped into the program
-;       memory space in the HEX file.  This is the starting address to use
-;       for the CODE section containing EEPROM initial values.  Note that
-;       linker files are set up so that a code section called ".EEDATA"
-;       will automatically get mapped to the EEPROM.  If it is permissable
-;       to allow the linker to place data in EEPROM, then the code section
-;       need not be given the explicit address of EE_START.
+;     EE_START  -  Starting address of the EEPROM mapped into the program memory
+;       space in the HEX file.  This is the starting address to use for the CODE
+;       section containing EEPROM initial values.  Note that linker files are
+;       set up so that a code section called ".EEDATA" will automatically get
+;       mapped to the EEPROM.  If it is permissable to allow the linker to place
+;       data in EEPROM, then the code section need not be given the explicit
+;       address of EE_START.
 ;
-;     ACCLAST  -  Last location in the bank 0 access bank region of 18
-;       family PICs.  This is 7Fh for most 18 family PICs, but some of the
-;       larger ones have more SFRs and decrease the access bank region
-;       in bank 0.  The existance of ACCLAST indicates the existance of
-;       an access bank.
+;     ACCLAST  -  Last location in the bank 0 access bank region of 18 family
+;       PICs.  This is 7Fh for most 18 family PICs, but some of the larger ones
+;       have more SFRs and decrease the access bank region in bank 0.  The
+;       existance of ACCLAST indicates the existance of an access bank.
 ;
-;     C18COMP  -  A value of 1 indicates that this code must be compatible
-;       with modules compiled with the MPASM C18 compiler.  This code
-;       must be able to call routines compiled with C18 and must also be
-;       callable from C18 code.  This forces the following differences
-;       from the normal (and more efficient) Embed Inc assembler build
-;       environment:
+;     C18COMP  -  A value of 1 indicates that this code must be compatible with
+;       modules compiled with the MPASM C18 compiler.  This code must be able to
+;       call routines compiled with C18 and must also be callable from C18 code.
+;       This forces the following differences from the normal (and more
+;       efficient) Embed Inc assembler build environment:
 ;
-;         1  -  FSR1 is reserved as the stack pointer and FSR2 as the data
-;           stack frame pointer.  The default Embed Inc conventions only
-;           reserve FSR2 as the data stack pointer and the application is
-;           free to use FSR0 and FSR1 in any way it wants.
+;         1  -  FSR1 is reserved as the stack pointer and FSR2 as the data stack
+;           frame pointer.  The default Embed Inc conventions only reserve FSR2
+;           as the data stack pointer and the application is free to use FSR0
+;           and FSR1 in any way it wants.
 ;
-;         2  -  The stack pointer always points to the next empty byte
-;           instead of the byte on the top of the stack.  In both cases
-;           the stack grows towards higher addresses.  Leaving the stack
-;           pointer pointing to the next byte after the top of stack is
-;           less efficient because a PUSH would require a postincrement
-;           and a POP a predecrement.  However the PIC 18 architecture
-;           has no predecrement, only preincrement.  This requires an
-;           extra instruction for each group of bytes popped.
+;         2  -  The stack pointer always points to the next empty byte instead
+;           of the byte on the top of the stack.  In both cases the stack grows
+;           towards higher addresses.  Leaving the stack pointer pointing to the
+;           next byte after the top of stack is less efficient because a PUSH
+;           would require a postincrement and a POP a predecrement.  However the
+;           PIC 18 architecture has no predecrement, only preincrement.  This
+;           requires an extra instruction for each group of bytes popped.
 ;
-;         3  -  Interrupt code advances the stack pointer by one before
-;           saving context.  The C18 convention is that the stack pointer
-;           points to the next free entry past the top of the stack (where
-;           the next pushed byte would go).  However, to deal with the lack
-;           of a predecrement addressing mode, the compiler emits code that
-;           performs a POP by decrementing the stack pointer then
-;           using it to read the top stack byte in two separate operations.
-;           An interrupt could occur between these two operations, so any
-;           interrupt routine must preserve the byte being pointed to by
-;           the stack pointer.  It does this by leaving one untouched byte
-;           on the stack before saving any context, then removing the
-;           unused byte before returning from the interrupt.
+;         3  -  Interrupt code advances the stack pointer by one before saving
+;           context.  The C18 convention is that the stack pointer points to the
+;           next free entry past the top of the stack (where the next pushed
+;           byte would go).  However, to deal with the lack of a predecrement
+;           addressing mode, the compiler emits code that performs a POP by
+;           decrementing the stack pointer then using it to read the top stack
+;           byte in two separate operations.  An interrupt could occur between
+;           these two operations, so any interrupt routine must preserve the
+;           byte being pointed to by the stack pointer.  It does this by leaving
+;           one untouched byte on the stack before saving any context, then
+;           removing the unused byte before returning from the interrupt.
 ;
-;       A value of 0 indicates this code need not be compatible with
-;       C18 code.  All other values are illegal.  If C18COMP does not
-;       exist, it will be created and set to 0 (defaulting to Embed Inc
-;       normal conventions).
+;       A value of 0 indicates this code need not be compatible with C18 code.
+;       All other values are illegal.  If C18COMP does not exist, it will be
+;       created and set to 0 (defaulting to Embed Inc normal conventions).
 ;
 ;     FSRSTACK  -  Indicate the number of the FSR to be used as the data stack
 ;       pointer.  This symbol is only used on processors that have multiple FSRs
@@ -173,47 +165,43 @@
 ;
 ;       On a enhanced PIC 16, FSRSTACK will default to 1.
 ;
-;     FSRSC1  -  The 0-2 number of the first FSR that can be used as a
-;       scratch pointer.  By convention, this FSR may be trashed by
-;       subroutines.  This is never the same FSR as the stack pointer.
+;     FSRSC1  -  The 0-2 number of the first FSR that can be used as a scratch
+;       pointer.  By convention, this FSR may be trashed by subroutines.  This
+;       is never the same FSR as the stack pointer.
 ;
-;     FSRSC2  -  The 0-2 number of the second FSR that can be used as a
-;       scratch pointer.  This FSR must be preserved by subroutines when
-;       FSRSC2_SAVE is 1.  This is never the same FSR as the stack pointer.
+;     FSRSC2  -  The 0-2 number of the second FSR that can be used as a scratch
+;       pointer.  This FSR must be preserved by subroutines when FSRSC2_SAVE is
+;       1.  This is never the same FSR as the stack pointer.
 ;
-;     FSRSC2_SAVE  -  Indicates whether the scratch FSR indicated by FSRSC2
-;       must be preserved by subroutines.  0 means it does not need to be
-;       preserved, and 1 means it does.
+;     FSRSC2_SAVE  -  Indicates whether the scratch FSR indicated by FSRSC2 must
+;       be preserved by subroutines.  0 means it does not need to be preserved,
+;       and 1 means it does.
 ;
-;     PROGADRB  -  Number of bytes required to store a full program
-;       memory address for this processor.  Only required for 18 family.
-;       The 18 family architecture allows for 21 bit program memory
-;       addresses, which require 3 bytes to store.  However many PICs
-;       of this family have 64Kb or less of program memory, requiring
-;       only 2 bytes to store.  Optimizations that avoid storing or
-;       otherwise manipulating the unused upper address byte on these
-;       PICs can be made when PROGADRB is 2 instead of 3.  (No PIC18
-;       currently has 256 bytes or less of program memory, but if that
-;       were the case PROGADRB would be 1 on those machines and
-;       manipulation of the upper two bytes could be optimized out).
+;     PROGADRB  -  Number of bytes required to store a full program memory
+;       address for this processor.  Only required for 18 family.  The 18 family
+;       architecture allows for 21 bit program memory addresses, which require 3
+;       bytes to store.  However many PICs of this family have 64Kb or less of
+;       program memory, requiring only 2 bytes to store.  Optimizations that
+;       avoid storing or otherwise manipulating the unused upper address byte on
+;       these PICs can be made when PROGADRB is 2 instead of 3.  (No PIC18
+;       currently has 256 bytes or less of program memory, but if that were the
+;       case PROGADRB would be 1 on those machines and manipulation of the upper
+;       two bytes could be optimized out).
 ;
-;       PROGADRB can also be artifically set lower on PICs with more
-;       than 64Kb of program memory if it is absolutely known that no
-;       program memory above 64Kb is used.  The default will be set
-;       according to the total program memory available.  Don't mess
-;       with the default unless you are absolutely sure you know
-;       what you're doing.
+;       PROGADRB can also be artifically set lower on PICs with more than 64Kb
+;       of program memory if it is absolutely known that no program memory above
+;       64Kb is used.  The default will be set according to the total program
+;       memory available.  Don't mess with the default unless you are absolutely
+;       sure you know what you're doing.
 ;
 ;       Automatically created and set to the default of 2 for enhanced PIC 16
 ;       (fam_16b) devices.
 ;
-;
-;     CREATE_FLAGS  -  Create the global FLAGS variable.  This is used
-;       by various library arithmetic routines to indicate information
-;       about the operation or result.  CREATE_FLAGS is initialized to
-;       1 in STD_DEF.INS.ASPIC so that FLAGS is created by default.
-;       CREATE_FLAGS can be set to 0 to save 1 RAM location by not
-;       creating the FLAGS variable.
+;     CREATE_FLAGS  -  Create the global FLAGS variable.  This is used by
+;       various library arithmetic routines to indicate information about the
+;       operation or result.  CREATE_FLAGS is initialized to 1 in
+;       STD_DEF.INS.ASPIC so that FLAGS is created by default.  CREATE_FLAGS can
+;       be set to 0 to save 1 RAM location by not creating the FLAGS variable.
 ;
 ;     CREATE_TEMPW  -  Create the TEMPW global variable in bank 0 when this
 ;       symbol is 1.  TEMPW will not be created when it is 0.  CREATE_TEMPW is
@@ -221,22 +209,22 @@
 ;       TEMPW is a local temporary save area for W used by some of the macros in
 ;       this file.
 ;
-;     USING_INTERRUPTS  -  Always TRUE (1) or FALSE (0).  The default is
-;       TRUE, meaning the code might be using interrupts.  In this case
-;       the INTR_ON and INTR_OFF macros actually emit code to turn
-;       interrupts on and off.  If interrupts are not in use, then a
-;       section of code that tries to temporarily turn off interrupts
-;       will have the effect of enabling interrupts at the end.  Setting
-;       this switch to FALSE prevents re-using code that temporarily
-;       disables interrupts when interrupts are not in use at all.
+;     USING_INTERRUPTS  -  Always TRUE (1) or FALSE (0).  The default is TRUE,
+;       meaning the code might be using interrupts.  In this case the INTR_ON
+;       and INTR_OFF macros actually emit code to turn interrupts on and off.
+;       If interrupts are not in use, then a section of code that tries to
+;       temporarily turn off interrupts will have the effect of enabling
+;       interrupts at the end.  Setting this switch to FALSE prevents re-using
+;       code that temporarily disables interrupts when interrupts are not in use
+;       at all.
 ;
 ;     DEBUG_ICD  -  Indicate debugging with a in-circuit debugger.  These have
-;       the annoying habit of skidding at breakpoints.  Some macros add NOPs
-;       to give the appearance of breakpoints and single stepping stopping
-;       as expected.
+;       the annoying habit of skidding at breakpoints.  Some macros add NOPs to
+;       give the appearance of breakpoints and single stepping stopping as
+;       expected.
 ;
-;     DEBUG  -  Being built for debugging, not production.  This is forced
-;       on when DEBUG_ICD is TRUE.
+;     DEBUG  -  Being built for debugging, not production.  This is forced on
+;       when DEBUG_ICD is TRUE.
 ;
 ;   Check for required constants and abort on error if any is missing.
 ;
@@ -324,8 +312,8 @@ w_trashed set    false       ;used by some macros to indicate W got trashed
 ;
 ;   Define JUMP adr
 ;
-;   This inline substitution macro expands to the opcode for doing a simple
-;   jump local to the module.
+;   This inline substitution macro expands to the opcode for doing a simple jump
+;   local to the module.
 ;
   if fam_18 || fam_16b
     if bra_bug
@@ -337,8 +325,8 @@ w_trashed set    false       ;used by some macros to indicate W got trashed
 #define jump goto
     endif
 ;
-;   Fix bug in some of the 18F include files where the INT2IP bit in
-;   INTCON3 is named INT2P instead.
+;   Fix bug in some of the 18F include files where the INT2IP bit in INTCON3 is
+;   named INT2P instead.
 ;
   ifdef intcon3              ;this part has INTCON3 register ?
     ifndef int2ip            ;INT2IP is not defined ?
@@ -407,26 +395,25 @@ fsrsc1   equ     1
 ;   General registers
 ;
 ;   Several registers are declared in global (not banked) memory that are
-;   intended to act like general registers of other processors.
-;   Subroutines are expected to preserve these registers except as
-;   they are explicitly used to pass return values as documented
-;   individually for each subroutine.  It is assumed that subroutines
-;   trash other state, such as W and FSR unless otherwise documented.
+;   intended to act like general registers of other processors.  Subroutines are
+;   expected to preserve these registers except as they are explicitly used to
+;   pass return values as documented individually for each subroutine.  It is
+;   assumed that subroutines trash other state, such as W and FSR unless
+;   otherwise documented.
 ;
-;   The general registers (REG0 - REGn) are guaranteed to be mapped to
-;   memory in that order.
+;   The general registers (REG0 - REGn) are guaranteed to be mapped to memory in
+;   that order.
 ;
 ;   The register addresses are declared here as constants so that their
-;   addresses are know at assembly time.  The registers are defined in
-;   module REGS.ASPIC.  The main routine must have an external reference
-;   to REGS to insure that the memory space for the registers is actually
-;   allocated.
+;   addresses are know at assembly time.  The registers are defined in module
+;   REGS.ASPIC.  The main routine must have an external reference to REGS to
+;   insure that the memory space for the registers is actually allocated.
 ;
-;   Create one REGn and REGFn symbol for each register.  The REGn symbols
-;   are the memory addresses of the registers.  The REGFn symbols are flags
-;   used to identify a set of registers.  Each REGFn symbol has one
-;   unique bit set.  These symbols can be ORed together to identify an
-;   arbitrary set of registers.
+;   Create one REGn and REGFn symbol for each register.  The REGn symbols are
+;   the memory addresses of the registers.  The REGFn symbols are flags used to
+;   identify a set of registers.  Each REGFn symbol has one unique bit set.
+;   These symbols can be ORed together to identify an arbitrary set of
+;   registers.
 ;
 tempasm1 set     0           ;init symbol number
   while tempasm1 < numregs
@@ -458,9 +445,9 @@ regfd    equ     b'1111' << 12
 
 regf_allregs equ ~(-1 << numregs) ;mask for all REG0-REGn general registers
 ;
-;   Create FLAGS register.  This register receives the result of compare
-;   and other operations.  It is always located immediately following the
-;   general registers.
+;   Create FLAGS register.  This register receives the result of compare and
+;   other operations.  It is always located immediately following the general
+;   registers.
 ;
   if create_flags
 flags    equ     regstart + numregs ;declare FLAGS register address
@@ -509,8 +496,8 @@ flag_ar  equ     flag_lt | flag_eq | flag_gt
 
     endif
 ;
-;   Macros for skipping the next instruction depending on some of the flags
-;   in FLAGS.
+;   Macros for skipping the next instruction depending on some of the flags in
+;   FLAGS.
 ;
   if create_flags
 
@@ -556,10 +543,10 @@ skip_nerr macro              ;skip on error flag bit not set
 
     endif
 ;
-;   Define the CONFIGnx constants that are the addresses of the
-;   configuration words for the 18 family.  These are listed in the
-;   manual and mentioned in the standard include file comments, but
-;   not defined in the include file for some strange reason.
+;   Define the CONFIGnx constants that are the addresses of the configuration
+;   words for the 18 family.  These are listed in the manual and mentioned in
+;   the standard include file comments, but not defined in the include file for
+;   some strange reason.
 ;
   if fam_18
 config_word_first equ h'300000' ;address of first configuration word
@@ -577,7 +564,7 @@ CONFIG#V(jj)H equ ii         ;define HIGH config word of this number
 ii       set     ii + 1      ;advance to next config word address
       endw                   ;back to do next pair of config words
     endif                    ;end of 18 family case
-;
+
 ;*******************************************************************************
 ;
 ;   General utility macros.
@@ -607,10 +594,10 @@ ii       set     ii + 1      ;advance to next config word address
 ;
 ;   Macro SET_TBLPTR adr
 ;
-;   Set the full TBLPTR to the indicated address.  This macro is only
-;   defined on machines that have TBLPTR.  PROGADRB must be defined
-;   correctly to indicate the number of bytes required to store a
-;   program memory address on this machine.
+;   Set the full TBLPTR to the indicated address.  This macro is only defined on
+;   machines that have TBLPTR.  PROGADRB must be defined correctly to indicate
+;   the number of bytes required to store a program memory address on this
+;   machine.
 ;
   ifdef tblptrl
 
@@ -658,8 +645,8 @@ addw_tblptr macro
 ;
 ;   Macro IREGS_DEFINE
 ;
-;   Define all the IREG0 - IREGn interrupt routine registers.  The number
-;   of these registers is set by the constant N_IREGS.
+;   Define all the IREG0 - IREGn interrupt routine registers.  The number of
+;   these registers is set by the constant N_IREGS.
 ;
 iregs_define macro
          local   ii
@@ -690,8 +677,7 @@ ii       set     ii + 1
 ;
 ;   Macro GETF <adrf>
 ;
-;   Move the contents of the file register ADRF into W.  The Z flag is
-;   trashed.
+;   Move the contents of the file register ADRF into W.  The Z flag is trashed.
 ;
 getf     macro   adrf
 
@@ -717,8 +703,8 @@ getf     macro   adrf
 ;
 ;   Macro GETFZ <adrf>
 ;
-;   Move the contents of the file register ADRF into W.  The Z flag is
-;   set according to the value moved.
+;   Move the contents of the file register ADRF into W.  The Z flag is set
+;   according to the value moved.
 ;
 getfz    macro   adrf
 
@@ -740,13 +726,13 @@ getfz    macro   adrf
 
          error   "GETFZ macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro TESTFZ <adrf>
 ;
-;   Set the Z flag according to the contents of the file register ADRF.
-;   W is preserved.
+;   Set the Z flag according to the contents of the file register ADRF.  W is
+;   preserved.
 ;
 testfz   macro   adrf
   if fam_16 || fam_16b       ;14 bit core
@@ -767,20 +753,20 @@ testfz   macro   adrf
 
          error   "TESTFZ macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro WAITCY NCY
 ;
-;   Generates code that does nothing for the next NCY cycles.  Note that this
-;   is not accurate for timing unless interrupts are disabled.  This macro
-;   generates no code if NCY is zero or less.  This macro causes no changes
-;   to status bits, banking, or other state other than some number of
-;   instructions are executed.  The number of instructions emitted is not
-;   guaranteed, only that they will take NCY instruction cycles to execute.
+;   Generates code that does nothing for the next NCY cycles.  Note that this is
+;   not accurate for timing unless interrupts are disabled.  This macro
+;   generates no code if NCY is zero or less.  This macro causes no changes to
+;   status bits, banking, or other state other than some number of instructions
+;   are executed.  The number of instructions emitted is not guaranteed, only
+;   that they will take NCY instruction cycles to execute.
 ;
-;   This macro replaces the old WAITNOP macro for most cases.  See the
-;   WAITNOP comments below for a discussion of this.
+;   This macro replaces the old WAITNOP macro for most cases.  See the WAITNOP
+;   comments below for a discussion of this.
 ;
 waitcy   macro   ncy
          local   n
@@ -817,27 +803,25 @@ n        set     n - 1
 ;
 ;   Macro WAITNOP NNOP
 ;
-;   This macro now causes an error so that all uses of it can be examined
-;   to determine the reason for its use, then replaced by the specific
-;   macro for that use.
+;   This macro now causes an error so that all uses of it can be examined to
+;   determine the reason for its use, then replaced by the specific macro for
+;   that use.
 ;
-;   WAITNOP originally just wrote the indicated number of sequential
-;   NOP instructions although it was intended for instruction timing.
-;   Some time later it was modified to use GOTO $+1 on PIC 16 and BRA $+2
-;   on PIC 18 to act as NOPs that took 2 cycles but only one instruction
-;   word.  The was beneficial for the intended use.
+;   WAITNOP originally just wrote the indicated number of sequential NOP
+;   instructions although it was intended for instruction timing.  Some time
+;   later it was modified to use GOTO $+1 on PIC 16 and BRA $+2 on PIC 18 to act
+;   as NOPs that took 2 cycles but only one instruction word.  The was
+;   beneficial for the intended use.
 ;
 ;   However, WAITNOP was also used to create a table of sequential NOP
-;   instructions that could be indexed into to exactly synchronize with
-;   a timer.  Using 2 cycle NOP instructions defeated this purpose and
-;   caused bugs.
+;   instructions that could be indexed into to exactly synchronize with a timer.
+;   Using 2 cycle NOP instructions defeated this purpose and caused bugs.
 ;
-;   Two separate macros now exist to serve the two purposes, WAITCY (above)
-;   and NNOPS (below).  WAITNOP now causes an assembly error so that
-;   the purpose can be examined and the appropriate replacement macro
-;   chosen.  Note that the newer WAITUS and WAITNS macros may be a
-;   better choice than WAITCY in some cases since they automatically
-;   adjust to the processor clock speed.
+;   Two separate macros now exist to serve the two purposes, WAITCY (above) and
+;   NNOPS (below).  WAITNOP now causes an assembly error so that the purpose can
+;   be examined and the appropriate replacement macro chosen.  Note that the
+;   newer WAITUS and WAITNS macros may be a better choice than WAITCY in some
+;   cases since they automatically adjust to the processor clock speed.
 ;
 waitnop  macro   nnop
          error   WAITNOP has been depricated. See comments in STD.INS.ASPIC.
@@ -847,13 +831,12 @@ waitnop  macro   nnop
 ;
 ;   Macro NNOPS nnop
 ;
-;   Write NNOP consecutive NOP instructions.  Nothing is done if NNOP
-;   is zero or negative.  The WAITCY macro should be used if the intent
-;   is to waste a specific number of instruction cycles, since WAITCY
-;   does that and possibly takes fewer instruction words.  Use NNOPS
-;   only when a number of consecutive NOP instructions are needed.  This
-;   could be the case, for example, when indexing into a list of NOPs
-;   to exactly synchronize to a timer value.
+;   Write NNOP consecutive NOP instructions.  Nothing is done if NNOP is zero or
+;   negative.  The WAITCY macro should be used if the intent is to waste a
+;   specific number of instruction cycles, since WAITCY does that and possibly
+;   takes fewer instruction words.  Use NNOPS only when a number of consecutive
+;   NOP instructions are needed.  This could be the case, for example, when
+;   indexing into a list of NOPs to exactly synchronize to a timer value.
 ;
 nnops    macro   nnop
          local   n
@@ -869,26 +852,26 @@ n        set     n - 1
 ;
 ;   Macro WAITNS ns, cy
 ;
-;   Generates the minimum necessary inline instructions to wait at least
-;   NS nanoseconds minus CY instruction cycles.  This macro is only meant
-;   for short delays since inline instructions are generated and the
-;   the processor is consumed executing them.  Timing is not accurate unless
-;   interrupts are disabled.
+;   Generates the minimum necessary inline instructions to wait at least NS
+;   nanoseconds minus CY instruction cycles.  This macro is only meant for short
+;   delays since inline instructions are generated and the the processor is
+;   consumed executing them.  Timing is not accurate unless interrupts are
+;   disabled.
 ;
 ;   The purpose of this macro is to allow for accurate timing between two
-;   instructions with other fixed instructions also between the two events
-;   and without having to know the instruction rate.  For example, if a
-;   minimum of 1uS is required between two instructions and 3 other instructions
-;   are always executed between the two outside this macro, then
+;   instructions with other fixed instructions also between the two events and
+;   without having to know the instruction rate.  For example, if a minimum of
+;   1 us is required between two instructions and 3 other instructions are
+;   always executed between the two outside this macro, then
 ;
 ;     WAITNS 1000, 4
 ;
-;   will add the minimum necessary wait.  Note that the CY parameter is 4
-;   and not 3 since there is 1 instruction cycle between consecutive
-;   instructions even with no additional instructions in between.
+;   will add the minimum necessary wait.  Note that the CY parameter is 4 and
+;   not 3 since there is 1 instruction cycle between consecutive instructions
+;   even with no additional instructions in between.
 ;
-;   This macro produces no code if the minimum wait time is already met
-;   by the CY instructions.
+;   This macro produces no code if the minimum wait time is already met by the
+;   CY instructions.
 ;
 waitns   macro   ns, cy
          local   waitns_ii
@@ -901,7 +884,7 @@ waitns_ii set    waitns_ii - (cy) ;subtract off instructions already waited
     endif
          waitcy  waitns_ii   ;add the wait instructions
          endm
-;
+
 ;********************
 ;
 ;   Macro WAITUS us, cy
@@ -917,9 +900,9 @@ waitus   macro   us, cy
 ;
 ;   Macro SKIP_WLE
 ;
-;   Skip the next instruction if W was less than or equal to the value
-;   it was subtracted from.  This assumes that the carry flag has been
-;   preserved from the last SUBWF or SUBLW instruction.
+;   Skip the next instruction if W was less than or equal to the value it was
+;   subtracted from.  This assumes that the carry flag has been preserved from
+;   the last SUBWF or SUBLW instruction.
 ;
 skip_wle macro
 
@@ -940,9 +923,9 @@ skip_wle macro
 ;
 ;   Macro SKIP_WGT
 ;
-;   Skip the next instruction if W was greater than the value
-;   it was subtracted from.  This assumes that the carry flag has been
-;   preserved from the last SUBWF or SUBLW instruction.
+;   Skip the next instruction if W was greater than the value it was subtracted
+;   from.  This assumes that the carry flag has been preserved from the last
+;   SUBWF or SUBLW instruction.
 ;
 skip_wgt macro
 
@@ -1089,9 +1072,9 @@ skip_nborr macro
 ;
 ;   Macro JMP_WEQ adr
 ;
-;   Jump to ADR if W was equal to the value it was subtracted from.
-;   This assumes the Z flag has been preserved from the last SUBWF or
-;   SUBLW instruction.
+;   Jump to ADR if W was equal to the value it was subtracted from.  This
+;   assumes the Z flag has been preserved from the last SUBWF or SUBLW
+;   instruction.
 ;
 jmp_weq  macro   adr
 
@@ -1107,9 +1090,9 @@ jmp_weq  macro   adr
 ;
 ;   Macro JMP_WNE adr
 ;
-;   Jump to ADR if W was not equal to the value it was subtracted from.
-;   This assumes the Z flag has been preserved from the last SUBWF or
-;   SUBLW instruction.
+;   Jump to ADR if W was not equal to the value it was subtracted from.  This
+;   assumes the Z flag has been preserved from the last SUBWF or SUBLW
+;   instruction.
 ;
 jmp_wne  macro   adr
 
@@ -1125,9 +1108,9 @@ jmp_wne  macro   adr
 ;
 ;   Macro JMP_WLE adr
 ;
-;   Jump to ADR if W was less than or equal to the value it was
-;   subtracted from.  This assumes the C flag has been preserved from the
-;   last SUBWF or SUBLW instruction.
+;   Jump to ADR if W was less than or equal to the value it was subtracted from.
+;   This assumes the C flag has been preserved from the last SUBWF or SUBLW
+;   instruction.
 ;
 jmp_wle  macro   adr
 
@@ -1143,9 +1126,9 @@ jmp_wle  macro   adr
 ;
 ;   Macro JMP_WGT adr
 ;
-;   Jump to ADR if W was greater than to the value it was subtracted
-;   from.  This assumes the C flag has been preserved from the last SUBWF
-;   or SUBLW instruction.
+;   Jump to ADR if W was greater than to the value it was subtracted from.  This
+;   assumes the C flag has been preserved from the last SUBWF or SUBLW
+;   instruction.
 ;
 jmp_wgt  macro   adr
 
@@ -1250,16 +1233,15 @@ jmp_ncarr macro  adr
 ;   Macro INTR_OFF
 ;
 ;   Globally disable interrupts without changing which interrupts are
-;   individually disabled.  This macro together with INTR_ON can be used
-;   around small sections of code that need to run with interrupts off.
+;   individually disabled.  This macro together with INTR_ON can be used around
+;   small sections of code that need to run with interrupts off.
 ;
-;   This macro works around the interrupt off bug on some processors where
-;   an interrupt can occur immediately after interrupts are disabled.  This
-;   causes interrupts to be re-enabled by the RETFIE in the interrupt service
-;   routine.  The work around is to verify that interrupts were indeed
-;   disabled on the next instruction and loop back if they weren't.
-;   The assembler switch INTR_OFF_BUG is set to TRUE if this processor
-;   has the bug.
+;   This macro works around the interrupt off bug on some processors where an
+;   interrupt can occur immediately after interrupts are disabled.  This causes
+;   interrupts to be re-enabled by the RETFIE in the interrupt service routine.
+;   The work around is to verify that interrupts were indeed disabled on the
+;   next instruction and loop back if they weren't.  The assembler switch
+;   INTR_OFF_BUG is set to TRUE if this processor has the bug.
 ;
 intr_off macro
   if ! using_interrupts
@@ -1295,14 +1277,14 @@ retry
 
          error   "INTR_OFF macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro INTR_ON
 ;
 ;   Globally enable interrupts without changing which interrupts are
-;   individually enabled.  This macro together with INTR_OFF can be used
-;   around small sections of code that need to run with interrupts off.
+;   individually enabled.  This macro together with INTR_OFF can be used around
+;   small sections of code that need to run with interrupts off.
 ;
 intr_on  macro
   if ! using_interrupts
@@ -1326,18 +1308,18 @@ intr_on  macro
 
          error   "INTR_ON macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro INTR_OFF_LOW
 ;
 ;   Disable low priority interrupts.
 ;
-;   Operation is undefined unless separate high and low interrupt
-;   priorities are enabled.  This is not checked.
+;   Operation is undefined unless separate high and low interrupt priorities are
+;   enabled.  This is not checked.
 ;
-;   It is an error to call this macro on a processor that is not
-;   capable of high and low priority interrupts.
+;   It is an error to call this macro on a processor that is not capable of high
+;   and low priority interrupts.
 ;
 intr_off_low macro
   if ! using_interrupts
@@ -1358,11 +1340,11 @@ intr_off_low macro
 ;
 ;   Re-enable low priority interrupts.
 ;
-;   Operation is undefined unless separate high and low interrupt
-;   priorities are enabled.  This is not checked.
+;   Operation is undefined unless separate high and low interrupt priorities are
+;   enabled.  This is not checked.
 ;
-;   It is an error to call this macro on a processor that is not
-;   capable of high and low priority interrupts.
+;   It is an error to call this macro on a processor that is not capable of high
+;   and low priority interrupts.
 ;
 intr_on_low macro
   if ! using_interrupts
@@ -1381,8 +1363,8 @@ intr_on_low macro
 ;
 ;   Macro DTWORD val16
 ;
-;   Define a 16 bit value in a table.  The low byte is stored first, the
-;   high byte second.
+;   Define a 16 bit value in a table.  The low byte is stored first, the high
+;   byte second.
 ;
 dtword   macro   val16
 
@@ -1399,13 +1381,13 @@ dtword   macro   val16
 
          error   "DTWORD macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro DT32I val32
 ;
-;   Define a 32 bit integer value in a table.  The low byte is stored first,
-;   the high byte last.
+;   Define a 32 bit integer value in a table.  The low byte is stored first, the
+;   high byte last.
 ;
 dt32i    macro   val32
 
@@ -1425,18 +1407,18 @@ dt32i    macro   val32
 
          error   "DT32I macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro LOADK32 <adr>, <32 bit constant>
 ;
-;   Load the 32 bit constant into the memory locations starting at ADR.
-;   ADR is the  address of the least significant byte.  The remaining
-;   bytes follow at increasing memory addresses.  The direct register
-;   bank must already be set for access to the four data bytes.
+;   Load the 32 bit constant into the memory locations starting at ADR.  ADR is
+;   the address of the least significant byte.  The remaining bytes follow at
+;   increasing memory addresses.  The direct register bank must already be set
+;   for access to the four data bytes.
 ;
-;   This macro uses CLRF instructions when possible and avoids re-loading
-;   W with the same value.
+;   This macro uses CLRF instructions when possible and avoids re-loading W with
+;   the same value.
 ;
 loadk32  macro   adr, kk
          local   currw, newval, ii
@@ -1461,18 +1443,18 @@ currw    set     newval      ;remember how W is loaded
 ii       set     ii + 1      ;make offset for next byte
     endw                     ;back to do the next byte
          endm
-;
+
 ;********************
 ;
 ;   Macro LOADK24 <adr>, <24 bit constant>
 ;
-;   Load the 24 bit constant into the memory locations starting at ADR.
-;   ADR is the  address of the least significant byte.  The remaining
-;   bytes follow at increasing memory addresses.  The direct register
-;   bank must already be set for access to the data bytes at ADR.
+;   Load the 24 bit constant into the memory locations starting at ADR.  ADR is
+;   the address of the least significant byte.  The remaining bytes follow at
+;   increasing memory addresses.  The direct register bank must already be set
+;   for access to the data bytes at ADR.
 ;
-;   This macro uses CLRF instructions when possible and avoids re-loading
-;   W with the same value.
+;   This macro uses CLRF instructions when possible and avoids re-loading W with
+;   the same value.
 ;
 loadk24  macro   adr, kk
          local   currw, newval, ii
@@ -1493,18 +1475,18 @@ currw    set     newval      ;remember how W is loaded
 ii       set     ii + 1      ;make offset for next byte
     endw                     ;back to do the next byte
          endm
-;
+
 ;********************
 ;
 ;   Macro LOADK16 <adr>, <16 bit constant>
 ;
-;   Load the 16 bit constant into the memory locations starting at ADR.
-;   ADR is the  address of the least significant byte.  The remaining
-;   bytes follow at increasing memory addresses.  The direct register
-;   bank must already be set for access to the data bytes at ADR.
+;   Load the 16 bit constant into the memory locations starting at ADR.  ADR is
+;   the  address of the least significant byte.  The remaining bytes follow at
+;   increasing memory addresses.  The direct register bank must already be set
+;   for access to the data bytes at ADR.
 ;
-;   This macro uses CLRF instructions when possible and avoids re-loading
-;   W with the same value.
+;   This macro uses CLRF instructions when possible and avoids re-loading W
+;   with the same value.
 ;
 loadk16  macro   adr, kk
          local   currw, newval, ii
@@ -1530,8 +1512,8 @@ ii       set     ii + 1      ;make offset for next byte
 ;
 ;   Macro LOADK8 <adr>, <8 bit constant>
 ;
-;   Load the 8 bit constant into the memory location at ADR.  The direct register
-;   bank must already be set for access ADR.
+;   Load the 8 bit constant into the memory location at ADR.  The direct
+;   register bank must already be set for access ADR.
 ;
 ;   This macro uses CLRF and other instructions to load the value into ADR when
 ;   possible.
@@ -1558,10 +1540,10 @@ newval   set     low (kk)    ;make the 8 bit value to store in NEWVAL
 ;
 ;   Macro LOADADR16 dest, adr
 ;
-;   Load the 16 bit address ADR into the two bytes starting at DEST.  The direct register
-;   bank state must be set up for access to DEST.  The low byte will be stored at DEST and
-;   the high byte at DEST+1.  ADR may be a label or resolvable relocatable expressions
-;   that is not known at assembly time.
+;   Load the 16 bit address ADR into the two bytes starting at DEST.  The direct
+;   register bank state must be set up for access to DEST.  The low byte will be
+;   stored at DEST and the high byte at DEST+1.  ADR may be a label or
+;   resolvable relocatable expressions that is not known at assembly time.
 ;
 loadadr16 macro  dest, adr
          movlw   low (adr)
@@ -1569,15 +1551,15 @@ loadadr16 macro  dest, adr
          movlw   high (adr)
          movwf   (dest)+1
          endm
-;
+
 ;********************
 ;
 ;   Macro LOADADR24 dest, adr
 ;
-;   Load the 24 bit address ADR into the three bytes starting at DEST.  The direct register
-;   bank state must be set up for access to DEST.  The low byte will be stored at DEST.
-;   ADR may be a label or resolvable relocatable expressions that is not known at assembly
-;   time.
+;   Load the 24 bit address ADR into the three bytes starting at DEST.  The
+;   direct register bank state must be set up for access to DEST.  The low byte
+;   will be stored at DEST.  ADR may be a label or resolvable relocatable
+;   expressions that is not known at assembly time.
 ;
 loadadr24 macro  dest, adr
          movlw   low (adr)
@@ -1587,17 +1569,16 @@ loadadr24 macro  dest, adr
          movlw   upper (adr)
          movwf   (dest)+2
          endm
-;
+
 ;********************
 ;
 ;   Macro COPYN <dest>, <src>, <n>
 ;
-;   Copy the N bytes starting at SRC into the N bytes starting at DEST.
-;   The direct register bank must be set for access to all bytes of SRC
-;   and DEST.  The results are undefined if SRC and DEST overlap.  The
-;   copy instructions are written successively instead of a runtime
-;   loop.  This macros is therefore intended for copying "short" values
-;   only.
+;   Copy the N bytes starting at SRC into the N bytes starting at DEST.  The
+;   direct register bank must be set for access to all bytes of SRC and DEST.
+;   The results are undefined if SRC and DEST overlap.  The copy instructions
+;   are written successively instead of a runtime loop.  This macros is
+;   therefore intended for copying "short" values only.
 ;
 copyn    macro   dest, src, n
          local   ii, didit
@@ -1628,51 +1609,51 @@ didit    set     true
 ii       set     ii + 1      ;increment byte offset for next iteration
     endw
          endm
-;
+
 ;********************
 ;
 ;   Macro COPY32 <dest>, <src>
 ;
-;   Copy the 32 bit value at SRC into DEST.  The direct register bank
-;   must be set for access to all bytes of SRC and DEST.  The results
-;   are undefined if SRC and DEST overlap.
+;   Copy the 32 bit value at SRC into DEST.  The direct register bank must be
+;   set for access to all bytes of SRC and DEST.  The results are undefined if
+;   SRC and DEST overlap.
 ;
 copy32   macro   dest, src
          copyn   dest, src, 4
          endm
-;
+
 ;********************
 ;
 ;   Macro COPY24 <dest>, <src>
 ;
-;   Copy the 24 bit value at SRC into DEST.  The direct register bank
-;   must be set for access to all bytes of SRC and DEST.  The results
-;   are undefined if SRC and DEST overlap.
+;   Copy the 24 bit value at SRC into DEST.  The direct register bank must be
+;   set for access to all bytes of SRC and DEST.  The results are undefined if
+;   SRC and DEST overlap.
 ;
 copy24   macro   dest, src
          copyn   dest, src, 3
          endm
-;
+
 ;********************
 ;
 ;   Macro COPY16 <dest>, <src>
 ;
-;   Copy the 16 bit value at SRC into DEST.  The direct register bank
-;   must be set for access to all bytes of SRC and DEST.  The results
-;   are undefined if SRC and DEST overlap.
+;   Copy the 16 bit value at SRC into DEST.  The direct register bank must be
+;   set for access to all bytes of SRC and DEST.  The results are undefined if
+;   SRC and DEST overlap.
 ;
 copy16   macro   dest, src
          copyn   dest, src, 2
          endm
-;
+
 ;********************
 ;
 ;   Macro SHIFT32RL1 <adr>
 ;
 ;   Perform a logical right shift of 1 bit on a 32 bit value.  ADR is the
-;   address of the least significant byte.  The remaining bytes follow
-;   at increasing memory addresses.  The direct register bank must already
-;   be set for access to the four data bytes.
+;   address of the least significant byte.  The remaining bytes follow at
+;   increasing memory addresses.  The direct register bank must already be set
+;   for access to the four data bytes.
 ;
 shift32rl1 macro adr
 
@@ -1719,9 +1700,9 @@ shift32rl1 macro adr
 ;   Macro SHIFT32RA1 <adr>
 ;
 ;   Perform an arithmetic right shift of 1 bit on a 32 bit value.  ADR is the
-;   address of the least significant byte.  The remaining bytes follow
-;   at increasing memory addresses.  The direct register bank must already
-;   be set for access to the four data bytes.
+;   address of the least significant byte.  The remaining bytes follow at
+;   increasing memory addresses.  The direct register bank must already be set
+;   for access to the four data bytes.
 ;
 ;   W is trashed.
 ;
@@ -1764,15 +1745,15 @@ shift32ra1 macro adr
 
          error   "SHIFT32RA1 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro SHIFT32L1 <adr>
 ;
-;   Perform a left shift of 1 bit on a 32 bit value.  ADR is the
-;   address of the least significant byte.  The remaining bytes follow
-;   at increasing memory addresses.  The direct register bank must already
-;   be set for access to the four data bytes.
+;   Perform a left shift of 1 bit on a 32 bit value.  ADR is the address of the
+;   least significant byte.  The remaining bytes follow at increasing memory
+;   addresses.  The direct register bank must already be set for access to the
+;   four data bytes.
 ;
 shift32l1 macro  adr
 
@@ -1813,15 +1794,15 @@ shift32l1 macro  adr
 
          error   "SHIFT32L1 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro ADD32 <dest>, <src>, <temp>
 ;
-;   Add the 32 bit source value into the 32 bit destination value.  TEMP
-;   will be used for temporary storage, and will be trashed.  The 32 bit
-;   values are stored with the low byte first.  The current direct access
-;   page must be set for access to all state.
+;   Add the 32 bit source value into the 32 bit destination value.  TEMP will be
+;   used for temporary storage, and will be trashed.  The 32 bit values are
+;   stored with the low byte first.  The current direct access page must be set
+;   for access to all state.
 ;
 add32    macro   dest, src, temp
 
@@ -1921,15 +1902,15 @@ add32    macro   dest, src, temp
 
          error   "ADD32 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro ADD24 <dest>, <src>, <temp>
 ;
-;   Add the 24 bit source value into the 24 bit destination value.  TEMP
-;   will be used for temporary storage, and will be trashed.  The 24 bit
-;   values are stored with the low byte first.  The current direct access
-;   page must be set for access to all state.
+;   Add the 24 bit source value into the 24 bit destination value.  TEMP will be
+;   used for temporary storage, and will be trashed.  The 24 bit values are
+;   stored with the low byte first.  The current direct access page must be set
+;   for access to all state.
 ;
 add24    macro   dest, src, temp
 
@@ -2010,14 +1991,14 @@ add24    macro   dest, src, temp
 
          error   "ADD24 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro ADD16 <dest>, <src>
 ;
-;   Add the 16 bit source value into the 16 bit destination value.  The
-;   16 bit values are stored with the low byte first.  The current direct
-;   access page must be set for access to all state.
+;   Add the 16 bit source value into the 16 bit destination value.  The 16 bit
+;   values are stored with the low byte first.  The current direct access page
+;   must be set for access to all state.
 ;
 add16    macro   dest, src
 
@@ -2077,16 +2058,15 @@ add16    macro   dest, src
 
          error   "ADD16 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro SUB32 <dest>, <src>, <temp>
 ;
-;   Subtract the 32 bit source value from the 32 bit destination value
-;   and put the result into the destination.  TEMP will be used for temporary
-;   storage, and will be trashed.  The 32 bit values are stored with the
-;   low byte first.  The current direct access page must be set for access
-;   to all state.
+;   Subtract the 32 bit source value from the 32 bit destination value and put
+;   the result into the destination.  TEMP will be used for temporary storage,
+;   and will be trashed.  The 32 bit values are stored with the low byte first.
+;   The current direct access page must be set for access to all state.
 ;
 sub32    macro   dest, src, temp
 
@@ -2186,15 +2166,15 @@ sub32    macro   dest, src, temp
 
          error   "SUB32 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro SUB24 <dest>, <src>
 ;
-;   Subtract the 24 bit source value from the 24 bit destination value
-;   and put the result into the destination.  The 24 bit values are stored
-;   with the low byte first.  The current direct access page must be set
-;   for access to all state.
+;   Subtract the 24 bit source value from the 24 bit destination value and put
+;   the result into the destination.  The 24 bit values are stored with the low
+;   byte first.  The current direct access page must be set for access to all
+;   state.
 ;
 sub24    macro   dest, src
 
@@ -2277,15 +2257,15 @@ sub24    macro   dest, src
 
          error   "SUB24 macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro SUB16 <dest>, <src>
 ;
-;   Subtract the 16 bit source value from the 16 bit destination value
-;   and put the result into the destination.  The 16 bit values are
-;   stored with the low byte first.  The current direct access page must
-;   be set for access to all state.
+;   Subtract the 16 bit source value from the 16 bit destination value and put
+;   the result into the destination.  The 16 bit values are stored with the low
+;   byte first.  The current direct access page must be set for access to all
+;   state.
 ;
 sub16    macro   dest, src
 
@@ -2350,10 +2330,10 @@ sub16    macro   dest, src
 ;
 ;   Macro NEGATE <dest>, <n>
 ;
-;   Negate the twos complement value starting at address DEST.  DEST is
-;   N bytes long and is stored with the least significant byte first.
-;   N must be greater than zero, and all bytes of DEST must be accessible
-;   with the current direct register bank selection.
+;   Negate the twos complement value starting at address DEST.  DEST is N bytes
+;   long and is stored with the least significant byte first.  N must be greater
+;   than zero, and all bytes of DEST must be accessible with the current direct
+;   register bank selection.
 ;
 negate   macro   dest, n
          local   ii
@@ -2381,14 +2361,14 @@ ii       set     ii + 1      ;make byte offset for next loop
 ;   Macro FP24 <name>
 ;
 ;   Declare memory for a 24 bit floating point number.  The first (least
-;   significant) byte will have the label NAME.  This macro simply reserves
-;   3 bytes, documents that these bytes are intended to be one floating
-;   point value.
+;   significant) byte will have the label NAME.  This macro simply reserves 3
+;   bytes, but documents that these bytes are intended to be one floating point
+;   value.
 ;
 fp24     macro   name
 name     res     3           ;least to most significant byte order
          endm
-;
+
 ;********************
 ;
 ;   Macro FP24NEG <dest>
@@ -2499,8 +2479,8 @@ fp24move macro   src, dest
 ;   1.3456789A, which has a decimal value of about 1.204444.  The mantissa value
 ;   is therefore always from 1 up to but not including 2.
 ;
-;   The overal floating point value is the mantissa value times the power of
-;   2 indicated by the exponent, and the sign indicated by the high bit of the
+;   The overal floating point value is the mantissa value times the power of 2
+;   indicated by the exponent, and the sign indicated by the high bit of the
 ;   exponent word.
 ;
 ;   The special case of 0 is represented by all 48 bits 0.
@@ -2573,15 +2553,15 @@ fp24move macro   src, dest
 ;   Select which UART will be accessed when UART registers and other symbols
 ;   without a qualifier are used.
 ;
-;   For example, on machines with two UARTs, there is no TXREG, but TXREG1
-;   and TXREG2 instead.  This macro would define TXREG to reference whichever
-;   is selected by the N argument.
+;   For example, on machines with two UARTs, there is no TXREG, but TXREG1 and
+;   TXREG2 instead.  This macro would define TXREG to reference whichever is
+;   selected by the N argument.
 ;
-;   This macro allows code to be written that uses generic symbols, but that
-;   can be reused to drive all UARTs on machines that have multiple UARTs.
+;   This macro allows code to be written that uses generic symbols, but that can
+;   be reused to drive all UARTs on machines that have multiple UARTs.
 ;
-;   Specifically, the following symbols will exist when the processor has
-;   the associated features:
+;   Specifically, the following symbols will exist when the processor has the
+;   associated features:
 ;
 ;     RCSTA  -  Receive status register
 ;
@@ -2634,9 +2614,9 @@ uart_select macro n
 ;
 ;***
 ;
-;   Handle first and only UART is being selected.  In this case the
-;   normal symbols are already defined in the include file.  Only the
-;   special symbols relating to the interrupt bits will be defined.
+;   Handle first and only UART is being selected.  In this case the normal
+;   symbols are already defined in the include file.  Only the special symbols
+;   relating to the interrupt bits will be defined.
 ;
   if n == 1
 
@@ -2849,57 +2829,56 @@ rcip_bit set     rc2ip
 
          error   "Selected UART does not exist or not implemented in UART_SELECT."
          endm
-;
+
 ;********************
 ;
 ;   Make sure unqualified UART symbols exist for the first or only UART.
 ;
          uart_select 1       ;select first UART, if any present
-;
+
 ;********************
 ;
 ;   Macro UART_BAUD <baud>
 ;
-;   This macro sets assembler variables to indicate the best baud rate
-;   generator configuration for the USART in asynchronous mode, given the
-;   desired baud rate and the oscillator frequency.  No code is generated.
-;   The following assembler variables are set:
+;   This macro sets assembler variables to indicate the best baud rate generator
+;   configuration for the USART in asynchronous mode, given the desired baud
+;   rate and the oscillator frequency.  No code is generated.  The following
+;   assembler variables are set:
 ;
-;     VAL_SPBRG  -  Value for the SPBRG baud rate generator register.
-;       For UARTs with 16 bit baud rate generators this will be the
-;       full 16 bit value.  The low byte is then intended for SPBRG,
-;       and the high byte for SPBRGH.
+;     VAL_SPBRG  -  Value for the SPBRG baud rate generator register.  For UARTs
+;       with 16 bit baud rate generators this will be the full 16 bit value.
+;       The low byte is then intended for SPBRG, and the high byte for SPBRGH.
 ;
 ;     BAUD_REAL  -  Real (not desired) baud rate resulting from the
 ;       selected settings.
 ;
-;     VAL_TXSTA  -  Value for the TXSTA register.  In addition to
-;       selecting the proper baud rate generator configuration, this
-;       value also selects the following:
+;     VAL_TXSTA  -  Value for the TXSTA register.  In addition to selecting the
+;       proper baud rate generator configuration, this value also selects the
+;       following:
 ;
 ;       Asynchronous mode
 ;       8 bits per character
 ;       Transmitter enabled
 ;
-;     VAL_RCSTA  -  Value for the RCSTA register.  The value will
-;       select the following setup:
+;     VAL_RCSTA  -  Value for the RCSTA register.  The value will select the
+;       following setup:
 ;
 ;       Serial port enabled
 ;       8 bits per character
 ;       Reception enabled
 ;       Address detection disabled
 ;
-;     VAL_BAUDCTL  -  Value for the BAUDCTL register for those processors
-;       that have this.  This register is part of the enhanced USART of
-;       parts like the 18F1320.
+;     VAL_BAUDCTL  -  Value for the BAUDCTL register for those processors that
+;       have this.  This register is part of the enhanced USART of parts like
+;       the 18F1320.
 ;
-;     VAL_BAUDCON  -  Value for the BAUDCON register for those processors
-;       that have this.
+;     VAL_BAUDCON  -  Value for the BAUDCON register for those processors that
+;       have this.
 ;
-;   This macro produces an assembly time warning if the closest available
-;   baud rate is more then 2.9% from the desired baud rate (off by 25% of
-;   a bit time in the middle of the last bit).  It produces an assembly
-;   error if the baud rate error is 5.8% or higher.
+;   This macro produces an assembly time warning if the closest available baud
+;   rate is more then 2.9% from the desired baud rate (off by 25% of a bit time
+;   in the middle of the last bit).  It produces an assembly error if the baud
+;   rate error is 5.8% or higher.
 ;
 uart_baud macro  baud
          local   err         ;baud rate error in parts per 1000
@@ -2970,7 +2949,7 @@ err      set     -err        ;make absolute value of error
       endif
          exitm
     endif                    ;end of 18F1320 type advanced USART
-;
+
 ;**********
 ;
 ;   Assume normal 16 or 17 family USART.
@@ -3004,8 +2983,8 @@ val_spbrg set    freq_osc * 16 / baud - 256 ;find divider value, 8 fraction bits
 val_spbrg set    (val_spbrg + 128) >> 8 ;round and scale to final SPBRG value
 baud_real set    freq_osc / (16 * (val_spbrg + 1)) ;find actual selected baud rate
 ;
-;   Switch to low speed mode if the baud rate generator value would require
-;   more than 8 bits to represent, or this chip has no high speed mode.
+;   Switch to low speed mode if the baud rate generator value would require more
+;   than 8 bits to represent, or this chip has no high speed mode.
 ;
   if (val_spbrg > 255) || fam_17 ;too slow for high speed mode or no HS ?
     if ! fam_17
@@ -3030,7 +3009,7 @@ err      set     -err        ;make absolute value of error
          messg   "WARNING: Baud rate error exceeds 2.9%"
     endif
          endm
-;
+
 ;********************
 ;
 ;   Macro UART_SETUP
@@ -3080,9 +3059,9 @@ uart_setup macro
 ;
 ;   Macro SETREG val, reg
 ;
-;   Set the register REG to the value VAL.  Both REG and VAL must be
-;   constants.  The instructions are optimized.  For example, CLRF is
-;   used if the value is zero.
+;   Set the register REG to the value VAL.  Both REG and VAL must be constants.
+;   The instructions are optimized.  For example, CLRF is used if the value is
+;   zero.
 ;
 setreg   macro   val, reg
          dbankif (reg)
@@ -3107,17 +3086,17 @@ setreg   macro   val, reg
 ;   Update timer 0 so that it next wraps CY cycles from the previous wrap.  This
 ;   can be useful in a timer 0 interrupt routine to set the exact number of
 ;   cycles until the next timer 0 interrupt.  Timer 0 is assumed to be running
-;   from the instruction clock.  The appropriate value is added into timer 0,
-;   so this macro does not need to be invoked a fixed delay after the last
-;   timer 0 wrap.  CY must be a constant.
+;   from the instruction clock.  The appropriate value is added into timer 0, so
+;   this macro does not need to be invoked a fixed delay after the last timer 0
+;   wrap.  CY must be a constant.
 ;
 ;   The timer sets its interrupt flag when counting from 255, which wraps back
 ;   to 0.  If left alone, the timer therefore has a period of 256 instruction
 ;   cycles.  When adding a value into the timer, the increment is lost during
 ;   the add instruction, and the timer is not incremented for two additional
 ;   cycles when the TMR0 register is written to.  This effectively adds 3 more
-;   cycles to the timer 0 wrap period.  These additional cycles are taken
-;   into account in computing the value to add to TMR0.
+;   cycles to the timer 0 wrap period.  These additional cycles are taken into
+;   account in computing the value to add to TMR0.
 ;
 timer0_per macro cy
          dbankif tmr0
@@ -3389,7 +3368,6 @@ tmr2_pos set     tmr2_pos - 1 ;advance to next postscaler value to try
          error   "Requested timer 2 period can not be achieved in TIMER2_CYCLES."
          endm
 
-
 ;********************
 ;
 ;   Macro TIMER2_USEC usec
@@ -3416,13 +3394,13 @@ ninstr   set     ((freq_inst / 16) * usec) / 62500 ;instructions in period
 ;
 ;   Macro TIMER2_SETUP
 ;
-;   Set up timer 2 to periodically set the timer 2 interrupt flag.
-;   This macro only sets up the timer hardware and initializes the flag
-;   to reset.  It does not enable the timer 2 interrupt.
+;   Set up timer 2 to periodically set the timer 2 interrupt flag.  This macro
+;   only sets up the timer hardware and initializes the flag to reset.  It does
+;   not enable the timer 2 interrupt.
 ;
-;   Timer 2 divides the instruction clock by a prescaler, period, and
-;   postscaler to make the interrupt period.  The following assembler
-;   variables must be previously set to define the timer 2 divider chain:
+;   Timer 2 divides the instruction clock by a prescaler, period, and postscaler
+;   to make the interrupt period.  The following assembler variables must be
+;   previously set to define the timer 2 divider chain:
 ;
 ;     TMR2_PRE  -  timer 2 prescaler value: 1, 4, or 16
 ;
@@ -3430,9 +3408,9 @@ ninstr   set     ((freq_inst / 16) * usec) / 62500 ;instructions in period
 ;
 ;     TMR2_POS  -  timer 2 postscaler value: 1 - 16
 ;
-;   Note that the TIMER2_USEC macro can be used to compute these values
-;   given a desired interrupt period.  It is an error if any of these
-;   assembler variables don't exist or are set to invalid values.
+;   Note that the TIMER2_USEC macro can be used to compute these values given a
+;   desired interrupt period.  It is an error if any of these assembler
+;   variables don't exist or are set to invalid values.
 ;
 timer2_setup macro
          local   t2con_val
@@ -3470,8 +3448,8 @@ timer2_setup macro
          exitm
     endif
 ;
-;   All configuration value are within range.  Now set up the timer 2
-;   state and the associated interrupt.
+;   All configuration value are within range.  Now set up the timer 2 state and
+;   the associated interrupt.
 ;
          dbankif pr2
          movlw   tmr2_per - 1 ;set the period register
@@ -3636,16 +3614,15 @@ ii       set     ii - 1
 ;
 ;   I/O bits and ports handling.
 ;
-;   Create aliases for the data direction registers of the 17C family.
-;   Names will be created called TRISp to be compatible with the 16C
-;   naming convention.
+;   Create aliases for the data direction registers of the 17C family.  Names
+;   will be created called TRISp to be compatible with the 16C naming
+;   convention.
 ;
-;   Create the aliases PORTA and TRISA on processors that have a single
-;   port called GPIO and an associated TRIS register called TRISIO.
-;   All the subsequent port handling code assumes that ports and their
-;   tristate registers are called PORTx and TRISx, with "X" starting at
-;   "A" for the first and continuing with consecutive letters for any
-;   additional ports.
+;   Create the aliases PORTA and TRISA on processors that have a single port
+;   called GPIO and an associated TRIS register called TRISIO.  All the
+;   subsequent port handling code assumes that ports and their tristate
+;   registers are called PORTx and TRISx, with "X" starting at "A" for the
+;   first and continuing with consecutive letters for any additional ports.
 ;
   ifdef gpio
 porta    equ     gpio
@@ -3717,17 +3694,16 @@ pullups_port[chars c] equ 0
 ;   Bank and page switching.
 ;
 ;   The assembler variables CURRIB and CURRDB are used to keep track of the
-;   current indirect and direct register bank settings.  Note that these
-;   are only assembly time, not run time variables.  They reflect which
-;   bank is currently ASSUMED to be selected.  The programmer must therefore
-;   play an active role in making sure these variables are set correctly
-;   if they are used.  Proper use can avoid unneccessary bank switching
-;   instructions.
+;   current indirect and direct register bank settings.  Note that these are
+;   only assembly time, not run time variables.  They reflect which bank is
+;   currently ASSUMED to be selected.  The programmer must therefore play an
+;   active role in making sure these variables are set correctly if they are
+;   used.  Proper use can avoid unneccessary bank switching instructions.
 ;
-;   On the 17Cxxx series, similar assembler variables CURRRB and CURRGB
-;   are used.  CURRRB is the current special function register bank set
-;   by the low nibble of BSR.  CURRGB is the current general register
-;   bank set by the high nibble of BSR.
+;   On the 17Cxxx series, similar assembler variables CURRRB and CURRGB are
+;   used.  CURRRB is the current special function register bank set by the low
+;   nibble of BSR.  CURRGB is the current general register bank set by the high
+;   nibble of BSR.
 ;
 ;   On the 18 family, CURRIB is not used because each FSR contains the full
 ;   target address.  There are no indirect RAM banks on the 18 family.
@@ -3751,11 +3727,11 @@ currgb   set     nobank      ;init current general register bank
   if fam_18                  ;18 family
 currdb   set     nobank      ;init current direct register bank assumption
     endif
-;
+
 ;********************
 ;
-;   Inline macro functions related to register banks, code pages, and
-;   other addressing issues.
+;   Inline macro functions related to register banks, code pages, and other
+;   addressing issues.
 ;
 
 ;
@@ -3815,8 +3791,8 @@ currdb   set     nobank      ;init current direct register bank assumption
 ;   BANKADR (BANK)
 ;
 ;   Returns an address within the direct register bank BANK.  An arbitrary
-;   address within the bank is returned, except that DBANKIF will not
-;   recognize it as an unbanked location.
+;   address within the bank is returned, except that DBANKIF will not recognize
+;   it as an unbanked location.
 ;
   if fam_12
 #define bankadr(bank) (((bank) & 3) << 5)
@@ -3853,8 +3829,8 @@ currdb   set     nobank      ;init current direct register bank assumption
 ;
 ;   INACCESSBANK (ADR)
 ;
-;   Returns 1 if ADR is within the access bank, 0 otherwise.  Always
-;   returns 0 on processors that don't have an access bank.
+;   Returns 1 if ADR is within the access bank, 0 otherwise.  Always returns 0
+;   on processors that don't have an access bank.
 ;
   if fam_18
 #define inaccessbank(adr) (((adr) <= acclast) || ((adr) > (h'F00'+acclast)))
@@ -3864,9 +3840,8 @@ currdb   set     nobank      ;init current direct register bank assumption
 ;
 ;   INBANKED (ADR)
 ;
-;   Returns 1 if ADR is in banked memory, 0 otherwise.  Banked memory
-;   means some sort of bank settings must be properly set to access
-;   the memory.
+;   Returns 1 if ADR is in banked memory, 0 otherwise.  Banked memory means some
+;   sort of bank settings must be properly set to access the memory.
 ;
   if fam_16
 #define inbanked(adr) (((((adr)&h'7F')<commregs_first)||(((adr)&h'7F')>commregs_last)))
@@ -3879,15 +3854,15 @@ currdb   set     nobank      ;init current direct register bank assumption
     endif
 ;
 ;   These constants provide addresses that are guaranteed to be within
-;   particular register banks.  Note that the bank switching macros below
-;   take addresses, not bank numbers.  These constants can be used to
-;   convert from bank numbers to addresses within the banks by using the
-;   #v(n) assembler syntax.  For example, if "b" is a bank number, then:
+;   particular register banks.  Note that the bank switching macros below take
+;   addresses, not bank numbers.  These constants can be used to convert from
+;   bank numbers to addresses within the banks by using the #v(n) assembler
+;   syntax.  For example, if "b" is a bank number, then:
 ;
 ;     bank#v(b)adr
 ;
-;   is an address within bank b, which can be passed to the DBANKIF macro,
-;   for example.
+;   is an address within bank b, which can be passed to the DBANKIF macro, for
+;   example.
 ;
 ii       set     0           ;init loop counter
   while ii < nregbanks       ;once for each possible direct register bank
@@ -3899,12 +3874,12 @@ ii       set     ii + 1      ;advance to number of next register bank
 ;
 ;   Macro DBANK?
 ;
-;   Invalidate the current direct register data bank assumption.
-;   This macro produces no code, only sets assembly time state.
+;   Invalidate the current direct register data bank assumption.  This macro
+;   produces no code, only sets assembly time state.
 ;
-;   On 17Cxxx processors, this sets both the special and general register
-;   bank assumptions to unknown.  These processors make no distinction
-;   between a direct or indirect bank selection.
+;   On 17Cxxx processors, this sets both the special and general register bank
+;   assumptions to unknown.  These processors make no distinction between a
+;   direct or indirect bank selection.
 ;
 dbank?   macro
 
@@ -3921,12 +3896,12 @@ currdb   set     nobank
 ;
 ;   Macro IBANK?
 ;
-;   Invalidate the current indirect register data bank assumption.
-;   This macro produces no code, only sets assembly time state.
+;   Invalidate the current indirect register data bank assumption.  This macro
+;   produces no code, only sets assembly time state.
 ;
-;   On 17Cxxx processors, this sets both the special and general register
-;   bank assumptions to unknown.  These processors make no distinction
-;   between a direct or indirect bank selection.
+;   On 17Cxxx processors, this sets both the special and general register bank
+;   assumptions to unknown.  These processors make no distinction between a
+;   direct or indirect bank selection.
 ;
 ibank?   macro
   if fam_18 || fam_16b
@@ -3957,9 +3932,9 @@ unbank   macro
 ;
 ;   Macro DBANKIS <adr>
 ;
-;   Set the current direct register bank assumption to the bank containing
-;   ADR.  This macro generates no code to switch the register bank.  It only
-;   updates assembly time state.
+;   Set the current direct register bank assumption to the bank containing ADR.
+;   This macro generates no code to switch the register bank.  It only updates
+;   assembly time state.
 ;
 dbankis  macro   adr
 
@@ -4020,8 +3995,8 @@ currrb   set     bankof(adr)
 ;
 ;   Macro GBANKIS <adr>
 ;
-;   Set the current general RAM register bank assumption to the bank
-;   containing ADR.
+;   Set the current general RAM register bank assumption to the bank containing
+;   ADR.
 ;
   if fam_17
 
@@ -4227,10 +4202,10 @@ dbank    macro   adr
 ;
 ;   Macro IBANKIF <adr>
 ;
-;   Set the register bank for indirect access to address ADR, if needed.
-;   The assembler variable CURRIB is assumed to indicate the current
-;   indirect register bank setting.  CURRIB is updated.  This macro
-;   sets the IRP bit of STATUS appropriately.
+;   Set the register bank for indirect access to address ADR, if needed.  The
+;   assembler variable CURRIB is assumed to indicate the current indirect
+;   register bank setting.  CURRIB is updated.  This macro sets the IRP bit of
+;   STATUS appropriately.
 ;
 ibankif  macro   adr
          local   newbank, ii
@@ -4284,8 +4259,8 @@ currib   set     newbank     ;update current bank assumption
 ;
 ;   Macro IBANK <adr>
 ;
-;   Unconditionally set the indirect access register bank for access to
-;   address ADR.  CURRIB is updated.
+;   Unconditionally set the indirect access register bank for access to address
+;   ADR.  CURRIB is updated.
 ;
 ibank    macro   adr
          ibank?              ;invalidate current register bank assumption
@@ -4327,8 +4302,8 @@ currrb   set     newbank
 ;   This macro is only defined for processors that have different bank settings
 ;   for the built in special function registers and the general RAM registers.
 ;
-;   Set the general RAM register bank for access to ADR.  Nothing is done
-;   if ADR is not within the general RAM register range.
+;   Set the general RAM register bank for access to ADR.  Nothing is done if ADR
+;   is not within the general RAM register range.
 ;
   if fam_17
 
@@ -4352,22 +4327,20 @@ currgb   set     newbank
 ;
 ;   Macro DEFRAM <address>
 ;
-;   Set up for allocating RAM with subsequent RES directives.  ADDRESS
-;   is the address that will be passed to DBANKIF to access any of the
-;   RAM defined in this section.  If ADDRESS indicates normal banked
-;   memory, then the appropriate .BANKn linker section will be started
-;   with a UDATA directive.  If ADDRESS is in common RAM, then the
-;   RAM will be in the .UDATA_SHR section.  If ADDRESS is in the access
-;   bank of an 18 family, then the RAM will be allocated in the
-;   .UDATA_ACS section.
+;   Set up for allocating RAM with subsequent RES directives.  ADDRESS is the
+;   address that will be passed to DBANKIF to access any of the RAM defined in
+;   this section.  If ADDRESS indicates normal banked memory, then the
+;   appropriate .BANKn linker section will be started with a UDATA directive.
+;   If ADDRESS is in common RAM, then the RAM will be in the .UDATA_SHR section.
+;   If ADDRESS is in the access bank of an 18 family, then the RAM will be
+;   allocated in the .UDATA_ACS section.
 ;
-;   If the new linker section would be the same as the linker section
-;   defined by the previous DEFRAM, then no new directives are written
-;   since only one occurrence of a linker section is allowed per source
-;   module.
+;   If the new linker section would be the same as the linker section defined by
+;   the previous DEFRAM, then no new directives are written since only one
+;   occurrence of a linker section is allowed per source module.
 ;
-;   The assembler symbol DEFRAM_LAST is used to track linker section of
-;   the last DEFRAM invocation.  This symbol has the following values:
+;   The assembler symbol DEFRAM_LAST is used to track linker section of the last
+;   DEFRAM invocation.  This symbol has the following values:
 ;
 ;     -1  -  No previous DEFRAM section
 ;
@@ -4495,9 +4468,9 @@ defram_last set  ii          ;remember which linker section now in
 ;   PIC 18
 ;
 ;     By default, FSR2 is used as the stack pointer, the stack grows from low to
-;     high addresses, and the pointer points to the last-pushed byte.  A push
-;     is therefore a pre-increment and a pop a post-decrement.  Both these can
-;     be performed natively by the processor.
+;     high addresses, and the pointer points to the last-pushed byte.  A push is
+;     therefore a pre-increment and a pop a post-decrement.  Both these can be
+;     performed natively by the processor.
 ;
 ;     Unfortunately, the C18 compiler uses a different convention.  It reserves
 ;     FSR2 as a frame pointer and FSR1 as the stack point, thereby leaving only
@@ -4505,14 +4478,14 @@ defram_last set  ii          ;remember which linker section now in
 ;     convention that can not be realized with the native addressing modes.  The
 ;     stack grows from low to high addresses, but the pointer points to the next
 ;     empty location.  This means a push requires a post-increment and a pop a
-;     pre-decrement.  Since the PIC 18 has no native pre-decrement capability,
-;     a pop operation takes multiple instructions.
+;     pre-decrement.  Since the PIC 18 has no native pre-decrement capability, a
+;     pop operation takes multiple instructions.
 ;
-;   The stack is actually defined in module STACK.ASPIC.  Routine
-;   STACK_INIT must be called to initialize the stack if it is used at
-;   all.  The external reference to STACK_INIT also forces the STACK
-;   module to be loaded, thereby defining the stack.  Otherwise, the
-;   stack is not loaded and it does not consume any memory.
+;   The stack is actually defined in module STACK.ASPIC.  Routine STACK_INIT
+;   must be called to initialize the stack if it is used at all.  The external
+;   reference to STACK_INIT also forces the STACK module to be loaded, thereby
+;   defining the stack.  Otherwise, the stack is not loaded and it does not
+;   consume any memory.
 ;
 stackbank equ    bankof(stacklast) ;direct register bank containing the stack
 
@@ -4527,9 +4500,9 @@ stackp   equ     fsr#v(fsrstack) ;FSR will be reserved as stack pointer
 ;
 ;   Macro STACK_SET adr
 ;
-;   Set the data stack so that ADR will be the next byte pushed.  The
-;   stack is handled and initialized differently depending on whether
-;   C18 compatibility is enabled.
+;   Set the data stack so that ADR will be the next byte pushed.  The stack is
+;   handled and initialized differently depending on whether C18 compatibility
+;   is enabled.
 ;
 stack_set macro  adr
 ;
@@ -4646,13 +4619,13 @@ stack_makebuf macro n, reg16
 ;
 ;   Macro PUSHREG reg
 ;
-;   Push the contents of the register REG onto the stack.  The direct bank
-;   must already be set for access to REG.  On some processors, it is more
-;   efficient to push a set of general registers onto the stack with one
-;   PUSHREGS macro than to use the PUSHREG macro several times.  This macro
-;   also trashes W on some processors.  In that case the assembler variable
-;   W_TRASHED is set to TRUE, otherwise it is left unaltered.  Some of
-;   the specifics per processor are:
+;   Push the contents of the register REG onto the stack.  The direct bank must
+;   already be set for access to REG.  On some processors, it is more efficient
+;   to push a set of general registers onto the stack with one PUSHREGS macro
+;   than to use the PUSHREG macro several times.  This macro also trashes W on
+;   some processors.  In that case the assembler variable W_TRASHED is set to
+;   TRUE, otherwise it is left unaltered.  Some of the specifics per processor
+;   are:
 ;
 ;   16 family  -  Relatively inefficient to push a single value.  W
 ;     trashed.
@@ -4673,8 +4646,8 @@ w_trashed set    true
     endif
 ;
 ;   18 family processor.  The FSR indicated by FSRSTACK is reserved as the
-;   software stack pointer.  Auto increment/decrement allows a push or pop
-;   in a single instruction.
+;   software stack pointer.  Auto increment/decrement allows a push or pop in a
+;   single instruction.
 ;
   if fam_18
     if c18comp
@@ -4731,13 +4704,12 @@ push_tblptr macro
 ;
 ;   Macro POPREG reg
 ;
-;   Pop the top of the software stack into REG.  The direct bank
-;   must already be set for access to REG.  On some processors, it is more
-;   efficient to pop a set of general registers onto the stack with one
-;   POPREGS macro than to use the POPREG macro several times.  This macro
-;   also trashes W on some processors.  In that case the assembler variable
-;   W_TRASHED is set to TRUE, otherwise it is left unaltered.  Some of
-;   the specifics per processor are:
+;   Pop the top of the software stack into REG.  The direct bank must already be
+;   set for access to REG.  On some processors, it is more efficient to pop a
+;   set of general registers onto the stack with one POPREGS macro than to use
+;   the POPREG macro several times.  This macro also trashes W on some
+;   processors.  In that case the assembler variable W_TRASHED is set to TRUE,
+;   otherwise it is left unaltered.  Some of the specifics per processor are:
 ;
 ;   16 family  -  Relatively inefficient to pop a single value.  W
 ;     trashed.
@@ -4745,11 +4717,11 @@ push_tblptr macro
 ;   Enhanced 16 family  -  Multiple POPREG just as efficient as a single
 ;     POPREGS.  W trashed.
 ;
-;   18 family  -  Efficient to pop a single value if normal Embed Inc conventions
-;     used.  Multiple POPREG just as efficient as a single POPREGS.  If C18
-;     compiler compatibility enabled, then popping multiple registers with
-;     one POPREGS invocation is more efficient than popping the same registers
-;     with individual POPREG invocations.
+;   18 family  -  Efficient to pop a single value if normal Embed Inc
+;     conventions used.  Multiple POPREG just as efficient as a single POPREGS.
+;     If C18 compiler compatibility enabled, then popping multiple registers
+;     with one POPREGS invocation is more efficient than popping the same
+;     registers with individual POPREG invocations.
 ;
 popreg   macro   reg
 ;
@@ -4822,11 +4794,11 @@ pop_tblptr macro
 ;
 ;   Macro POPSTACK n
 ;
-;   Pop N bytes off the top of the data stack.  The byte values are lost.
-;   W is trashed.
+;   Pop N bytes off the top of the data stack.  The byte values are lost.  W is
+;   trashed.
 ;
-;   WARNING:  This macro assumes that interrupts are enabled.  It must not be used
-;     if interrupts are disabled because it could enable them.
+;   WARNING:  This macro assumes that interrupts are enabled.  It must not be
+;     used if interrupts are disabled because it could enable them.
 ;
 popstack macro   n
          local   psii, psjj
@@ -4875,8 +4847,8 @@ psii     set     psii + 1
 
 ;********************
 ;
-;   Stack utility macros that are private to the other macros below.
-;   These are not intended to be used directly in source code.
+;   Stack utility macros that are private to the other macros below.  These are
+;   not intended to be used directly in source code.
 ;
   if fam_17
 
@@ -4910,20 +4882,20 @@ dopop    macro   adr         ;pop an individual register from the stack
 ;
 ;   Macro PUSHREGS <regflags>
 ;
-;   Push the indicated general registers onto the stack.  The REGFLAGS
-;   argument is the OR of the REGFn flags for all the registers that
-;   are to be pushed.  The registers are pushed in low to high order.
+;   Push the indicated general registers onto the stack.  The REGFLAGS argument
+;   is the OR of the REGFn flags for all the registers that are to be pushed.
+;   The registers are pushed in low to high order.
 ;
-;   It may be more efficient to call this macro once with all the registers
-;   to push than to call it separately for each register.  See the
-;   PUSHREG macro description for details.
+;   It may be more efficient to call this macro once with all the registers to
+;   push than to call it separately for each register.  See the PUSHREG macro
+;   description for details.
 ;
 ;   The assembler variable N_BYTES_PUSHED is set to the number of bytes that
 ;   were pushed onto the stack.
 ;
-;   NOTE: On PICs with indirect banks, the current indirect bank assumption
-;     must be correct.  If the current indirect bank setting is not known,
-;     then the IBANK? macro should be invoked before this macro.
+;   NOTE: On PICs with indirect banks, the current indirect bank assumption must
+;     be correct.  If the current indirect bank setting is not known, then the
+;     IBANK? macro should be invoked before this macro.
 ;
 ;   Trashed:
 ;
@@ -4952,8 +4924,8 @@ f        set     (regflags) & regf_all ;make local sanitized flags value
          movf    stackp, w   ;set indirect pointer to current stack top
          movwf   fsr
 ;
-;   There is at least one register to push and indirect addressing has been
-;   set up for the current top of the stack.
+;   There is at least one register to push and indirect addressing has been set
+;   up for the current top of the stack.
 ;
 ;   Now push all the registers that have been selected.
 ;
@@ -5016,11 +4988,11 @@ w_trashed set    true
 ;
   if fam_17
 ;
-;   There is at least one register to push.  FSR1 is pointing to the last
-;   byte pushed onto the stack.
+;   There is at least one register to push.  FSR1 is pointing to the last byte
+;   pushed onto the stack.
 ;
-;   Set up FSR1 for post decrement, then decrement it once to be ready to
-;   write the first byte to the stack.
+;   Set up FSR1 for post decrement, then decrement it once to be ready to write
+;   the first byte to the stack.
 ;
          bcf     alusta, fs3 ;set FSR1 mode to post decrement
          bcf     alusta, fs2
@@ -5054,10 +5026,10 @@ n_bytes_pushed set n_bytes_pushed + 1 ;count one more bytes pushed onto stack
 ;   18 Family processors.  The FSR indicated by FSRSTACK is reserved as the
 ;   stack pointer.
 ;
-;   The normal Embed Inc convention is that the stack pointer points to the
-;   top byte on the stack.  The C18 convention is that it points to the next
-;   byte after the top on the stack (where the next pushed byte would go).
-;   In both cases the stack grows towards higher addresses.
+;   The normal Embed Inc convention is that the stack pointer points to the top
+;   byte on the stack.  The C18 convention is that it points to the next byte
+;   after the top on the stack (where the next pushed byte would go).  In both
+;   cases the stack grows towards higher addresses.
 ;
   if fam_18
 
@@ -5095,16 +5067,16 @@ n_bytes_pushed set n_bytes_pushed + 1 ;count one more bytes pushed onto stack
 ;
 ;   This macro performs the reverse operation to the PUSHREGS macro.  The
 ;   REGFLAGS argument is the OR of a set of REGFn flags to indicate the
-;   registers to be popped from the stack.  The registers are popped in
-;   high to low order.
+;   registers to be popped from the stack.  The registers are popped in high to
+;   low order.
 ;
-;   It may be more efficient to call this macro once with all the registers
-;   to pop than to call it separately for each register.  See the
-;   POPREG macro description for details.
+;   It may be more efficient to call this macro once with all the registers to
+;   pop than to call it separately for each register.  See the POPREG macro
+;   description for details.
 ;
-;   NOTE: On PICs with indirect banks, the current indirect bank assumption
-;     must be correct.  If the current indirect bank setting is not known,
-;     then the IBANK? macro should be invoked before this macro.
+;   NOTE: On PICs with indirect banks, the current indirect bank assumption must
+;     be correct.  If the current indirect bank setting is not known, then the
+;     IBANK? macro should be invoked before this macro.
 ;
 ;   Trashed:
 ;
@@ -5131,8 +5103,8 @@ f        set     (regflags) & regf_all ;make local sanitized flags value
          movf    stackp, w   ;set indirect pointer to current stack top
          movwf   fsr
 ;
-;   There is at least one register to pop and indirect addressing has been
-;   set up for the current top of the stack.
+;   There is at least one register to pop and indirect addressing has been set
+;   up for the current top of the stack.
 ;
 ;   Now pop all the registers that have been selected.
 ;
@@ -5196,8 +5168,8 @@ f        set     (regflags) & regf_all ;make local sanitized flags value
          exitm
       endif
 ;
-;   There is at least one register to pop.  FSR1 is pointing to the last
-;   byte pushed onto the stack, which is the first byte to pop.
+;   There is at least one register to pop.  FSR1 is pointing to the last byte
+;   pushed onto the stack, which is the first byte to pop.
 ;
 ;   Set up FSR1 for post increment.
 ;
@@ -5225,10 +5197,10 @@ reg      set     reg - 1     ;advance to next register number
 ;   18 family processors.  The FSR indicated by FSRSTACK is reserved as the
 ;   stack pointer.
 ;
-;   The normal Embed Inc convention is that the stack pointer points to the
-;   top byte on the stack.  The C18 convention is that it points to the next
-;   byte after the top on the stack (where the next pushed byte would go).
-;   In both cases the stack grows towards higher addresses.
+;   The normal Embed Inc convention is that the stack pointer points to the top
+;   byte on the stack.  The C18 convention is that it points to the next byte
+;   after the top on the stack (where the next pushed byte would go).  In both
+;   cases the stack grows towards higher addresses.
 ;
   if fam_18
 
@@ -5272,7 +5244,7 @@ reg      set     reg - 1     ;advance to next register number
 ;
          error   "POPREGS macro in STD.INS.ASPIC not implemented for this processor"
          endm
-;
+
 ;********************
 ;
 ;   Macro READSTACK <n>, <dest>
@@ -5284,8 +5256,8 @@ reg      set     reg - 1     ;advance to next register number
 ;
 ;   Additional details for some implementations:
 ;
-;     PIC 18 family  -  The register bank setting is irrelevant.  It need not
-;       be set for access to DEST.
+;     PIC 18 family  -  The register bank setting is irrelevant.  It need not be
+;       set for access to DEST.
 ;
 readstack macro  n, dest
          local   ofs
@@ -5345,12 +5317,12 @@ ofs      set     ofs + 1     ;stack pointer points to first free location
 ;
 ;   Add two NOPs to the code when debugging with a ICD.  These type of debuggers
 ;   skid after a breakoint is hit, so using ordinary instructions for
-;   breakpoints is sometimes difficult.  This macro provides instructions to
-;   set the breakpoint on, and include enough padding so that the next
-;   instruction after the macro is not executed despite debugging skidding.
+;   breakpoints is sometimes difficult.  This macro provides instructions to set
+;   the breakpoint on, and include enough padding so that the next instruction
+;   after the macro is not executed despite debugging skidding.
 ;
-;   This macro only emits code when the DEBUG_ICD switch is set to TRUE.  It
-;   can therefore safely be left in production code without harm.
+;   This macro only emits code when the DEBUG_ICD switch is set to TRUE.  It can
+;   therefore safely be left in production code without harm.
 ;
 /macro breakpoint
   /if debug_icd then
@@ -5374,8 +5346,7 @@ ofs      set     ofs + 1     ;stack pointer points to first free location
 ;         REGFLAGS may be NOREGS to indicate no registers are to be saved.
 ;
 ;     3 - Sets SAVEDREGS to the flags indicating which registers were saved.
-;         This can be used to automatically restore the saved registers
-;         later.
+;         This can be used to automatically restore the saved registers later.
 ;
 enter    macro   regflags
          unbank              ;invalidate all register bank assumptions
@@ -5387,18 +5358,18 @@ savedregs set    regflags    ;remember what was saved when routines was entered
 ;
 ;   Macro LEAVE <regflags>
 ;
-;   This macro performs the "standard" operations on subroutine exit.
-;   These actions are:
+;   This macro performs the "standard" operations on subroutine exit.  These
+;   actions are:
 ;
 ;     1 - Restore the registers indicated by REGFLAGS from the software stack.
 ;         They are assumed to have been pushed in low to high register number
-;         order, and will be popped in high to low order.  REGFLAGS may be NOREGS
-;         to indicate no registers are to be restored.
+;         order, and will be popped in high to low order.  REGFLAGS may be
+;         NOREGS to indicate no registers are to be restored.
 ;
 ;     2 - Return from the subroutine.
 ;
-;     3 - Invalidate the current register bank assumptions.  Note that this
-;         sets assembly state, not runtime state.  The assumptions are therefore
+;     3 - Invalidate the current register bank assumptions.  Note that this sets
+;         assembly state, not runtime state.  The assumptions are therefore
 ;         propagated in source code, not execution order.
 ;
 ;   NOTE:  The current indirect register bank assumption must be correct when
@@ -5417,8 +5388,8 @@ leave    macro   regflags
 ;   Macro LEAVEREST
 ;
 ;   Just like LEAVE except that the registers indicated by SAVEDREGS are
-;   automatically restored.  SAVEDREGS should have been set by the ENTER
-;   macro to the routine being left.
+;   automatically restored.  SAVEDREGS should have been set by the ENTER macro
+;   to the routine being left.
 ;
 leaverest macro
          leave   savedregs
@@ -5487,13 +5458,13 @@ leaverest macro
 ;
 ;   Macro HLLSUB <name>, <regflags>
 ;
-;   Declare the start of the new global subroutine that must be callable
-;   from the current high level language.
+;   Declare the start of the new global subroutine that must be callable from
+;   the current high level language.
 ;
 ;   The supported high level languages are:
 ;
-;     C18  -   Microchip MPLAB C18 compiler for the PIC 18.  C18COMP must
-;       be set to TRUE.
+;     C18  -   Microchip MPLAB C18 compiler for the PIC 18.  C18COMP must be set
+;       to TRUE.
 ;
 hllsub   macro   name, regflags
 
@@ -5512,26 +5483,26 @@ nexthllarg set   nexthllarg + n_bytes_pushed
 ;
 ;   Macro GETARG8 dest
 ;
-;   Get the next high level language argument, which is assumed to be 8
-;   bits in size.  DEST is the location to save the argument value in.  It
-;   is assumed that DEST is directly accessible without banking, or that the
-;   bank is already set for access to DEST.
+;   Get the next high level language argument, which is assumed to be 8 bits in
+;   size.  DEST is the location to save the argument value in.  It is assumed
+;   that DEST is directly accessible without banking, or that the bank is
+;   already set for access to DEST.
 ;
-;   The argument passing conventions differ between compilers.  This macro
-;   will generate an error if one of the supported compilers is not in use.
+;   The argument passing conventions differ between compilers.  This macro will
+;   generate an error if one of the supported compilers is not in use.
 ;
 ;   The supported high level languages are:
 ;
-;     C18  -   Microchip MPLAB C18 compiler for the PIC 18.  C18COMP must
-;       be set to TRUE.
+;     C18  -   Microchip MPLAB C18 compiler for the PIC 18.  C18COMP must be set
+;       to TRUE.
 ;
 getarg8  macro   dest
 ;
-;   C18 compiler.  The caller pushes the call arguments onto the data stack
-;   in last to first order.  The stack pointer points to the location where
-;   the next pushed byte will be written.  On subroutine entry, the stack
-;   pointer is pointing to the next byte after where the first call argument
-;   is on the stack.
+;   C18 compiler.  The caller pushes the call arguments onto the data stack in
+;   last to first order.  The stack pointer points to the location where the
+;   next pushed byte will be written.  On subroutine entry, the stack pointer is
+;   pointing to the next byte after where the first call argument is on the
+;   stack.
 ;
   if c18comp
          movlw   low -nexthllarg
@@ -5540,7 +5511,6 @@ nexthllarg set   nexthllarg + 1
          exitm
     endif
 
-
          error   Compiler not defined or supported in GETARG8 macro.
          endm
 
@@ -5548,8 +5518,8 @@ nexthllarg set   nexthllarg + 1
 ;
 ;   Macro GETARG16 dest
 ;
-;   Get the next high level language call argument, which is assumed to be
-;   16 bits in size.  The 16 bit value is saved in DEST+1:DEST.
+;   Get the next high level language call argument, which is assumed to be 16
+;   bits in size.  The 16 bit value is saved in DEST+1:DEST.
 ;
 getarg16 macro   dest
 
@@ -5558,7 +5528,6 @@ getarg16 macro   dest
          getarg8 dest
          exitm
     endif
-
 
          error   Compiler not defined or supported in GETARG16 macro.
          endm
@@ -5660,8 +5629,8 @@ setpage  macro   adr
 ;
 ;   Macro MYPAGE
 ;
-;   Sets PCLATH to the current code page, if this machine has multiple
-;   code pages.  W may be trashed.
+;   Sets PCLATH to the current code page, if this machine has multiple code
+;   pages.  W may be trashed.
 ;
 mypage   macro
   if ncodepages <= 1         ;only one code page exists, no need to set PCLATH ?
@@ -5738,8 +5707,8 @@ gcallnr  macro   subroutine
 ;   Macro MCALL <subroutine>
 ;
 ;   Call a local subroutine within the same module (code section, actually).
-;   The subroutine is therefore guaranteed to be on the same code page.
-;   The assumed register banks are invalidated after the subroutine returns.
+;   The subroutine is therefore guaranteed to be on the same code page.  The
+;   assumed register banks are invalidated after the subroutine returns.
 ;
 mcall    macro   subroutine
   if debug_icd
@@ -5814,11 +5783,11 @@ gcallwr  macro   subroutine
 ;
 ;   Macro GCALLR <subroutine> <putret>
 ;
-;   Just like GCALL, except that the subroutine is assumed to return a value
-;   in W.  This return value will be stored in PUTRET.  Note that PUTRET must
-;   be in global (any bank) memory unless the subroutine is known to explicitly
-;   set the direct register bank.  W is trashed.  The direct and indirect
-;   register bank settings are preserved from the subroutine.
+;   Just like GCALL, except that the subroutine is assumed to return a value in
+;   W.  This return value will be stored in PUTRET.  Note that PUTRET must be in
+;   global (any bank) memory unless the subroutine is known to explicitly set
+;   the direct register bank.  W is trashed.  The direct and indirect register
+;   bank settings are preserved from the subroutine.
 ;
 gcallr   macro   subroutine, putret
          extern  subroutine
@@ -5839,11 +5808,11 @@ gcallr   macro   subroutine, putret
 ;
 ;   Macro MCALLR <subroutine> <putret>
 ;
-;   Just like MCALL, except that the subroutine is assumed to return a value
-;   in W.  This return value will be stored in PUTRET.  Note that PUTRET must
-;   be in global (any bank) memory unless the subroutine is known to explicitly
-;   set the direct register bank.  W is trashed.  The direct and indirect
-;   register bank settings are preserved from the subroutine.
+;   Just like MCALL, except that the subroutine is assumed to return a value in
+;   W.  This return value will be stored in PUTRET.  Note that PUTRET must be in
+;   global (any bank) memory unless the subroutine is known to explicitly set
+;   the direct register bank.  W is trashed.  The direct and indirect register
+;   bank settings are preserved from the subroutine.
 ;
 mcallr   macro   subroutine, putret
   if debug_icd
@@ -5866,8 +5835,8 @@ mcallr   macro   subroutine, putret
 ;   Macro GJUMP <program address>
 ;
 ;   Jump to a location that could be anywhere in program memory.  W is trashed
-;   before execution starts at the new location.  The assumed register banks
-;   are set to invalid for source code immediately following the GJUMP.
+;   before execution starts at the new location.  The assumed register banks are
+;   set to invalid for source code immediately following the GJUMP.
 ;
 gjump    macro   adr
          setpage adr         ;select code page of target
@@ -6009,9 +5978,9 @@ ii       set     ii + 1
 ;       reached, in which case the next address wraps back to the end of the
 ;       buffer.
 ;
-;   Define symbolic constants for the offset of various special bytes from
-;   the start of a FIFO.  All subsequent code uses these symbols instead
-;   of assuming the bytes are at fixed offsets.
+;   Define symbolic constants for the offset of various special bytes from the
+;   start of a FIFO.  All subsequent code uses these symbols instead of assuming
+;   the bytes are at fixed offsets.
 ;
 ;   WARNING
 ;
@@ -6030,9 +5999,9 @@ fifo_ofs_buf equ 3           ;offset from FIFO label for start of buffer
 ;
 ;   Macro FIFO_DEFINE name, size
 ;
-;   Define a first in, first out queue.  The symbol NAME will be defined as
-;   the first byte of the queue structure.  Size is the maximum number of
-;   data bytes the queue will be able to hold.
+;   Define a first in, first out queue.  The symbol NAME will be defined as the
+;   first byte of the queue structure.  Size is the maximum number of data bytes
+;   the queue will be able to hold.
 ;
 fifo_define macro name, size
 name     res     1           ;number of data bytes currently in the queue
@@ -6045,8 +6014,8 @@ name     res     1           ;number of data bytes currently in the queue
 ;
 ;   Macro FIFO_INIT name
 ;
-;   Initialize the FIFO at NAME.  The register bank must be set for access
-;   to the FIFO state.
+;   Initialize the FIFO at NAME.  The register bank must be set for access to
+;   the FIFO state.
 ;
 fifo_init macro  name
          clrf    name + fifo_ofs_n ;indicate the FIFO is empty
@@ -6195,18 +6164,17 @@ fifo_n_full macro name
 ;
 ;   Macro FIFO_PUT name, size, data
 ;
-;   Add the byte in DATA as the last byte in the FIFO at NAME.  SIZE must
-;   be the maximum number of bytes the FIFO was defined to hold.  The
-;   register bank must be set for access to the FIFO and DATA.  Since the
-;   FIFO is usually not in global RAM, this means DATA must be either in
-;   global RAM or in the same register bank as the FIFO.
+;   Add the byte in DATA as the last byte in the FIFO at NAME.  SIZE must be the
+;   maximum number of bytes the FIFO was defined to hold.  The register bank
+;   must be set for access to the FIFO and DATA.  Since the FIFO is usually not
+;   in global RAM, this means DATA must be either in global RAM or in the same
+;   register bank as the FIFO.
 ;
 ;   The FIFO may be trashed if it is already full.  This should be checked
 ;   before this macro is called.
 ;
-;   Note that if the FIFO could be accessed from the interrupt service
-;   routine, then interrupts should be temporarily disabled around this
-;   macro.
+;   Note that if the FIFO could be accessed from the interrupt service routine,
+;   then interrupts should be temporarily disabled around this macro.
 ;
 ;   The indirect register bank must be set for access to the FIFO.
 ;
@@ -6319,18 +6287,17 @@ fifo_put_p0 macro size, data
 ;
 ;   Macro FIFO_GET name, size, data
 ;
-;   Get the next byte from the FIFO at NAME into DATA.  SIZE must
-;   be the maximum number of bytes the FIFO was defined to hold.  The
-;   register bank must be set for access to the FIFO and DATA.  Since the
-;   FIFO is usually not in global RAM, this means DATA must be either in
-;   global RAM or in the same register bank as the FIFO.
+;   Get the next byte from the FIFO at NAME into DATA.  SIZE must be the maximum
+;   number of bytes the FIFO was defined to hold.  The register bank must be set
+;   for access to the FIFO and DATA.  Since the FIFO is usually not in global
+;   RAM, this means DATA must be either in global RAM or in the same register
+;   bank as the FIFO.
 ;
-;   The FIFO may be trashed if it is already empty.  This should be
-;   checked before this macro is called.
+;   The FIFO may be trashed if it is already empty.  This should be checked
+;   before this macro is called.
 ;
-;   Note that if the FIFO could be accessed from the interrupt service
-;   routine, then interrupts should be temporarily disabled around this
-;   macro.
+;   Note that if the FIFO could be accessed from the interrupt service routine,
+;   then interrupts should be temporarily disabled around this macro.
 ;
 ;   The indirect register bank must be set for access to the FIFO.
 ;
@@ -6452,21 +6419,20 @@ fifo_get_p0 macro size, data
 ;
 ;   Jump to the address selected from a dispatch table.
 ;
-;   REG0 contains the 0-N table entry number.  If REG0 contains 0, this
-;   macro will jump to the address in the first table entry, if 1 it will
-;   jump to the address in the second table entry, etc.  If REG0 indicates
-;   an entry past the end of the table, then execution falls thru to the
-;   end of this macro.
+;   REG0 contains the 0-N table entry number.  If REG0 contains 0, this macro
+;   will jump to the address in the first table entry, if 1 it will jump to the
+;   address in the second table entry, etc.  If REG0 indicates an entry past the
+;   end of the table, then execution falls thru to the end of this macro.
 ;
-;   NAME is the name of the table as defined with the DSP_START and
-;   DSP_END macros.
+;   NAME is the name of the table as defined with the DSP_START and DSP_END
+;   macros.
 ;
-;   The table must be defined with DSP_START, DSP_ENTRY, and DSP_END
-;   macros.  These and the DISPATCH macro communicate with each other
-;   via various implicitly defined symbols.
+;   The table must be defined with DSP_START, DSP_ENTRY, and DSP_END macros.
+;   These and the DISPATCH macro communicate with each other via various
+;   implicitly defined symbols.
 ;
-;   The following symbols are assumed to be defined.  These are normally
-;   defined automatically by the DSP_START and DSP_END macros.
+;   The following symbols are assumed to be defined.  These are normally defined
+;   automatically by the DSP_START and DSP_END macros.
 ;
 ;     <name>  -  Address of the start of the table.
 ;
@@ -6489,10 +6455,9 @@ dispatch macro   name
          skip_wle            ;index is within bounds ?
          jump    noent       ;no, fall thru this macro
          ;
-         ;   Make the table byte offset for the selected entry
-         ;   in REG1:REG0.  This is either 2x or 3x the table index
-         ;   depending on whether 2 byte or 3 byte program memory
-         ;   addresses are in use.
+         ;   Make the table byte offset for the selected entry in REG1:REG0.
+         ;   This is either 2x or 3x the table index depending on whether 2 byte
+         ;   or 3 byte program memory addresses are in use.
          ;
          pushregs regf0 | regf1 ;temp save registers that will be trashed
 
@@ -6529,11 +6494,10 @@ dispatch macro   name
 
          popregs regf0 | regf1 ;restore REG0 and REG1 saved earlier
          ;
-         ;   Jump to the address starting at where TBLPTR is pointing.
-         ;   If the low bit of the address is set (invalid execution
-         ;   address), then the table entry is unimplemented and this
-         ;   macro falls thru the same as if the index was past the
-         ;   end of the table.
+         ;   Jump to the address starting at where TBLPTR is pointing.  If the
+         ;   low bit of the address is set (invalid execution address), then the
+         ;   table entry is unimplemented and this macro falls thru the same as
+         ;   if the index was past the end of the table.
          ;
          tblrd*+             ;get jump address low byte into TABLAT
          btfsc   tablat, 0   ;this is a valid execution address ?
@@ -6562,12 +6526,12 @@ noent    unbank              ;jump to here on no matching table entry
 ;
 ;   Macro DSP_START name
 ;
-;   Start a dispatch table.  Table entries must be created with the
-;   DSP_ENTRY macro, and the table ended with the DSP_END macro.  The
-;   DISPATCH macro will jump to a selected table entry.
+;   Start a dispatch table.  Table entries must be created with the DSP_ENTRY
+;   macro, and the table ended with the DSP_END macro.  The DISPATCH macro will
+;   jump to a selected table entry.
 ;
-;   NAME will be defined as the starting address of the table, and must
-;   be the name passed to the DISPATCH macro.
+;   NAME will be defined as the starting address of the table, and must be the
+;   name passed to the DISPATCH macro.
 ;
 ;   On a PIC 18, this table must be defined in a CODE_PACK section, not an
 ;   ordinary CODE section.
@@ -6586,10 +6550,10 @@ next_entry set   0           ;init 0-N number of next table entry
 ;   entry.
 ;
 ;   Entries must be defined in ascending index order.  An error is generated if
-;   this is not the case.  A table entry is created for all values of INDEX up to
-;   and including the last one.  Gaps are filled with invalid addresses.  These
-;   are detected in the DISPATCH macro and treated the same as unimplemented
-;   table entries past the end of the table.
+;   this is not the case.  A table entry is created for all values of INDEX up
+;   to and including the last one.  Gaps are filled with invalid addresses.
+;   These are detected in the DISPATCH macro and treated the same as
+;   unimplemented table entries past the end of the table.
 ;
 dsp_entry macro  index, adr
 ;
@@ -7052,8 +7016,8 @@ task_create macro runadr, stackadr
 //   amount of memory that was written from some starting point.  PBYTE_OFFSET
 //   can be set to a arbitrary value by the caller.  By default, PBYTE_OFFSET is
 //   initialized to 0 before the first byte, then incremented for each byte
-//   byte written.  It therefore provides a count of the number of bytes that
-//   have been written with this mechanism.
+//   written.  It therefore provides a count of the number of bytes that have
+//   been written with this mechanism.
 //
 /macro pbyte
   /var exist pbyte_str string = "" ;MPASM line so far
@@ -7149,7 +7113,7 @@ task_create macro runadr, stackadr
 //   value by the preprocesor.  The low 16 bits of the integer will be written.
 //
 //   If the optional comment string is supplied, then the word value will be
-//   be written on a single line with that end of line comment.
+//   written on a single line with that end of line comment.
 //
 /macro pword
   /var local val integer = [and [arg 1] 16#FFFF]
@@ -7175,7 +7139,7 @@ task_create macro runadr, stackadr
 //   value by the preprocesor.  The low 24 bits of the integer will be written.
 //
 //   If the optional comment string is supplied, then the word value will be
-//   be written on a single line with that end of line comment.
+//   written on a single line with that end of line comment.
 //
 /macro pword24
   /var local val integer = [and [arg 1] 16#FFFFFF]
@@ -7202,7 +7166,7 @@ task_create macro runadr, stackadr
 //   value by the preprocesor.  The low 32 bits of the integer will be written.
 //
 //   If the optional comment string is supplied, then the word value will be
-//   be written on a single line with that end of line comment.
+//   written on a single line with that end of line comment.
 //
 /macro pword32
   /var local val integer = [and [arg 1] 16#FFFFFFFF]
