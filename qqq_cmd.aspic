@@ -30,7 +30,7 @@
 ;   Configuration constants.
 ;
 /const   name    string = "" ;unique name added to CMD<name>_xxx entry points
-/const   drain_startup bool = true ;draing and discard all input bytes at startup
+/const   drain_startup bool = true ;drain and discard all input bytes at startup
 /const   nnop    integer = 16 ;number of NOP responses to send on startup
 stacksz  equ     32 + ntsksave ;task data stack size
 lbank    equ     1           ;register bank for the local state of this module
