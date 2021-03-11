@@ -471,6 +471,27 @@ ii       set     ii + 1      ;advance to next config word address
 /if [not [exist "fifos_new"]] then
   /const fifos_new bool = false
   /endif
+//
+//   Make sure the NO_INTR_DISABLE variable exists, and initialize it to the
+//   default value of FALSE if not.  This switch is used by some macros that
+//   need to perform atomic operations.  With this switch off, interrupts are
+//   disabled around such atomic operations.  When this switch is on,
+//   interrupts are not disabled and re-enabled.
+//
+//   Reasons to set this switch to TRUE include:
+//
+//     1 - In an interrupt routine.  Interrupts are already off, and will be
+//       re-enabled by the RETFIE instruction.  If this switch isn't off, then
+//       nested macros would effectively enable interrupts early.
+//
+//     2 - Interrupts are not used in the project.  Nested macros would then
+//       effectively turn on interrupts if this switch is not set.
+//
+//     3 - The data structure that needs to be atomically updated is never
+//       accessed from interrupt code.  There is therefore no need to prevent
+//       interrupts from running part way what should be an atomic operation.
+//
+/var exist no_intr_disable bool = false
 
 
 ;*******************************************************************************
@@ -678,7 +699,7 @@ skip_wgt macro
          exitm
     endif
 
-         error   "INTR_WGT macro in STD.INS.ASPIC not implemented for this processor"
+         error   "SKIP_WGT macro in STD.INS.ASPIC not implemented for this processor"
          endm
 
 ;*******************************************************************************
@@ -7707,7 +7728,9 @@ fifo_get_p0 macro size, data
     /append s "0"
     /write s
 
+    /if [not no_intr_disable] then
          intr_off            ;temp disable interrupts
+      /endif
 
     /set s ""                ;addwfc name+ofs+1
     /call tabopcode s
@@ -7727,7 +7750,9 @@ fifo_get_p0 macro size, data
     /append s "update the low byte"
     /write s
 
+    /if [not no_intr_disable] then
          intr_on             ;re-enable interrupts
+      /endif
 
     /set s ""                ;jump done
     /call tabopcode s
@@ -7743,7 +7768,9 @@ fifo_get_p0 macro size, data
     /append s "wrap buffer index back to start of buffer"
     /write s
 
+    /if [not no_intr_disable] then
          intr_off            ;temp disable interrupts
+      /endif
 
     /set s ""                ;clrf name+ofs+0
     /call tabopcode s
@@ -7759,7 +7786,9 @@ fifo_get_p0 macro size, data
     /append s name "+" [+ ofs 1]
     /write s
 
+    /if [not no_intr_disable] then
          intr_on             ;re-enable interrupts
+      /endif
     //
     //   Back to common code after no-wrap and wrap cases.
     //
