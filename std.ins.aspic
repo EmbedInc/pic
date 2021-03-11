@@ -489,7 +489,8 @@ ii       set     ii + 1      ;advance to next config word address
 //
 //     3 - The data structure that needs to be atomically updated is never
 //       accessed from interrupt code.  There is therefore no need to prevent
-//       interrupts from running part way what should be an atomic operation.
+//       interrupts from running part way thru what should be an atomic
+//       operation.
 //
 /var exist no_intr_disable bool = false
 
@@ -7225,10 +7226,10 @@ fifo_get_p0 macro size, data
           /call taboperand s
           /append s dest
           /call startcomm s
-          /append s "number of data bytes in FIFO " name
+          /append s "number of empty slots in FIFO " name
           /write s
         /else                ;leave the result in W
-          /write "                             ;W is number of data bytes in FIFO " name
+          /write "                             ;W is number of empty slots in FIFO " name
         /endif
       /write
       /quitmac

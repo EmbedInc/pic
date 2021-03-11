@@ -108,6 +108,7 @@
 ;       UART_INTR_NSEND must be jumped to from the INTn interrupt handler.
 ;       UART_INTR_NSEND will jump to INTR_RET_UART when done.
 ;
+/const   fifos_new bool = true ;use the "new" (2021) FIFO macros
 /include "qq2.ins.aspic"
 ;
 ;   General UART configuration.
