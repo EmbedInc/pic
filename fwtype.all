@@ -271,6 +271,9 @@
 /if [and [= unam "S5DIG"] [= udir "JOWA"]] then
   /set ty 64
   /endif
+/if [and [= unam "USBSER"] [= udir "USB"]] then
+  /set ty 65
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
