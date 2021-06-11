@@ -1207,6 +1207,24 @@ uown     equ     7           ;define UOWN bit in USB BD status byte
       endif
     endif
 
+  ifdef __18f24k50
+fam_18   set     1
+nregbanks set    8
+acclast  set     h'5F'
+ncodepages set   1
+stacklast set    h'60'
+stacksize set    48
+regstart set     0
+numregs  set     16
+adr_word set     2
+ee_start set     h'F00000'
+usb_bd0  set     h'400'      ;start of USB buffer descriptor 0
+progadrb set     2
+    ifndef uown
+uown     equ     7           ;define UOWN bit in USB BD status byte
+      endif
+    endif
+
   ifdef __18f2423
 fam_18   set     1
 nregbanks set    3
