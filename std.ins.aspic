@@ -3955,6 +3955,46 @@ pullups_port[chars c] equ 0
     endif
   /endloop
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine PINNAME_PARSE name
+//
+//   Parse a composite pin name, like "RA1" or "RB5" into the port name and pin
+//   number.  NAME is a string.
+//
+//   The following variables will be created if not already existing, then set:
+//
+//     PINNAME_PORT, string  -  Single upper case port name.
+//
+//     PINNAME_BIT, integer  -  0-N bit number within the port.
+//
+/subroutine pinname_parse
+  /var local name string = [ucase [vnl [arg 1]]] //pin name, like "RA1" or "RB5"
+  /var local bstr string //bit number string
+  /var exist pinname_port string //upper case port name letter
+  /var exist pinname_bit integer //0-N bit number of pin within its port
+
+  /block //abort block on any error
+    /if [< [slen name] 3] then //too short for minimum pin name ?
+      /quit
+      /endif
+    /if [<> [sindx 1 name] "R"] then //not Rxx ?
+      /quit
+      /endif
+    /set pinname_port [sindx 2 name] //extract the port name
+    /set bstr [substr 3 [- [slen name] 2] name] //extract bit number string
+    /if [not [isint [chars bstr]]] then //invalid bit number ?
+      /quit
+      /endif
+    /set pinname_bit [chars bstr] //return bit number
+    /return
+    /endblock
+
+  /show "  Invalid pin name " name " passed to subroutine PINNAME_PARSE."
+         error   Pin Name
+         end
+  /stop
+  /endsub
 
 ;*******************************************************************************
 ;*******************************************************************************
@@ -8434,7 +8474,7 @@ task_create macro runadr, stackadr
     /if [>= [slen [arg 1]] [- [arg 2] 1]] then
       /quit
       /endif
-    /set [arg 1] [str [arg 1] " "]
+    /append [arg 1] " "
     /repeat
     /endblock
   /endsub
@@ -8553,19 +8593,11 @@ task_create macro runadr, stackadr
       /var local desc string = ""
     /endif
   /var local name string = [qstr [arg 1]]
-  /var local val string
+  /var local val string = [vnl [chars name]]
 
-  /block
-    /if [= [sym name dtype] "REAL"] then
-      /set val [eng [chars name] 4 ""]
-      /quit
-      /endif
-    /if [= [sym name dtype] "STRING"] then
-      /set val [str '"' [chars name] '"']
-      /quit
-      /endif
-    /set val [chars name]
-    /endblock
+  /if [= [sym name dtype] "STRING"] then
+    /set val [str '"' val '"']
+    /endif
 
   /show "  " name " " val desc
   /endsub
