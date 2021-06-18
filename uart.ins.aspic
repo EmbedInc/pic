@@ -649,7 +649,7 @@ get_nemt dbank?              ;skip to here if FIFO is not completely empty
           /if fifos_new
             /then
          bank_fifoin
-         fifo_br_full fifo_in[chars n], [- finsz recv_ready], uart[chars n]_itmp2 ;still too full ?
+         fifo_br_full fifo_in[chars n], [- finsz recv_nready], get_dready, uart[chars n]_itmp2 ;still too full ?
          set_[chars recv_ready]_on ;indicate we are ready to receive more bytes
             /else
          bank_fifoin
