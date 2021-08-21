@@ -17,6 +17,7 @@ call src_prog %srcdir% hf32 %1
 call src_prog %srcdir% hfp %1
 call src_prog %srcdir% hfp32 %1
 call src_prog %srcdir% hfx %1
+call src_prog %srcdir% hfx29 %1
 call src_prog %srcdir% libpic %1
 call src_prog %srcdir% linkpic %1
 

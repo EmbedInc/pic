@@ -1,0 +1,7 @@
+                           Embed program HFX29
+                              21 August 2021
+
+hfx29 <hexnum>
+
+Interpret the command line argument as a fixed point number with 29
+fraction bits.  The result is written to standard output in decimal.
