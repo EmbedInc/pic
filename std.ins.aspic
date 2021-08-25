@@ -6342,15 +6342,15 @@ ii       set     ii + 1
 ;   Two types of FIFOs are available, old and new.  The original (old) FIFOs
 ;   were implemented with MPASM macros, requiring configuration information to
 ;   be passed separately to some macros.  The data structure also did not allow
-;   writing and reading from a FIFO simultaneously.  When a FIFO was used
-;   interrupt and foreground code, this meant interrupts had to be disabled
-;   around FIFO accesses in the foreground code.
+;   writing and reading from a FIFO simultaneously.  When a FIFO was used in
+;   interrupt and foreground code, interrupts had to be disabled around FIFO
+;   accesses in the foreground code.
 ;
 ;   The new (2021) FIFOs are implemented with pre-processor macros.
 ;   Configuration state can be kept in known pre-processor constants, so does
 ;   not need to be passed to subsequent macros to use a FIFO.  Also, the data
 ;   structure of this type of FIFO allows for simultaneous reading and writing
-;   by interrupt and foreground code.  Interrupts do not need to be disabled in
+;   by interrupt and foreground code.  Interrupts do not need to be disabled
 ;   around FIFO accesses in foreground code.
 ;
 ;   For backwards compatibility, the new FIFO type is only selected when the
