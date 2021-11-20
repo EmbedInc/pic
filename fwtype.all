@@ -274,6 +274,9 @@
 /if [and [= unam "USBSER"] [= udir "USB"]] then
   /set ty 65
   /endif
+/if [and [= unam "G1OGG"] [= udir "GOGG"]] then
+  /set ty 66
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
