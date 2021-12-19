@@ -277,6 +277,9 @@
 /if [and [= unam "G1OGG"] [= udir "GOGG"]] then
   /set ty 66
   /endif
+/if [and [= unam "CAPLEV"] [= udir "JOWA"]] then
+  /set ty 67
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
