@@ -280,6 +280,9 @@
 /if [and [= unam "CAPLEV"] [= udir "JOWA"]] then
   /set ty 67
   /endif
+/if [and [= unam "HLEAR"] [= udir "EVSND"]] then
+  /set ty 68
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here

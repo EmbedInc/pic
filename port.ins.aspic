@@ -150,7 +150,7 @@ pullups_all set  pullups_all | val_pulluph
 pullups_all set  pullups_all | val_pullupj
     endif
 
-  if fam_16 | fam_16b        ;16 family PIC ?
+  ifdef option_reg
     if pullups_all
          setreg  b'00011111', option_reg
                  ; 0-------  globally enable passive pullups
@@ -168,7 +168,7 @@ pullups_all set  pullups_all | val_pullupj
                  ; ----1---  assign prescaler to watchdog timer
                  ; -----111  select maximum watchdog presacler (128)
       endif
-    endif                    ;end of 16 family PIC case
+    endif                    ;end of OPTION_REG exists
 
   if fam_18                  ;18 family PIC ?
     if val_pullupb

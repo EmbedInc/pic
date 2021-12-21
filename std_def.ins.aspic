@@ -30,6 +30,23 @@ false    equ     0
 
 ;*******************************************************************************
 ;
+;   Create the PICNAME_MPASM constant.  This is the name of the PIC model that
+;   MPLAB is being told we are using.  Some newer PICs aren't supported bt MPASM
+;   anymore.  In those cases, we create our own include file, and tell MPASM we
+;   are using a PIC that it does support and that has the same instruction set.
+;
+;   The PICNAME constant must already be set.  It is the upper case name of the
+;   PIC model we are actually using.
+;
+/pick one by picname
+  /option "16F15224"
+    /const picname_mpasm string = "16F15386"
+  /optionelse
+    /const picname_mpasm string = picname
+  /endpick
+
+;*******************************************************************************
+;
 ;   Handle the version and sequence numbers for this build.  This section is
 ;   only run if the following preprocessor constants exist:
 ;
@@ -126,7 +143,7 @@ false    equ     0
 ;   <fwname>lib.ins.aspic file before this file is included.
 ;
     /writepush [str "(cog)src/" srcdir "/" fwname ".picname"]
-    /write picname
+    /write picname_mpasm
     /writepop
 
     /show "  Building " [ucase fwname] " version " ver " sequence " seq
@@ -140,6 +157,13 @@ false    equ     0
 ;
   /include fnam
   /endblock                  ;done setting firmware version and sequence number
+
+fam_12   set     0           ;init all family type flags to false
+fam_16c5 set     0
+fam_16   set     0
+fam_16b  set     0
+fam_17   set     0
+fam_18   set     0
 
 ;*******************************************************************************
 ;
@@ -157,6 +181,8 @@ false    equ     0
 ;   only performed here if the PREPIC constant PROCESSOR does not exist but
 ;   PICNAME does.
 ;
+/var new pic_emb_defined bool = false ;init to Embed proc-specific state not defined
+
 /block
   /if [not [exist "picname"]] then //quit if using the old method
     /quit
@@ -166,11 +192,36 @@ false    equ     0
     /endif
   /var local tnam
   /const processor = picname
-         processor [chars processor]
-
+  //
+  //   Use the Embed include file for this processor, if it exists.
+  //
+  /set tnam [tnam "(cog)source/pic/inc/" [lcase processor] ".ins.aspic"]
+  /if [exist tnam fnam] then
+    /write
+    /write ";*******************************************************************************"
+    /write ";   Starting Embed PIC-specific include file"
+    /write ";   " tnam
+    /write ";*******************************************************************************"
+    /write
+    /include tnam
+    /write
+    /write ";*******************************************************************************"
+    /write ";   Back from Embed PIC-specific include file"
+    /write ";   " tnam
+    /write ";*******************************************************************************"
+    /write
+    /set pic_emb_defined true
+    /quit
+    /endif
+  //
+  //   No Embed include file for this processor was found.  Use the Microchip
+  //   file.
+  //
   /set tnam [dir "(cog)extern/mplab/mpasm.exe"] //directory include files are in
   /append tnam "/p" [lcase processor] ".inc" //full include file name
   /set tnam [tnam tnam] //fixed absolute pathname of the include file
+  /write
+         processor [chars processor]
   /write
   /write ";*******************************************************************************"
   /write ";   Starting Microchip include file"
@@ -195,6 +246,8 @@ false    equ     0
 ;   See the comments at the beginning of STD.INS.ASPIC for a detailed
 ;   description of these settings.
 ;
+/if [not pic_emb_defined] then
+
 stacksize set    16          ;software stack size
 numregs  set     13          ;number of general registers, REG0 - REGn
 regstart set     h'70'       ;starting address of general registers (REG0 address)
@@ -331,7 +384,8 @@ intr_off_bug set true
 ;*******************************************************************************
 ;
 ;   Determine the processor family.  Exactly one of the following symbols will
-;   be set to 1 (true) while the remaining ones will be set to 0 (false).
+;   be set to 1 (true).  All of these symbols have already been initialized to
+;   false.
 ;
 ;   FAM_12  -  12 bit instruction word like 12C508, ...
 ;
@@ -346,12 +400,6 @@ intr_off_bug set true
 ;
 ;   FAM_18  -  New 16 bit instruction word like 18C242, ...
 ;
-fam_12   set     0           ;init all family type flags to false
-fam_16c5 set     0
-fam_16   set     0
-fam_16b  set     0
-fam_17   set     0
-fam_18   set     0
 
 ;**********
 ;
@@ -862,20 +910,6 @@ progadrb set     2
 create_tempw set false
     endif
 
-  ifdef __16f1786
-fam_16b  set     1           ;enhanced 14 bit core part
-nregbanks set    32
-ncodepages set   4
-commregs_first set h'70'
-commregs_last set h'7F'
-stacklast set    h'64F'
-stacksize set    48
-ee_start set     h'F000'
-progadrb set     2
-create_tempw set false
-bra_bug  set     true        ;interrupt during BRA corrupts PC
-pullups_porta set h'FF'
-    endif
   ifdef __16lf1786
 fam_16b  set     1           ;enhanced 14 bit core part
 nregbanks set    32
@@ -1280,9 +1314,9 @@ numregs  set     16
 adr_word set     2
 ee_start set     h'F00000'
 progadrb set     2
-/const   proglast integer = 16#7FFF
-/const   prog_erasesz integer = 64 ;program memory erase block size, bytes
-/const   prog_writesz integer = 32 ;program memory write block size, bytes
+  /const proglast integer = 16#7FFF
+  /const prog_erasesz integer = 64 ;program memory erase block size, bytes
+  /const prog_writesz integer = 32 ;program memory write block size, bytes
 proglast set     [v proglast]
     endif
 
@@ -1463,6 +1497,15 @@ progadrb set     2
 cfg_adr  set     h'300000'   ;default config words start for 18F
       endif
     endif
+
+;
+;   End of section unique to the specific processors we support.  This section
+;   was skipped if a Embed include file for the specific processor was used.  In
+;   that case, all the Embed-specific settings were made in that include file.
+;
+  /endif                     ;end of used Microchip-supplied processor-specific include file
+;
+;*******************************************************************************
 
 ;**********
 ;
