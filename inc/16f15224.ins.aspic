@@ -1563,115 +1563,49 @@ CWG1OVRD EQU     H'0007'
 
 
 ;----- PIR0 Bits -----------------------------------------------------
-INTF     EQU     H'0000'
-IOCIF    EQU     H'0004'
-TMR0IF   EQU     H'0005'
+TMR0IF   EQU     5
+IOCIF    EQU     4
+INTR     EQU     0
 
 
 ;----- PIR1 Bits -----------------------------------------------------
-ADIF     EQU     H'0000'
-ADTIF    EQU     H'0001'
-CSWIF    EQU     H'0006'
-OSFIF    EQU     H'0007'
+CCP1IF	EQU	7
+TMR2IF	EQU	6
+TMR1IF	EQU	5
+RC1IF	EQU	4
+RX1IF	EQU	3
+BCL1IF	EQU	2
+SSP1IF	EQU	1
+ADIF	EQU	0
 
 
 ;----- PIR2 Bits -----------------------------------------------------
-C1IF     EQU     H'0000'
-C2IF     EQU     H'0001'
-ZCDIF    EQU     H'0006'
-
-
-;----- PIR3 Bits -----------------------------------------------------
-SSP1IF   EQU     H'0000'
-BCL1IF   EQU     H'0001'
-SSP2IF   EQU     H'0002'
-BCL2IF   EQU     H'0003'
-TX1IF    EQU     H'0004'
-RC1IF    EQU     H'0005'
-TX2IF    EQU     H'0006'
-RC2IF    EQU     H'0007'
-
-
-;----- PIR4 Bits -----------------------------------------------------
-TMR1IF   EQU     H'0000'
-TMR2IF   EQU     H'0001'
-
-
-;----- PIR5 Bits -----------------------------------------------------
-TMR1GIF  EQU     H'0000'
-CLC1IF   EQU     H'0004'
-CLC2IF   EQU     H'0005'
-CLC3IF   EQU     H'0006'
-CLC4IF   EQU     H'0007'
-
-
-;----- PIR6 Bits -----------------------------------------------------
-CCP1IF   EQU     H'0000'
-CCP2IF   EQU     H'0001'
-
-
-;----- PIR7 Bits -----------------------------------------------------
-CWG1IF   EQU     H'0000'
-NCO1IF   EQU     H'0004'
-NVMIF    EQU     H'0005'
-
-NCOIF    EQU     H'0004'
+CCP2IF	EQU	7
+NVMIF	EQU	6
+TMR1GIF	EQU	5
 
 
 ;----- PIE0 Bits -----------------------------------------------------
-INTE     EQU     H'0000'
-IOCIE    EQU     H'0004'
-TMR0IE   EQU     H'0005'
+TMR0IE	EQU	5
+IOCIE	EQU	4
+INTE	EQU	0
 
 
 ;----- PIE1 Bits -----------------------------------------------------
-ADIE     EQU     H'0000'
-ADTIE    EQU     H'0001'
-CSWIE    EQU     H'0006'
-OSFIE    EQU     H'0007'
+CCP1IE	EQU	7
+TMR2IE	EQU	6
+TMR1IE	EQU	5
+RC1IE	EQU	4
+TX1IE	EQU	3
+BCL1IE	EQU	2
+SSP1IE	EQU	1
+ADIE	EQU	0
 
 
 ;----- PIE2 Bits -----------------------------------------------------
-C1IE     EQU     H'0000'
-C2IE     EQU     H'0001'
-ZCDIE    EQU     H'0006'
-
-
-;----- PIE3 Bits -----------------------------------------------------
-SSP1IE   EQU     H'0000'
-BCL1IE   EQU     H'0001'
-SSP2IE   EQU     H'0002'
-BCL2IE   EQU     H'0003'
-TX1IE    EQU     H'0004'
-RC1IE    EQU     H'0005'
-TX2IE    EQU     H'0006'
-RC2IE    EQU     H'0007'
-
-
-;----- PIE4 Bits -----------------------------------------------------
-TMR1IE   EQU     H'0000'
-TMR2IE   EQU     H'0001'
-
-
-;----- PIE5 Bits -----------------------------------------------------
-TMR1GIE  EQU     H'0000'
-CLC1IE   EQU     H'0004'
-CLC2IE   EQU     H'0005'
-CLC3IE   EQU     H'0006'
-CLC4IE   EQU     H'0007'
-
-
-;----- PIE6 Bits -----------------------------------------------------
-CCP1IE   EQU     H'0000'
-CCP2IE   EQU     H'0001'
-
-
-;----- PIE7 Bits -----------------------------------------------------
-CWG1IE   EQU     H'0000'
-NCO1IE   EQU     H'0004'
-NVMIE    EQU     H'0005'
-
-NCOIE    EQU     H'0004'
+CCP2IE	EQU	7
+NVMIE	EQU	6
+TMR1GIE	EQU	5
 
 
 ;----- PMD0 Bits -----------------------------------------------------
