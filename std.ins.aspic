@@ -2043,8 +2043,8 @@ ninstr   set     ((freq_inst / 16) * usec) / 62500 ;instructions in period
 //
 //   The setup parameters are valid.  Now set the timer registers.
 //
-  /set ii [shiftl [rnd [log2 tmr2_pre]] 4] //init with prescaler field
-  /set ii [or ii [- tmr2_pos]] //merge in postscaler field
+  /set ii [shiftl [rnd [log2 tmr2_pre]] 4] //init value with prescaler field
+  /set ii [or ii [- tmr2_pos 1]] //merge in postscaler field
   /set s ""
   /call tabopcode s
   /append s "setreg"
@@ -2056,7 +2056,14 @@ ninstr   set     ((freq_inst / 16) * usec) / 62500 ;instructions in period
 
          setreg  0, t2tmr    ;init the timer counter to 0
 
-         setreg  [- tmr2_per 1], t2pr ;set the timer period
+  /set s ""
+  /call tabopcode s
+  /append s "setreg"
+  /call taboperand s
+  /append s [- tmr2_per 1] ", t2pr"
+  /call startcomm s
+  /append s "set timer 2 period to " tmr2_per
+  /write s
 
          setreg  b'00000001', t2clkcon
                  ; XXXXX---  unused
