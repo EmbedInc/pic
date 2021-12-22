@@ -1709,7 +1709,9 @@ timer0_per macro cy
 //
 //   Subroutine TIMER2_CONFIG_SET pre per pos [desper]
 //
-//   Set the timer 2 configuration constants according to the call arguments:
+//   Determine the timer 2 configuration constants according to the call
+//   parameters.  No executable code is generated, only preprocessor and
+//   assembly state is created and/or updated.  The call parameters are:
 //
 //     PRE  -  Prescaler: 1, 4, 16
 //
@@ -1822,21 +1824,21 @@ tmr2_pos equ     [v tmr2_pos]
     /endif
   /endsub
 
-;*******************************************************************************
-;
-;   Macro TMR2CY_CLOSEPER period
-;
-;   Computes the timer 2 setup to result in the desired period as close as
-;   possible.  PERIOD is the desired timer 2 period in floating point seconds.
-;
-;   This macro produces no code.  It only creates preprocessor and assembler
-;   constants.  See subroutine TIMER2_CONFIG_SET for a list of the constants.
-;
-;   The configuration resulting in the closest period to PERIOD is always
-;   chosen.  When multiple configurations result in the same lowest error, then
-;   the PWM period is minimized (the postscaler maximized).  Otherwise, the PWM
-;   resolution is maximized by minimizing the prescaler.
-;
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro TMR2CY_CLOSEPER period
+//
+//   Computes the timer 2 setup to result in the desired period as close as
+//   possible.  PERIOD is the desired timer 2 period in floating point seconds.
+//
+//   This macro produces no code.  It only creates preprocessor and assembler
+//   constants.  See subroutine TIMER2_CONFIG_SET for a list of the constants.
+//
+//   The configuration resulting in the closest period to PERIOD is always
+//   chosen.  When multiple configurations result in the same lowest error, then
+//   the PWM period is minimized (the postscaler maximized).  Otherwise, the PWM
+//   resolution is maximized by minimizing the prescaler.
+//
 /macro tmr2cy_closeper
   /var local dper real = [vnl [arg 1]] ;desired period, seconds
   /var local pre integer     ;current prescaler: 1, 4, 16
@@ -1870,15 +1872,16 @@ tmr2_pos equ     [v tmr2_pos]
   /call timer2_config_set best_pre best_per best_pos dper
   /endmac
 
-;*******************************************************************************
-;
-;   Macro TMR2CY_MAXPER cycles
-;
-;   Like TIMER2_CYCLES except that the period value is maximized as the highest
-;   priority and the postscaler maximized second.  This results in the highest
-;   possible PWM resolution within the total period constraint, and the highest
-;   PWM frequency for the chosen PWM period.
-;
+////////////////////////////////////////////////////////////////////////////////
+//
+//
+//   Macro TMR2CY_MAXPER cycles
+//
+//   Like TIMER2_CYCLES except that the period value is maximized as the highest
+//   priority and the postscaler maximized second.  This results in the highest
+//   possible PWM resolution within the total period constraint, and the highest
+//   PWM frequency for the chosen PWM period.
+//
 /macro tmr2cy_maxper
   /var local cycles integer = [arg 1] ;instruction cycles in whole period
   /var exist tmr2_pre integer ;prescaler value: 1, 4, or 16
@@ -1995,13 +1998,81 @@ ninstr   set     ((freq_inst / 16) * usec) / 62500 ;instructions in period
          timer2_cycles ninstr
          endm
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine TIMER2B_PER_SET
+//
+//   Set up a enhanced 16F152xx timer 2 to generate a periodic event.  The
+//   timer is set up from the following preprocessor state:
+//
+//     TMR2_PRE  -  Prescaler, power of 2 from 1 to 128
+//
+//     TMR2_PER  -  Period divide value, 1 - 256
+//
+//     TMR2_POS  -  Postscaler, 1 - 16
+//
+/subroutine timer2b_per_set
+  /var local ii integer      ;scratch integer
+  /var local s string        ;scratch string
+//
+//   Validate the setup parameters.
+//
+  /set ii [rnd [log2 tmr2_pre]] //get the prescaler power of 2
+  /set ii [max 0 [min 7 ii]] //clip to the valid range
+  /set ii [shiftl 1 ii] //re-create the original power of 2
+  /if [<> ii tmr2_pre] then //invalid prescaler value ?
+    /show "  Timer 2 prescaler of " tmr2_pre " is out of range."
+         errors  TMR2_PRE
+         end
+    /stop
+    /endif
+
+  /if [or [< tmr2_per 1] [> tmr2_per 256]] then
+    /show "  Timer 2 period of " tmr2_per " is out of range."
+         errors  TMR2_PER
+         end
+    /stop
+    /endif
+
+  /if [or [< tmr2_pos 1] [> tmr2_pos 16]] then
+    /show "  Timer 2 postscaler of " tmr2_pos " is out of range."
+         errors  TMR2_POS
+         end
+    /stop
+    /endif
+//
+//   The setup parameters are valid.  Now set the timer registers.
+//
+  /set ii [shiftl [rnd [log2 tmr2_pre]] 4] //init with prescaler field
+  /set ii [or ii [- tmr2_pos]] //merge in postscaler field
+  /set s ""
+  /call tabopcode s
+  /append s "setreg"
+  /call taboperand s
+  /append s ii ", t2con"
+  /call startcomm s
+  /append s "timer off, prescaler " tmr2_pre ", postscaler " tmr2_pos
+  /write s
+
+         setreg  0, t2tmr    ;init the timer counter to 0
+
+         setreg  [- tmr2_per 1], t2pr ;set the timer period
+
+         setreg  b'00000001', t2clkcon
+                 ; XXXXX---  unused
+                 ; -----001  clock source is instruction clock
+
+         dbankif pir1
+         bcf     pir1, tmr2if ;clear the clock tick flag
+  /endsub
+
 ;*******************************************************************************
 ;
 ;   Macro TIMER2_SETUP
 ;
 ;   Set up timer 2 to periodically set the timer 2 interrupt flag.  This macro
 ;   only sets up the timer hardware and initializes the flag to reset.  It does
-;   not enable the timer 2 interrupt.
+;   not enable the timer or its interrupt.
 ;
 ;   Timer 2 divides the instruction clock by a prescaler, period, and postscaler
 ;   to make the interrupt period.  The following assembler variables must be
@@ -2017,8 +2088,15 @@ ninstr   set     ((freq_inst / 16) * usec) / 62500 ;instructions in period
 ;   desired interrupt period.  It is an error if any of these assembler
 ;   variables don't exist or are set to invalid values.
 ;
+;   For newer timer 2 types, the state must be supplied both as preprocessor
+;   constants and assembly constants.  This is automatically done by the
+;   TMR2CY_xxx macros.  The old TIMER2_xxx macros are not supported with the new
+;   timer 2 type.
+;
 timer2_setup macro
          local   t2con_val
+;
+;   Handle traditional timer 2.
 ;
 ;   Verify prescaler value is valid.
 ;
@@ -2078,7 +2156,36 @@ t2con_val set    t2con_val | 2 ;merge in value for prescaler divide by 16
 
          dbankif tmr2
          clrf    tmr2        ;leave max time before first interrupt
+
          endm
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine TIMER2_SETUP
+//
+//   Set up timer 2 to periodically set the timer 2 interrupt flag.  The timer
+//   is only configured, not run.
+//
+//   The timer is set up according to the following preprocessor constants:
+//
+//     TMR2_PRE  -  timer 2 prescaler value: 1, 4, or 16
+//
+//     TMR2_PER  -  timer 2 period divide value: 1 - 256
+//
+//     TMR2_POS  -  timer 2 postscaler value: 1 - 16
+//
+//   Note that the TMR2CY_xxx macros can be used to compute these values given a
+//   desired period.
+//
+/subroutine timer2_setup
+
+  /if [exist "_t2rst:const"] then ;16F152xx type ?
+    /call timer2b_per_set
+    /return
+    /endif
+
+         timer2_setup        ;use old macro for the old timer 2 type
+  /endsub
 
 ;*******************************************************************************
 ;

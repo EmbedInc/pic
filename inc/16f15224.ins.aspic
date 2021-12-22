@@ -8,6 +8,132 @@
 ;
          processor [chars picname_mpasm]
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine ASMEXP exp
+//
+//   Evaluate an MPASM expression EXP, if possible.  EXP is a string, not raw
+//   characters.  The following preprocessor variables are set (created if not
+//   previously existing):
+//
+//    EXPINT, integer  -  Value of the expression.  0 when not able to determine
+//      the value.
+//
+//    EXPVAL, bool  -  TRUE if the expression could be evaluated, in which case
+//      EXPINT is set to the value.  Otherwise, set to FALSE, and EXPINT to 0.
+//
+/subroutine asmexp
+  /var local exp string = [vnl [arg 1]] ;get the expression string
+  /var exist expint integer  ;the expression value
+  /var exist expval bool     ;TRUE iff expression could be interpreted
+
+  /set expval true           ;init to was able to interpret expression
+//
+//   Check for a valid prepic expression.
+//
+  /if [isint [chars exp]] then ;can be directly interpreted ?
+    /set expint [vnl [chars exp]] ;interpret and save the expression value
+    /return
+    /endif
+
+  /set exp [ucase exp]       ;not Prepic expresion, MPASM is case-insensitive
+//
+//   Check for H'xxx' syntax.
+//
+  /block                     ;abort this block when can't parse expression
+    /if [< [slen exp] 4] then ;too short for H'x' ?
+      /quit
+      /endif
+    /if [<> [sindx 1 exp] "H"] then
+      /quit
+      /endif
+    /if [<> [sindx 2 exp] "'"] then
+      /quit
+      /endif
+    /if [<> [sindx [slen exp] exp] "'"] then
+      /quit
+      /endif
+
+    /var local s string      ;the raw hex number string
+    /set expint 16#[chars [substr 3 [- [slen exp] 3] exp]] ;interpret the HEX value
+    /return
+    /endblock
+//
+//   Unable to interpret the expression.
+//
+  /set expint 0
+  /set expval false
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro EQU
+//
+//   This macro hooks the regular MPASM EQU directive.  It performs the same
+//   operation as MPASM EQU, except that it also defines a preprocessor constant
+//   of _name, where NAME is the name of the MPASM symbol being defined.
+//
+//   A preprocessor symbol is only defined when the value being assigned can can
+//   be determined by Prepic.  When not, no preprocessor symbol is created.  The
+//   argument formats supported by Prepic are:
+//
+//     nnn, bb#nnn
+//
+//       Native Prepic integer values.  BB is the number base (radix), and
+//       defaults to 10 (decimal).
+//
+//     h'nnn'
+//
+//       NNN is a hexadecimal integer.
+//
+/macro EQU
+  /var local name string = [ucase [qstr [arg -1]]] //get name of symbol to define
+  /var local vexp string = [qstr [arg 1]] //get value expression string
+  /var local s string //ASM line to write
+
+  /call asmexp vexp          ;set EXPINT and EXPVAL according to expression
+
+  /if expval then            ;the expression value is known ?
+    /const _[chars [lcase name]] integer = expint ;create the prepic constant
+    /endif
+
+  /set s name
+  /append s " "
+  /loop
+    /if [>= [slen s] 9] then
+      /quit
+      /endif
+    /append s " "
+    /endloop
+
+  /append s "EQU "
+  /loop
+    /if [>= [slen s] 17] then
+      /quit
+      /endif
+    /append s " "
+    /endloop
+
+  /if expval
+    /then                    ;the expression value is known
+      /append s expint " "
+      /loop
+        /if [>= [slen s] 29] then
+          /quit
+          /endif
+        /append s " "
+        /endloop
+      /append s ";" [int expint "base 16 usin"] "h (" vexp ")"
+    /else                    ;couldn't interpret expression
+      /append s vexp
+    /endif
+  /write s
+  /endmac
+
+/macro equ
+[arg -1] EQU     [arg 1]
+  /endmac
+
 ;*******************************************************************************
 ;
 ;   Register definitions.
@@ -1569,43 +1695,43 @@ INTR     EQU     0
 
 
 ;----- PIR1 Bits -----------------------------------------------------
-CCP1IF	EQU	7
-TMR2IF	EQU	6
-TMR1IF	EQU	5
-RC1IF	EQU	4
-RX1IF	EQU	3
-BCL1IF	EQU	2
-SSP1IF	EQU	1
-ADIF	EQU	0
+CCP1IF   EQU     7
+TMR2IF   EQU     6
+TMR1IF   EQU     5
+RC1IF    EQU     4
+RX1IF    EQU     3
+BCL1IF   EQU     2
+SSP1IF   EQU     1
+ADIF     EQU     0
 
 
 ;----- PIR2 Bits -----------------------------------------------------
-CCP2IF	EQU	7
-NVMIF	EQU	6
-TMR1GIF	EQU	5
+CCP2IF   EQU     7
+NVMIF    EQU     6
+TMR1GIF  EQU     5
 
 
 ;----- PIE0 Bits -----------------------------------------------------
-TMR0IE	EQU	5
-IOCIE	EQU	4
-INTE	EQU	0
+TMR0IE   EQU     5
+IOCIE    EQU     4
+INTE     EQU     0
 
 
 ;----- PIE1 Bits -----------------------------------------------------
-CCP1IE	EQU	7
-TMR2IE	EQU	6
-TMR1IE	EQU	5
-RC1IE	EQU	4
-TX1IE	EQU	3
-BCL1IE	EQU	2
-SSP1IE	EQU	1
-ADIE	EQU	0
+CCP1IE   EQU     7
+TMR2IE   EQU     6
+TMR1IE   EQU     5
+RC1IE    EQU     4
+TX1IE    EQU     3
+BCL1IE   EQU     2
+SSP1IE   EQU     1
+ADIE     EQU     0
 
 
 ;----- PIE2 Bits -----------------------------------------------------
-CCP2IE	EQU	7
-NVMIE	EQU	6
-TMR1GIE	EQU	5
+CCP2IE   EQU     7
+NVMIE    EQU     6
+TMR1GIE  EQU     5
 
 
 ;----- PMD0 Bits -----------------------------------------------------
