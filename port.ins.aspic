@@ -33,7 +33,7 @@
 
   ifdef adcon1
          dbankif adcon1
-    ifdef adcon2             ;enhanced A/D with separate in config bits ?
+    ifdef adcon2             ;enhanced A/D with separate config bits ?
       ifdef vcfg0
          movlw   b'00001111' ;set just the PCFGx bits
         else
@@ -191,266 +191,39 @@ pullups_all set  pullups_all | val_pullupj
 ;   Initialize the I/O ports according to how each of the bits was declared
 ;   with the /INBIT and /OUTBIT preprocessor directives.
 ;
-         ;
-         ;   Initialize port A if it exists.
-         ;
-  ifdef porta
-    if val_pullupa & ~val_trisa
-         error   "Pullup requested on a port A output bit."
+/loop with pcode from [ccode 'A'] to [ccode 'J']
+  /var local p string        ;port letter, upper case
+  /var local s string        ;one output file line
+
+  /set p [char pcode]
+  /write "         ;"
+  /write "         ;   Initialize port " p " if it exists."
+  /write "         ;"
+  ifdef port[chars p]
+    if val_pullup[chars p] & ~val_tris[chars p]
+  /write '         error   "Pullup requested on a port ' p ' output bit."'
       endif
-    if val_pullupa & ~pullups_porta
-         error   "Port A pullup requested that is not available."
+    if val_pullup[chars p] & ~pullups_port[chars p]
+  /write '         error   "Port ' p ' pullup requested that is not available."'
       endif
-    if (val_pullupa != 0) && ((pullups_porta & h'80000000') != 0)
-      if pullups_porta & h'7FFFFFFF' & (~val_pullupa) & val_trisa
-         error   "Only some port A pullups enabled, must be all or none."
+    if (val_pullup[chars p] != 0) && ((pullups_port[chars p] & h'80000000') != 0)
+      if pullups_port[chars p] & h'7FFFFFFF' & (~val_pullup[chars p]) & val_tris[chars p]
+  /write '         error   "Only some port ' p ' pullups enabled, must be all or none."'
         endif
       endif
-    ifdef wpu
-         setreg  val_pullupa, wpu
+    ifdef wpu[chars p]
+         setreg  val_pullup[chars p], wpu[chars p]
       endif
-    ifdef wpua
-         setreg  val_pullupa, wpua
-      endif
-    ifdef wpuda
-         setreg  val_pullupa, wpuda
-      endif
-    ifdef lata
-         setreg  val_porta, lata
+    ifdef lat[chars p]
+         setreg  val_port[chars p], lat[chars p]
       else
-         setreg  val_porta, porta
+         setreg  val_port[chars p], port[chars p]
       endif
     endif
-  ifdef trisa
-         setreg  val_trisa, trisa
+  ifdef tris[chars p]
+         setreg  val_tris[chars p], tris[chars p]
     endif
-         ;
-         ;   Initialize port B if it exists.
-         ;
-  ifdef portb
-    if val_pullupb & ~val_trisb
-         error   "Pullup requested on a port B output bit."
-      endif
-    if val_pullupb & ~pullups_portb
-         error   "Port B pullup requested that is not available."
-      endif
-    if (val_pullupb != 0) && ((pullups_portb & h'80000000') != 0)
-      if pullups_portb & h'7FFFFFFF' & (~val_pullupb) & val_trisb
-         error   "Only some port B pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpub
-         setreg  val_pullupb, wpub
-      endif
-    ifdef latb
-         setreg  val_portb, latb
-      else
-         setreg  val_portb, portb
-      endif
-    endif
-  ifdef trisb
-         setreg  val_trisb, trisb
-    endif
-         ;
-         ;   Initialize port C if it exists.
-         ;
-  ifdef portc
-    if val_pullupc & ~val_trisc
-         error   "Pullup requested on a port C output bit."
-      endif
-    if val_pullupc & ~pullups_portc
-         error   "Port C pullup requested that is not available."
-      endif
-    if (val_pullupc != 0) && ((pullups_portc & h'80000000') != 0)
-      if pullups_portc & h'7FFFFFFF' & (~val_pullupc) & val_trisc
-         error   "Only some port C pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpuc
-         setreg  val_pullupc, wpuc
-      endif
-    ifdef latc
-         setreg  val_portc, latc
-      else
-         setreg  val_portc, portc
-      endif
-    endif
-  ifdef trisc
-         setreg  val_trisc, trisc
-    endif
-         ;
-         ;   Initialize port D if it exists.
-         ;
-  ifdef portd
-    if val_pullupd & ~val_trisd
-         error   "Pullup requested on a port D output bit."
-      endif
-    if val_pullupd & ~pullups_portd
-         error   "Port D pullup requested that is not available."
-      endif
-    if (val_pullupd != 0) && ((pullups_portd & h'80000000') != 0)
-      if pullups_portd & h'7FFFFFFF' & (~val_pullupd) & val_trisd
-         error   "Only some port D pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef rdpu
-      ifdef porte
-         dbankif porte
-         bsf     porte, rdpu
-val_porte set    val_porte | (1 << rdpu)
-        endif
-      ifdef repu
-         dbankif lata
-         bsf     lata, rdpu
-        endif
-      endif
-    ifdef wpud
-         setreg  val_pullupd, wpud
-      endif
-    ifdef latd
-         setreg  val_portd, latd
-      else
-         setreg  val_portd, portd
-      endif
-    endif
-  ifdef trisd
-         setreg  val_trisd, trisd
-    endif
-         ;
-         ;   Initialize port E if it exists.
-         ;
-  ifdef porte
-    if val_pullupe & ~val_trise
-         error   "Pullup requested on a port E output bit."
-      endif
-    if val_pullupe & ~pullups_porte
-         error   "Port E pullup requested that is not available."
-      endif
-    if (val_pullupe != 0) && ((pullups_porte & h'80000000') != 0)
-      if pullups_porte & h'7FFFFFFF' & (~val_pullupe) & val_trise
-         error   "Only some port E pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpue
-         setreg  val_pullupe, wpue
-      endif
-    ifdef late
-         setreg  val_porte, late
-      else
-         setreg  val_porte, porte
-      endif
-    endif
-  ifdef trise
-         setreg  val_trise, trise
-    endif
-         ;
-         ;   Initialize port F if it exists.
-         ;
-  ifdef portf
-    if val_pullupf & ~val_trisf
-         error   "Pullup requested on a port F output bit."
-      endif
-    if val_pullupf & ~pullups_portf
-         error   "Port F pullup requested that is not available."
-      endif
-    if (val_pullupf != 0) && ((pullups_portf & h'80000000') != 0)
-      if pullups_portf & h'7FFFFFFF' & (~val_pullupf) & val_trisf
-         error   "Only some port F pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpuf
-         setreg  val_pullupf, wpuf
-      endif
-    ifdef latf
-         setreg  val_portf, latf
-      else
-         setreg  val_portf, portf
-      endif
-    endif
-  ifdef trisf
-         setreg  val_trisf, trisf
-    endif
-         ;
-         ;   Initialize port G if it exists.
-         ;
-  ifdef portg
-    if val_pullupg & ~val_trisg
-         error   "Pullup requested on a port G output bit."
-      endif
-    if val_pullupg & ~pullups_portg
-         error   "Port G pullup requested that is not available."
-      endif
-    if (val_pullupg != 0) && ((pullups_portg & h'80000000') != 0)
-      if pullups_portg & h'7FFFFFFF' & (~val_pullupg) & val_trisg
-         error   "Only some port G pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpug
-         setreg  val_pullupg, wpug
-      endif
-    ifdef latg
-         setreg  val_portg, latg
-      else
-         setreg  val_portg, portg
-      endif
-    endif
-  ifdef trisg
-         setreg  val_trisg, trisg
-    endif
-         ;
-         ;   Initialize port H if it exists.
-         ;
-  ifdef porth
-    if val_pulluph & ~val_trish
-         error   "Pullup requested on a port H output bit."
-      endif
-    if val_pulluph & ~pullups_porth
-         error   "Port H pullup requested that is not available."
-      endif
-    if (val_pulluph != 0) && ((pullups_porth & h'80000000') != 0)
-      if pullups_porth & h'7FFFFFFF' & (~val_pulluph) & val_trish
-         error   "Only some port H pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpuh
-         setreg  val_pulluph, wpuh
-      endif
-    ifdef lath
-         setreg  val_porth, lath
-      else
-         setreg  val_porth, porth
-      endif
-    endif
-  ifdef trish
-         setreg  val_trish, trish
-    endif
-         ;
-         ;   Initialize port J if it exists.
-         ;
-  ifdef portj
-    if val_pullupj & ~val_trisj
-         error   "Pullup requested on a port J output bit."
-      endif
-    if val_pullupj & ~pullups_portj
-         error   "Port J pullup requested that is not available."
-      endif
-    if (val_pullupj != 0) && ((pullups_portj & h'80000000') != 0)
-      if pullups_portj & h'7FFFFFFF' & (~val_pullupj) & val_trisj
-         error   "Only some port J pullups enabled, must be all or none."
-        endif
-      endif
-    ifdef wpuj
-         setreg  val_pullupj, wpuj
-      endif
-    ifdef latj
-         setreg  val_portj, latj
-      else
-         setreg  val_portj, portj
-      endif
-    endif
-  ifdef trisj
-         setreg  val_trisj, trisj
-    endif
+  /endloop                   ;back to initialize next port
 ;
 ;   Initialize other state managed by this module.
 ;

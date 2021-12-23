@@ -4171,7 +4171,7 @@ currdb   set     nobank      ;init current direct register bank assumption
 #define bankof(adr) (((adr) >> 7) & 3)
     endif
   if fam_16b
-#define bankof(adr) (((adr) >> 7) & 31)
+#define bankof(adr) (((adr) >> 7) & 63)
     endif
   if fam_17
 #define bankof(adr) (((adr) >> 8) & 15)
@@ -4558,7 +4558,7 @@ currgb   set     newbank
 
 ;*****
 ;
-;   16 family devices.
+;   Traditional 16 family devices.
 ;
   if fam_16
     if nregbanks <= 1        ;this processor only has one register bank ?
