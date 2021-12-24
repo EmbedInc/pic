@@ -306,6 +306,10 @@ OSCEN    EQU     H'0891'
 OSCTUNE  EQU     H'0892'
 OSCFRQ   EQU     H'0893'
 
+;   Bank 18.
+;
+FVRCON   EQU     H'090C'
+
 ;   Bank 61.
 ;
 PPSLOCK  EQU     H'1E8F'
