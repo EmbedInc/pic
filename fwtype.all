@@ -283,6 +283,12 @@
 /if [and [= unam "HLEAR"] [= udir "EVSND"]] then
   /set ty 68
   /endif
+/if [and [= unam "CMUXM"] [= udir "JOWA"]] then
+  /set ty 69
+  /endif
+/if [and [= unam "CMUXI"] [= udir "JOWA"]] then
+  /set ty 70
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
