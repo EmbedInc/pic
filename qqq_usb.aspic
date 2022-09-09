@@ -1,5 +1,9 @@
 ;   USB I/O routines.
 ;
+;   WARNING: These routines use FSR0 and FSR1.  Calls to USB routines should be
+;     assumed to trash FSR0 and FSR1.  If these FSRs are used in interrupt code,
+;     they must be saved and restored by that interrupt code.
+;
 /include "qq2.ins.aspic"
 
 lbank    equ     1           ;register bank for the local state of this module

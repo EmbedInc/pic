@@ -61,9 +61,10 @@ ii       set     ii + 1
 ;
          defram  gbankadr
 
-usbtask  res     1           ;number of the USB processing task
+usbtask  res     1           ;number of the USB processing task, FFh for none
+usberr   res     1           ;UEIR register accumulated errors since last cleared
 
-         global  usbtask
+         global  usbtask, usberr
 
 ;*******************************************************************************
 ;
@@ -369,6 +370,7 @@ ii       set     ii + 1      ;advance to next endpoint number
 
          dbankif gbankadr
          setf    usbtask     ;indicate USB background task is not running
+         clrf    usberr      ;init to no errors accumulated
 
          dbankif ucon
          clrf    ucon        ;make sure USB hardware is disabled
@@ -411,7 +413,7 @@ ii       set     ii + 1      ;advance to next endpoint number
 
 ;*******************************************************************************
 ;
-;   Subroutine USB_STOP
+;   Subroutine USB_OFF
 ;
 ;   Stop USB communication and disable the USB hardware.
 ;
@@ -446,7 +448,9 @@ st_dtask unbank              ;done ending the background task
 ;   USB_START is called, and ended when USB_STOP is called.
 ;
 usb_task unbank              ;task start point
+         dbankif gbankadr
          movff   currtask, usbtask ;save our task ID to allow stopping later
+         clrf    usberr      ;init to no errors accumulated
 
 usbtask_loop unbank          ;start of main loop
          gcall   task_yield  ;give other tasks a chance to run
@@ -1587,7 +1591,10 @@ ii       set     ii + 1
          bsf     flag_usbev  ;indicate an event handled
 
          dbankif ueir
+         movf    ueir, w     ;get the mask of errors currently flagged by the HW
          clrf    ueir        ;clear all error conditions
+         dbankif gbankadr
+         iorwf   usberr      ;update app-visible mask of errors encountered
          return
 
 urun_noerr dbankis uir
@@ -1701,8 +1708,7 @@ urun_noxf unbank             ;no transfer done event
 
 ;********************
 ;
-;   Check for strart of frame.  We don't care about start of frames so we just
-;   clear the event bit.
+;   Check for strart of frame.
 ;
          dbankif uir
          btfss   uir, sofif  ;start of frame ?
@@ -1710,6 +1716,7 @@ urun_noxf unbank             ;no transfer done event
 
          bcf     uir, sofif  ;clear the event condition
          dbankif gbankadr
+         bsf     flag_usbframe ;indicate start of frame received
          bsf     flag_usbev  ;indicate an event handled
          return
 
