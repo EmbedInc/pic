@@ -1849,8 +1849,10 @@ sofloss_n unbank
          subwf   sofms+0
          movlw   0
          subwfb  sofms+1
-         bz      sofloss     ;no Sof within time ?
-         bn      sofloss
+         jmp_borr sofloss    ;remaining time went negative ?
+         movf    sofms+0, w
+         iorwf   sofms+1, w
+         skip_z              ;remaining time exactly elapsed just now ?
          jump    sofloss_done ;still time left
          ;
          ;   No SoF was detected within the minumum required time.
