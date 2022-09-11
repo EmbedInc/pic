@@ -72,5 +72,5 @@ iotype_intr equ  3           ;interrupt transfers
 /flag    usbreset            ;a USB reset was received, for app use
 /flag    usbon               ;USB state is up and ready for app communication
 /flag    nameusb0            ;name get routines acquired by USB 0 handler
-/flag    usbsof              ;start of frame was received in current interval
+/flag    usbact              ;USB hardware activity detected in current interval
 /flag    usbenab             ;USB has been enabled, may not be ready for app yet

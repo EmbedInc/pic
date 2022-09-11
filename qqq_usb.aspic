@@ -133,8 +133,8 @@
 ;   Build-time configuration of this module.
 ;
 lbank    equ     1           ;register bank for the local state of this module
-/const   frt1    real = 1.500 ;max time for start of frame on startup, seconds
-/const   frtn    real = 0.100 ;max time for start of frame after first, seconds
+/const   frt1    real = 1.5  ;max time for start of frame on startup, seconds
+/const   frtn    real = 1.0  ;max time for start of frame after first, seconds
 
 ////////////////////////////////////////////////////////////////////////////////
 //

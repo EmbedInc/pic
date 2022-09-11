@@ -491,8 +491,8 @@ usb_task unbank              ;task start point
          dbankif gbankadr
          movff   currtask, usbtask ;save our task ID to allow stopping later
          clrf    usberr      ;init to no errors accumulated
-         clrflag usbsof      ;init to no start of frames detected
-         set_sofsec frt1     ;init time until first SoF required
+         clrflag usbact      ;init to no activity detected
+         set_sofsec frt1     ;init time until first activity required
 
 usbtask_loop unbank          ;start of main loop
          gcall   task_yield  ;give other tasks a chance to run
@@ -1631,6 +1631,7 @@ ii       set     ii + 1
          jump    urun_noerr  ;no
          dbankif gbankadr
          bsf     flag_usbev  ;indicate an event handled
+         setflag usbact      ;indicate hardware activity seen
 
          dbankif ueir
          movf    ueir, w     ;get the mask of errors currently flagged by the HW
@@ -1658,13 +1659,32 @@ urun_noreset dbankis uir     ;skip to here on no reset event
 
 ;********************
 ;
+;   Check for strart of frame.  Execution continues even if SoF is detected,
+;   since this is a "fast" operation but that happens frequently.  Flag USBEV
+;   will not be set.  Put another way, SoF doesn't count as an "event".  The
+;   only effect is to set the USBACT flag, which is used by the USB wedged
+;   detection mechanism.
+;
+         dbankif uir
+         btfss   uir, sofif  ;start of frame ?
+         jump    urun_nosof  ;no
+
+         bcf     uir, sofif  ;clear the event condition
+         setflag usbact      ;indicate USB activity detected
+
+urun_nosof dbankis uir
+
+;********************
+;
 ;   Handle one transfer complete event if any has occurred.
 ;
          dbankif uir
          btfss   uir, trnif  ;a I/O transfer has completed ?
          jump    urun_noxf   ;no
+
          movff   ustat, reg0 ;get the status byte for this transfer into REG0
          bcf     uir, trnif  ;clear the event condition
+         setflag usbact      ;indicate USB activity detected
 ;
 ;   Read the TABLECT entry for this direction/endpoint and set FSR0 pointing to
 ;   its control state.  REG0 contains the USTAT entry for the complete transfer.
@@ -1750,21 +1770,6 @@ urun_noxf unbank             ;no transfer done event
 
 ;********************
 ;
-;   Check for strart of frame.
-;
-         dbankif uir
-         btfss   uir, sofif  ;start of frame ?
-         jump    urun_nosof  ;no
-
-         bcf     uir, sofif  ;clear the event condition
-         setflag usbsof      ;indicate start of frame has occurred
-         setflag usbev       ;indicate an event was handled
-         return
-
-urun_nosof dbankis uir
-
-;********************
-;
 ;   Check for STALL condition.  We don't care, so just reset the bit.
 ;
          dbankif uir
@@ -1822,26 +1827,26 @@ urun_noactv dbankis uir
 ;
 usb_tick glbsub
 ;
-;   Perform start of frame loss detection.
+;   Perform USB hardware wedged detection.
 ;
 ;   The USB hardware can apparently wedge itself on certain glitches, like one
 ;   of the data lines momentarily shorted to Vdd.  Unfortunately, no error is
 ;   signalled when that happens.  The only indication is that start of frames
-;   are no longer received.  The NO_SOF macro, if supplied, is run when this
-;   case is detected.
+;   and other activity is no longer received.  The NO_SOF macro, if supplied,
+;   is run when this case is detected.
 ;
          skip_flag usbenab   ;USB is enabled, SoF eventually required ?
          jump    sofloss_done ;USB is disabled, nothing more to do
-         skip_flag usbsof    ;SoF was received since last time ?
+         skip_flag usbact    ;activity detected since last time ?
          jump    sofloss_n   ;no
          ;
-         ;   A SoF was received since last time.
+         ;   Hardware activity seen since last time.
          ;
-         clrflag usbsof      ;clear the SoF detection
-         set_sofsec frtn     ;reset time next SoF is required within
+         clrflag usbact      ;reset to no activity in this new test interval
+         set_sofsec frtn     ;reset time next activity is required within
          jump    sofloss_done
          ;
-         ;   No SoF was received since last time.
+         ;   No activity since last time.
          ;
 sofloss_n unbank
          dbankif lbankadr
@@ -1855,7 +1860,7 @@ sofloss_n unbank
          skip_z              ;remaining time exactly elapsed just now ?
          jump    sofloss_done ;still time left
          ;
-         ;   No SoF was detected within the minumum required time.
+         ;   No activity was detected within the minumum required time.
          ;
 sofloss  unbank
          usb_disable         ;hardware is wedged, no choice but to disable it

@@ -282,47 +282,78 @@
 ;
 ;   Configuration constants.
 ;
-;   Check for required constants and abort on error if any is missing.
-;
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Set up the debugging environment.
+//
+//   If any DEBUG_xxx constants exist, then it is assumed that the old system
+//   for setting debug switches is in use.  Otherwise, the MAKE_DEBUG program is
+//   run to create the debug switches.  Either way, the new constant DEBUGGING
+//   is always created.
+//
 /block
-  /var local t bool
+  /var local dbg bool = false //found at least one DEBUG_xxx constant
+  /var local dbgon bool = false //OR of all DEBUG_xxx constants
+  /var local sy string //scratch symbol name
+  /var local fnam string //scratch file name
+  /loop symbols sym const
+    /set sy [sym sym name]
+    /if [< [slen sy] 7] then
+      /repeat
+      /endif
+    /if [<> [substr 1 6 sy] "debug_"] then
+      /repeat
+      /endif
+    /if [<> [sym sym dtype] "BOOL"] then
+      /repeat
+      /endif
+    /set dbg True
+    /set dbgon [or dbgon [chars sym]]
+    /endloop
 
-  /if [exist "debug"]
-    /then
-      /set t debug
-    /else
-      /set t false
+  /if dbg then //old style debug switches in use ?
+    /if [<> [evar "debug"] ""] then
+      /show "  *** ERROR ***"
+      /show "  Using the DEBUG environment variable is incompatible with debug switches"
+      /show "  set in the project include file."
+         .error  "Debug"
+         .end
+      /stop
+      /endif
+    /if [not [exist "debugging:const"]] then
+      /const debugging bool = dbgon
+      /endif
+    /if [not [exist "debug:const"]] then
+      /const debug bool = debugging
+      /endif
+    /if [not [exist "debug_icd:const"]] then
+      /const debug_icd bool = false
+      /endif
+    /if [exist "debug_icdram:vcon"] then
+      /if [and debug_icd [not debug_icdram]] then
+        /del debug_icdram
+        /endif
+      /endif
+    /if [not [exist "debug_icdram:vcon"]] then
+      /const debug_icdram bool = debug_icd
+      /endif
+    /quit
     /endif
-  /var exist debug bool = t
-
-  /if [exist "debug_icd"]
-    /then
-      /set t debug_icd
-    /else
-      /set t false
-    /endif
-  /var exist debug_icd bool = t
-
-  /set debug [or debug debug_icd]
+  //
+  //   The debug switches are defined via the DEBUG environment variable.
+  //
+  /set fnam [str "(cog)src/" srcdir "/debug_" buildname ".ins.aspic"]
+  /run "make_debug """ fnam """ icd"
+  /include fnam
+  /const debug bool = debugging //for compatibility with old code
   /endblock
 
-  ifndef debug
-debug    set     0
-    endif
-  ifndef debug_icd
-debug_icd set    0
-    endif
+debug    set     [if debugging 1 0]
+debug_icd set    [if debug_icd 1 0]
 
-/if debug_icd then
-debug_icd set    1
-  /endif
-/if debug then
-debug    set     1
-  /endif
-  if debug_icd
-debug    set     1
-    endif
-
+;   Check for required constants and abort on error if any is missing.
+;
 /if [exist "freq_osc"] then
   ifndef freq_osc
 freq_osc equ     [rnd freq_osc]
