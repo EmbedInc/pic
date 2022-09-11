@@ -1,12 +1,166 @@
 ;   USB I/O routines.
 ;
-;   WARNING: These routines use FSR0 and FSR1.  Calls to USB routines should be
-;     assumed to trash FSR0 and FSR1.  If these FSRs are used in interrupt code,
-;     they must be saved and restored by that interrupt code.
+;   The following global variables are exported:
+;
+;     USBTASK  -  The number of the USB processing task.  FFh indicate the task
+;       is not running.
+;
+;     USBERR  -  Mask of hardware errors found.  The bits are in the format of
+;       the UEIR register.  Bits are only set by the code in this module, from
+;       the USB task.  This variable may be cleared by the application at any
+;       time to detect new errors from that point forward.
+;
+;   The following subroutines are exported:
+;
+;     USB_INIT
+;
+;       Initialize the USB subsystem.  This must be the first access into this
+;       module.
+;
+;     USB_START
+;
+;       Start USB communication.  Flag USBON is set when the USB is ready for
+;       application use.  That happens after enumeration by the host is
+;       complete.
+;
+;     USB_OFF
+;
+;       Stop USB communication and disable the USB hardware.  Communication can
+;       be restarted by calling USB_START.
+;
+;     USB_GETn
+;
+;       Get the next byte from OUT endpoint N, or inquire status.
+;
+;       This routine always returns without stalling or otherwise waiting on an
+;       external condition.  The data byte, if any, is returned in REG0.  The
+;       returned value of REG0 is undefined if no byte is returned.
+;
+;       Control and status bits are transferred in REG1.  The following control
+;       bits are acted upon:
+;
+;         USBC_NOXF  -  No byte will be returned even if one is available.  This
+;           can be useful to just inquire status.
+;
+;       The following status bits are returned as appropriate:
+;
+;         USBS_NOXF  -  No byte was returned.  This is always set if USBC_NOXF
+;           is set, but will also occur if there is no byte available to return.
+;
+;         USBS_NRDY  -  A new byte is not available.  At least one byte can be
+;           read immediately when this bit is 0.  This bit applies to the
+;           current byte, so is always 0 if a byte was returned this call.
+;
+;         USBS_SETU  -  At the start of a packet received with a SETUP as
+;           apposed to OUT token.  If a byte is returned, it is the first byte
+;           of the new SETUP packet.  If no byte is returned, then the next byte
+;           will be the first in the setup packet.
+;
+;       Trashes FRS0, FRS1.
+;
+;     USB_PUTn
+;
+;       Write a byte to IN endpoint N, or inquire status.
+;
+;       This routine always returns without stalling or otherwise waiting on an
+;       external condition.  The data byte, if any, is passed in REG0.
+;
+;       Control and status bits are transferred in REG1.  The following control
+;       bits are acted upon:
+;
+;         USBC_NOXF  -  Do not transfer a byte even if it were otherwise
+;           possible.  This can be useful to just inquire status.  The REG0
+;           value is irrelevent when this bit is set.
+;
+;         USBC_NFLU  -  Do not try to flush the buffer after the byte is written
+;           to it unless the buffer is full.  Normally the buffer is flushed
+;           (given to hardware to transmit, software advanced to filling the
+;           next buffer) after a byte is written and the hardware is available
+;           for sending a new buffer.
+;
+;       The following status bits are returned as appropriate:
+;
+;         USBS_NOXF  -  No byte was written.  This is always set if USBC_NOXF is
+;           set, but will also occur if there is no room in the output buffer.
+;
+;         USBS_NRDY  -  Not ready to accept a new byte.  At least one byte can
+;           be written immediately when this bit is 0.  This bit applies to the
+;           current byte, so is always 0 if a byte was written this call.
+;
+;       Trashes FRS0, FRS1.
+;
+;     USB_FLUSHn
+;
+;       Flush the buffer of IN endpoint N, or inquire status.  When a buffer is
+;       flushed, any buffered data is given to the hardware for sending, when
+;       possible.  This routine always returns without stalling or otherwise
+;       waiting on an external condition.
+;
+;       Control and status bits are transferred in REG1.  The following control
+;       bits are acted upon:
+;
+;         USBC_NOXF  -  Do not flush the buffer even if there would have been
+;           something to do.  This can be useful to just enquire status.
+;
+;       The following status bits are returned as appropriate:
+;
+;         USBS_NOXF  -  Nothing was done, for whatever reason.
+;
+;         USBS_NRDY  -  Not ready to flush the buffer at this time.  This can be
+;           because there is nothing to flush or the hardware is not ready to
+;           accept the current buffer.  This bit is set regardless of the
+;           USBC_NOXF bit.  This bit is always reset if the buffer was flushed.
+;
+;         USBS_EMTY  -  The buffer is currently empty.
+;
+;         USBS_IDLE  -  This IN endpoint is completely idle.  The firmware
+;           buffer is empty and there are no pending hardware transactions.
+;
+;       Trashes FRS0, FRS1.
+;
+;     USB_TICK
+;
+;       Optional routine to provide timing to the USB module.  The number of
+;       milliseconds since the last call is passed in REG0.  Calling this
+;       regularly is required for the following features to be implemented or
+;       work correctly:
+;
+;         Start of frame loss detection.  Loss of SoF is not detected, and macro
+;         NO_SOF is not invoked, when USB_TICK is not called.
 ;
 /include "qq2.ins.aspic"
-
+;
+;   Build-time configuration of this module.
+;
 lbank    equ     1           ;register bank for the local state of this module
+/const   frt1    real = 1.500 ;max time for start of frame on startup, seconds
+/const   frtn    real = 0.100 ;max time for start of frame after first, seconds
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro no_sof
+//
+//   This macro is invoked when USB start of frames are not detected within the
+//   maximum allowed time.  The first SoF must be received within FRT1 seconds.
+//   Subsequent SoF must be received within FRTN seconds from the previous.
+//
+//   USB_TICK must be called regularly for the SoF loss detection mechanism to
+//   work.
+//
+//   The USB hardware is already disabled and held in reset when this marcro is
+//   run
+//
+/macro no_sof
+         reset
+  /endmac
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro USB_IS_OFF
+//
+//   This macro is run whenever the USB is disabled.
+//
+
 
 /include "(cog)src/pic/usb.ins.aspic"
          end

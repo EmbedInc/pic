@@ -73,11 +73,33 @@ usberr   res     1           ;UEIR register accumulated errors since last cleare
          defram  lbankadr
 
 usbadr   res     1           ;temp save for new USB address
+sofms    res     2           ;1 ms ticks until next start of frame required
+
 usbstack res     stacksz     ;data stack for the USB background task
 
 /if debug then
-         global  usbadr
+         global  usbadr, sofms
   /endif
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro SET_SOFSEC sec
+//
+//   Set the maximum allowed time until the next start of frame is detected.
+//   SEC is the timeout in seconds.  The local 16 bit variable SOFMS is loaded
+//   with the corresponding value in milliseconds.  The SEC value is clipped and
+//   rounded to what can be expressed by SOFMS.
+//
+/macro set_sofsec
+  /var local s real = [vnl [arg 1]] ;seconds to set the timer to
+  /var local ms integer      ;final ms to load into SOFMS
+
+  /set s [min [max s 0.0] 65.535] ;clip to valid range
+  /set ms [rnd [* s 1000.0]] ;make time value in ms
+
+         dbankif lbankadr
+         loadk16 sofms, [v ms]
+  /endmac
 
 ;*******************************************************************************
 ;
@@ -367,11 +389,21 @@ ii       set     ii + 1      ;advance to next endpoint number
 ;   Initialize the hardware and software state managed by this module.
 ;
          glbsub  usb_init, noregs
-
+;
+;   Init global state.
+;
          dbankif gbankadr
          setf    usbtask     ;indicate USB background task is not running
          clrf    usberr      ;init to no errors accumulated
-
+         clrflag usbon       ;init to the USB is not ready for app use
+         clrflag usbenab     ;indicate USB has not been enabled
+;
+;   Init local state.
+;
+         set_sofsec frt1     ;init time until first SoF required
+;
+;   Init hardware.
+;
          dbankif ucon
          clrf    ucon        ;make sure USB hardware is disabled
 
@@ -388,9 +420,6 @@ ii       set     ii + 1      ;advance to next endpoint number
 
          dbankif ueie
          setf    ueie        ;enable all possible errors to set UIR,UERRIF
-
-         dbankif gbankadr
-         bcf     flag_usbon  ;init to the USB is not ready for app use
          leaverest
 
 ;*******************************************************************************
@@ -405,11 +434,29 @@ ii       set     ii + 1      ;advance to next endpoint number
          mcall   usb_reset   ;set USB hardware/software to the reset state
          dbankif ucon
          bsf     ucon, usben ;enable the USB hardware
+         setflag usbenab     ;indicate USB is enabled
 
          task_create usb_task, usbstack ;start the USB background task
          gcall   task_yield  ;let new task run once and save its task ID
 
          leaverest
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro USB_DISABLE
+//
+//   Disable the USB hardware and update state accordingly.
+//
+/macro usb_disable
+         dbankif ucon
+         clrf    ucon        ;make sure USB hardware is disabled
+         clrflag usbenab     ;the USB is now disabled
+         clrflag usbon       ;the USB is not available for app use
+
+  /if [exist "usb_is_off:macro"] then
+         usb_is_off
+    /endif
+  /endmac
 
 ;*******************************************************************************
 ;
@@ -429,14 +476,7 @@ st_dtask unbank              ;done ending the background task
          dbankif gbankadr
          setf    usbtask     ;indicate background task is not running
 
-         dbankif ucon
-         clrf    ucon        ;make sure USB hardware is disabled
-
-         dbankif gbankadr
-         bcf     flag_usbon  ;the USB is not available for app use
-/if [exist "usb_is_off"] then
-         usb_is_off
-  /endif
+         usb_disable         ;disable the USB hardware, update state accordingly
          leaverest
 
 ;*******************************************************************************
@@ -451,6 +491,8 @@ usb_task unbank              ;task start point
          dbankif gbankadr
          movff   currtask, usbtask ;save our task ID to allow stopping later
          clrf    usberr      ;init to no errors accumulated
+         clrflag usbsof      ;init to no start of frames detected
+         set_sofsec frt1     ;init time until first SoF required
 
 usbtask_loop unbank          ;start of main loop
          gcall   task_yield  ;give other tasks a chance to run
@@ -723,14 +765,14 @@ jj       set     jj | (1 << sende_bit) ;may need to send empty packets
 
 ;*******************************************************************************
 ;
-;   Subroutine USB_RESET
+;   Local subroutine USB_RESET
 ;
 ;   Set the USB hardware and firmware to the RESET state.  Only the default
 ;   control pipe on endpoint 0 is enabled.
 ;
-         glbsub  usb_reset, regf0 | regf1
+         locsub  usb_reset, regf0 | regf1
 
-/if [exist "usb_is_off"] then
+/if [exist "usb_is_off:macro"] then
          usb_is_off
   /endif
          dbankif gbankadr
@@ -1715,9 +1757,8 @@ urun_noxf unbank             ;no transfer done event
          jump    urun_nosof  ;no
 
          bcf     uir, sofif  ;clear the event condition
-         dbankif gbankadr
-         bsf     flag_usbframe ;indicate start of frame received
-         bsf     flag_usbev  ;indicate an event handled
+         setflag usbsof      ;indicate start of frame has occurred
+         setflag usbev       ;indicate an event was handled
          return
 
 urun_nosof dbankis uir
@@ -1769,6 +1810,58 @@ urun_noidle dbankis uir
          return
 
 urun_noactv dbankis uir
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine USB_TICK
+;
+;   Called by application code to indicate a number of milliseconds have elapsed
+;   since the last call.  The number of ms is passed in REG0.
+;
+usb_tick glbsub
+;
+;   Perform start of frame loss detection.
+;
+;   The USB hardware can apparently wedge itself on certain glitches, like one
+;   of the data lines momentarily shorted to Vdd.  Unfortunately, no error is
+;   signalled when that happens.  The only indication is that start of frames
+;   are no longer received.  The NO_SOF macro, if supplied, is run when this
+;   case is detected.
+;
+         skip_flag usbenab   ;USB is enabled, SoF eventually required ?
+         jump    sofloss_done ;USB is disabled, nothing more to do
+         skip_flag usbsof    ;SoF was received since last time ?
+         jump    sofloss_n   ;no
+         ;
+         ;   A SoF was received since last time.
+         ;
+         clrflag usbsof      ;clear the SoF detection
+         set_sofsec frtn     ;reset time next SoF is required within
+         jump    sofloss_done
+         ;
+         ;   No SoF was received since last time.
+         ;
+sofloss_n unbank
+         dbankif lbankadr
+         movf    reg0, w     ;decrement remaining time by ms of this call
+         subwf   sofms+0
+         movlw   0
+         subwfb  sofms+1
+         bz      sofloss     ;no Sof within time ?
+         bn      sofloss
+         jump    sofloss_done ;still time left
+         ;
+         ;   No SoF was detected within the minumum required time.
+         ;
+sofloss  unbank
+         usb_disable         ;hardware is wedged, no choice but to disable it
+/if [exist "no_sof:macro"] then
+         no_sof              ;run app macro
+  /endif
+
+sofloss_done unbank          ;done with SoF loss detection
 
          leaverest
 
