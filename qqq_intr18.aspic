@@ -35,16 +35,15 @@ intr_priorities equ false    ;disable multiple interrupt priorities
 ;   Indicate which FSRs are to be saved by the single/high and low priority
 ;   interrupt routines.
 ;
-;   FSR0 is used by the FIFO_xxx macros, and must be saved if FIFOs are
-;   accessed from interrupt code.  Note that the UART interrupt routines
-;   use FIFOs.
+;   FSR0 is used by the FIFO_xxx macros, and must be saved if FIFOs are accessed
+;   from interrupt code.  Note that the UART interrupt routines use FIFOs.
 ;
 ;   FSR1 has no dedicated purpose in the general PIC development environment.
 ;
-;   FSR2 is reserved as the software stack pointer.  This stack will be used
-;   to save state during an interrupt.  FSR2 must therefore not be explicitly
-;   saved.  It will automatically be restored if the same number of bytes
-;   are popped from the stack as are pushed to the stack.
+;   FSR2 is reserved as the software stack pointer.  This stack will be used to
+;   save state during an interrupt.  FSR2 must therefore not be explicitly
+;   saved.  It will automatically be restored if the same number of bytes are
+;   popped from the stack as are pushed to the stack.
 ;
 save_fsr0 equ    true        ;indicate whether save/restore FSR0 in sgl/high intr
 save_fsr1 equ    false       ;indicate whether save/restore FSR1 in sgl/high intr
@@ -62,9 +61,9 @@ save_fsr1l equ   false       ;indicate whether save/restore FSR1 in low prio int
 ;
 ;   Global state.
 ;
-;   The following global state is in the normal register bank for global
-;   state.  The bank is GBANK, and GBANKADR is an address guaranteed to
-;   be within this bank.
+;   The following global state is in the normal register bank for global state.
+;   The bank is GBANK, and GBANKADR is an address guaranteed to be within this
+;   bank.
 ;
          defram  gbankadr
          iregs_define        ;define registers exclusively for interrupt routines
@@ -83,7 +82,7 @@ save_fsr1l equ   false       ;indicate whether save/restore FSR1 in low prio int
 ;
 ;   Initialize the interrupt system and other state managed by this module.
 ;
-         glbsub  intr_init, noregs
+intr_init glbsub
 ;
 ;   Initialize global state.
 ;
@@ -93,11 +92,10 @@ save_fsr1l equ   false       ;indicate whether save/restore FSR1 in low prio int
 ;
 
 ;
-;   Enable interrupts.  The interrupt system was reset at startup to
-;   all interrupts disable, single interrupt priority, and all interrupt
-;   priorities set to the lowest.  Any interrupts that are needed have
-;   been individually configured, but interrupts are still globally
-;   disabled.
+;   Enable interrupts.  The interrupt system was reset at startup to all
+;   interrupts disabled, single interrupt priority, and all interrupt priorities
+;   set to the lowest.  Any interrupts that are needed have been individually
+;   configured, but interrupts are still globally disabled.
 ;
   if intr_priorities         ;using multiple priority interrupts ?
          dbankif rcon
@@ -115,16 +113,16 @@ save_fsr1l equ   false       ;indicate whether save/restore FSR1 in low prio int
 ;
 ;   High priority or single interrupt service routine.
 ;
-;   The processor executes a call to location 8 on an interrupt, and in
-;   addition globally disables interrupts.  These are re-enabled at the end
-;   of the ISR by the RETFIE instruction.
+;   The processor executes a call to location 8 on an interrupt, and in addition
+;   globally disables interrupts.  These are re-enabled at the end of the ISR by
+;   the RETFIE instruction.
 ;
-;   Note that subroutine calls must be minimized or avoided in the ISR.
-;   Since an interrupt can come at any time in the main code, any additional
-;   call stack locations used here are not available anywhere else.
+;   Note that subroutine calls must be minimized or avoided in the ISR.  Since
+;   an interrupt can come at any time in the main code, any additional call
+;   stack locations used here are not available anywhere else.
 ;
-;   The fast register stack is used to save/restore W, STATUS, and BSR
-;   for this interrupt.
+;   The fast register stack is used to save/restore W, STATUS, and BSR for this
+;   interrupt.
 ;
   if intr_priorities
 .intr_high code  h'8'        ;high priority interrupt vector
@@ -151,25 +149,24 @@ save_fsr1l equ   false       ;indicate whether save/restore FSR1 in low prio int
 ;
 ;   Low priority interrupt service routine.
 ;
-;   This section of code gets inserted if multiple priority interrupts
-;   are enabled.  The high priority interrupt vector is at 8, and
-;   the low priority vector at 18h.  We assume that the interrupt
-;   service routine requires more than the 8 instructions between the
-;   two vectors, so the high priority service routine must jump to a
-;   different location to avoid colliding with the low priority interrupt
-;   vector.  In that case, the high priority interrupt handler continues
-;   immediately after the low priority interrupt handler code.
+;   This section of code gets inserted if multiple priority interrupts are
+;   enabled.  The high priority interrupt vector is at 8, and the low priority
+;   vector at 18h.  We assume that the interrupt service routine requires more
+;   than the 8 instructions between the two vectors, so the high priority
+;   service routine must jump to a different location to avoid colliding with
+;   the low priority interrupt vector.  In that case, the high priority
+;   interrupt handler continues immediately after the low priority interrupt
+;   handler code.
 ;
-;   If multiple interrupt priorites are disabled, then there is nothing
-;   special about location 18h and the interrupt handler can continue
-;   right over it without harm.
+;   If multiple interrupt priorites are disabled, then there is nothing special
+;   about location 18h and the interrupt handler can continue right over it
+;   without harm.
 ;
   if intr_priorities         ;multiple interrupt priorities in use ?
          jump    intr_high_cont ;continue after low priority handler
 ;
-;   Low priority interrupt service routine.  This routine can not use
-;   the fast call stack and must save/restore W, STATUS, and BSR
-;   explicitly.
+;   Low priority interrupt service routine.  This routine can not use the fast
+;   call stack and must save/restore W, STATUS, and BSR explicitly.
 ;
 .intr_low code   h'18'       ;low priority interrupt vector
          unbank              ;indicate the bank setting is unknown
@@ -188,15 +185,14 @@ save_fsr1l equ   false       ;indicate whether save/restore FSR1 in low prio int
          pushreg fsr1h
       endif
 ;
-;   W, STATUS, BSR, and the general FSRs (if enabled) have been saved.
-;   Now determine the interrupt condition and service it.
+;   W, STATUS, BSR, and the general FSRs (if enabled) have been saved.  Now
+;   determine the interrupt condition and service it.
 ;
 
          reset               ;unexpected interrupt, should never happen
 ;
-;   Done servicing the low priority interrupt condition.  Now restore
-;   to the state at the start of the interrupt and return from the
-;   interrupt.
+;   Done servicing the low priority interrupt condition.  Now restore to the
+;   state at the start of the interrupt and return from the interrupt.
 ;
 intr_retl unbank             ;common low priority interrupt exit point
 
@@ -228,8 +224,8 @@ intr_high_cont unbank
 ;
 ;   The high or single interrupt priority routine continues here.
 ;
-;   W, STATUS, BSR, and the general FSRs (if enabled) have been saved.
-;   Now determine the interrupt condition and service it.
+;   W, STATUS, BSR, and the general FSRs (if enabled) have been saved.  Now
+;   determine the interrupt condition and service it.
 ;
 
 ;
@@ -242,12 +238,17 @@ intr_high_cont unbank
          gjump   uart_intr_recv ;handle interrupt, will go to INTR_RET_UART on done
 no_uart_recv dbankis pir1
 ;
-;   Check for UART transmitter ready interrupt.
+;   Check for UART transmitter ready interrupt.  The interrupt being enabled is
+;   also checked.  This is because the UART interrupt routines enable/disable
+;   the interrupt on the fly.
 ;
          extern  uart_intr_xmit ;receive interrupt routine in UART module
+         dbankif pie1
+         btfss   pie1, txie  ;UART transmit interrupt is enabled ?
+         jump    no_uart_xmit ;no, skip this section
          dbankif pir1
-         btfss   pir1, txif
-         jump    no_uart_xmit
+         btfss   pir1, txif  ;UART transmit interrupt is signalled ?
+         jump    no_uart_xmit ;no
          gjump   uart_intr_xmit ;handle interrupt, will go to INTR_RET_UART on done
 no_uart_xmit dbankis pir1
 
@@ -255,11 +256,10 @@ no_uart_xmit dbankis pir1
 
 ;****************************************
 ;
-;   Done servicing the high priority interrupt condition.  Now restore
-;   to the state at the start of the interrupt and return from the
-;   interrupt.  W, STATUS, and BSR have been saved on the hardware fast
-;   register stack and will be restored as part of the RETFIE FAST
-;   instruction.
+;   Done servicing the high priority or single interrupt.  Now restore to the
+;   state at the start of the interrupt and return from the interrupt.  W,
+;   STATUS, and BSR have been saved on the hardware fast register stack and will
+;   be restored as part of the RETFIE FAST instruction.
 ;
 intr_ret unbank              ;common high/single priority interrupt exit point
          glbent  intr_ret_uart ;UART interrupt routines return here when done
@@ -274,6 +274,6 @@ intr_ret unbank              ;common high/single priority interrupt exit point
          popreg  fsr0l
     endif
 
-         retfie  fast        ;return from high/only priority interrupt
+         retfie  fast        ;return from interrupt, restore W, STATUS, and BSR
 
          end
