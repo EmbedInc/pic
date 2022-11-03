@@ -1031,21 +1031,37 @@ jmp_ncarr macro  adr
 //
 //   Subroutine SHOW_DEBUG
 //
-//   Show the state of the debug switches.
+//   Show the state of all the preprocessor debug switches.
 //
 /subroutine show_debug
-  /show "  DEBUG_ICD = " debug_icd
-  if debug_icd
-         messg   debug_icd true
-    else
-         messg   debug_icd false
-    endif
-  /show "  DEBUG = " debug
-  if debug
-         messg   debug true
-    else
-         messg   debug false
-    endif
+  /var local sym string      ;generic name of variable or constant symbol
+
+  /loop symbols qsym vcon    ;loop over all variables and constants
+    /set sym [sym qsym name] ;get symbol generic name
+    /if [< [slen sym] 7] then ;not long enough for DEBUG_x
+      /repeat
+      /endif
+    /if [<> [substr 1 6 sym] "debug_"] then
+      /repeat
+      /endif
+    /show "  " [ucase sym] " " [chars qsym]
+    /endloop
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine DEBUG_EXIST name
+//
+//   Make sure that the debug switch DEBUG_name exists.  Name is a token, not a
+//   string.  Nothing is done if the constant DEBUG_name already exists.  if not
+//   then it is created as a bool and set to FALSE.
+//
+/subroutine debug_exist
+  /var local name string = [str "debug_" [qstr [arg 1]]]
+
+  /if [not [exist [str name ":vcon"]]] then
+    /const [chars name] bool = false
+    /endif
   /endsub
 
 ;*******************************************************************************
