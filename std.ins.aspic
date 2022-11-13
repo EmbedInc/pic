@@ -4497,10 +4497,8 @@ pullups_port[chars c] equ 0
   /set pindata_an -1 //init to no analog pin
   /if [not pindata_dig] then //is analog pin ?
     /call string_token [chars vn] ind tk //get ANx
-    /call showval tk
     /set tk [substr 3 [- [slen tk] 2] tk] //extract analog input number string
-    /call showval tk
-    /set pindata_an [chars [v tk]]
+    /set pindata_an [chars tk]
     /endif
   /endsub
 
@@ -4532,9 +4530,105 @@ pullups_port[chars c] equ 0
 //       defined with.
 //
 /macro setpin
-  /var local name string = [qstr [arg 1]]
+  /var local name string = [qstr [arg 1]] //pin name
+  /var local s string //scratch string
+  /var local port string //lower case port name letter
+
+  /var local pindata_name string //PINDATA subroutine return values
+  /var local pindata_exist bool
+  /var local pindata_port string
+  /var local pindata_bit integer
+  /var local pindata_out bool
+  /var local pindata_pos bool
+  /var local pindata_dig bool
+  /var local pindata_an integer
+
+  /call pindata name //get info about this pin
+  /if [not pindata_exist] then
+    /show "  I/O pin " [pick] " is not defined."
+         error   SETPIN name
+         end
+    /stop
+    /endif
+  /set port [lcase pindata_port] //save lower case port name letter
 
   /pick one by [ucase [qstr [arg 2]]]
+
+  /option "ON"
+         dbankif tris[chars port]
+    /call tabopcode s
+    /append s "bcf"
+    /call taboperand s
+    /append s "tris" port ", " pindata_bit
+    /call startcomm s
+    /append s "enable output drive for pin " [ucase name]
+    /write s
+
+  /option "OFF"
+         dbankif tris[chars port]
+    /call tabopcode s
+    /append s "bsf"
+    /call taboperand s
+    /append s "tris" port ", " pindata_bit
+    /call startcomm s
+    /append s "set pin " [ucase name] " to high impedance"
+    /write s
+
+  /option "HIGH"
+         dbankif lat[chars port]
+    /call tabopcode s
+    /append s "bsf"
+    /call taboperand s
+    /append s "lat" port ", " pindata_bit
+    /call startcomm s
+    /append s "set pin " [ucase name] " output value to HIGH"
+    /write s
+
+  /option "LOW"
+         dbankif lat[chars port]
+    /call tabopcode s
+    /append s "bcf"
+    /call taboperand s
+    /append s "lat" port ", " pindata_bit
+    /call startcomm s
+    /append s "set pin " [ucase name] " output value to LOW"
+    /write s
+
+  /option "TRUE"
+         dbankif lat[chars port]
+    /call tabopcode s
+    /if pindata_pos
+      /then
+        /append s "bsf"
+      /else
+        /append s "bcf"
+      /endif
+    /call taboperand s
+    /append s "lat" port ", " pindata_bit
+    /call startcomm s
+    /append s "assert pin " [ucase name]
+    /write s
+
+  /option "FALSE"
+         dbankif lat[chars port]
+    /call tabopcode s
+    /if pindata_pos
+      /then
+        /append s "bcf"
+      /else
+        /append s "bsf"
+      /endif
+    /call taboperand s
+    /append s "lat" port ", " pindata_bit
+    /call startcomm s
+    /append s "de-assert pin " [ucase name]
+    /write s
+
+  /optionelse
+    /show "  """ [pick] """ is not a valid option to SETPIN."
+         error   SETPIN option
+         end
+    /stop
 
     /endpick
   /endmac
