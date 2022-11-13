@@ -241,6 +241,8 @@
 ;
 ;     Configuration constants.
 ;
+;     General preprocessor string manipulation.
+;
 ;     General registers, REG0 ... REGn.
 ;
 ;     Skip and branch macros.
@@ -268,8 +270,6 @@
 ;     Dispatch tables.
 ;
 ;     Support for the multi-tasking system.
-;
-;     General preprocessor string manipulation.
 ;
 ;     Support for writing constants to program memory.
 ;
@@ -524,6 +524,237 @@ ii       set     ii + 1      ;advance to next config word address
 //       operation.
 //
 /var exist no_intr_disable bool = false
+
+
+;*******************************************************************************
+;*******************************************************************************
+;
+;   General preprocessor string manipulation.
+;
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine TABTO varname column
+//
+//   Add blanks to the end of the string VARNAME so that the next next character
+//   appended to its end will be at column COLUMN or later.
+//
+//   The Embed conventions for assembler code are:
+//
+//       1         2         3         4
+//3456789_123456789_123456789_123456789_
+//       opcode  operand     ;comment
+//
+//   which means the tabto columns are:
+//
+//     opcode    10
+//     operand   18
+//     comment   30
+//
+/subroutine tabto
+  /block                     ;back here until at the right column
+    /if [>= [slen [arg 1]] [- [arg 2] 1]] then
+      /quit
+      /endif
+    /append [arg 1] " "
+    /repeat
+    /endblock
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine TABOPCODE varname
+//
+//   Append spaces as necessary to the end of the string in VARNAME so that the
+//   next character will be at or after the opcode start column.  VARNAME is
+//   always returned ending in a blank.
+//
+/subroutine tabopcode
+  /if [<> [sindx [slen [arg 1]] [arg 1]] " "] then ;not already ending in blank ?
+    /set [arg 1] [str [arg 1] " "] ;add one blank at end
+    /endif
+  /call tabto [arg 1] 10
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine TABOPERAND varname
+//
+//   Append spaces as necessary to the end of the string in VARNAME so that the
+//   next character will be at or after the operand start column.  VARNAME is
+//   always returned ending in a blank.
+//
+/subroutine taboperand
+  /if [<> [sindx [slen [arg 1]] [arg 1]] " "] then ;not already ending in blank ?
+    /set [arg 1] [str [arg 1] " "] ;add one blank at end
+    /endif
+  /call tabto [arg 1] 18
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine STARTCOMM varname
+//
+//   Add the start of a MPASM comment to the end of the string in the variable
+//   VARNAME.  The string will end in the comment delimeter character, which
+//   will be in the usual comment column or later.  There will always be at
+//   least one blank before the comment start character.  The caller can
+//   directly append the text of the comment to the string.
+//
+/subroutine startcomm
+  /if [<> [sindx [slen [arg 1]] [arg 1]] " "] then ;not already ending in blank ?
+    /set [arg 1] [str [arg 1] " "] ;add one blank at end
+    /endif
+  /call tabto [arg 1] 30
+  /set [arg 1] [str [arg 1] ";"]
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine STRING_TOKEN str ind tok
+//
+//   Parses the next token from the string STR.  IND must be the name of a
+//   integer variable that is the string index to start parsing at.  IND is
+//   updated to after the token.  TOK must be a string variable into which the
+//   parsed token is returned.  IND should be started at 1 in a sequence to get
+//   all tokens from the string.  IND is returned past the end of the string
+//   when the input string has been exhausted.
+//
+/subroutine string_token
+  /set [arg 3] ""            ;init the token to the empty string
+  /if [< [arg 2] 1] then     ;invalid IND ?
+    /return
+    /endif
+  //
+  //   Skip over leading blanks.
+  //
+  /block
+    /if [> [arg 2] [slen [arg 1]]] then ;past end of string ?
+      /return
+      /endif
+    /if [= [sindx [arg 2] [arg 1]] " "] then ;another blank ?
+      /set [arg 2] [+ [arg 2] 1] ;advance the parse index
+      /repeat
+      /endif
+    /endblock
+  //
+  //   Grab string characters up to the first blank or end of input string.
+  //
+  /block
+    /if [= [sindx [arg 2] [arg 1]] " "] then ;hit a blank ?
+      /set [arg 2] [+ [arg 2] 1] ;start at next character next time
+      /return
+      /endif
+    /set [arg 3] [str [arg 3] [sindx [arg 2] [arg 1]]] ;add this char to token
+    /set [arg 2] [+ [arg 2] 1] ;advance to next input string index
+    /if [> [arg 2] [slen [arg 1]]] then ;past end of string ?
+      /return
+      /endif
+    /repeat
+    /endblock
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine SHOWVAL name [description]
+//
+//   Show the value of the preprocessor symbol NAME.  When no DESCRIPTION
+//   parameter is present, the following will be written to standard output:
+//
+//     NAME <value>
+//
+//   When DESCRIPTION is present, this is followed by ", <description>".  The
+//   description argument must be a single argument.  It will generally be a
+//   string of characters  enclosed in quotes.
+//
+/subroutine showval
+  /if [exist 2 arg]
+    /then                    ;DESCRIPTION exists
+      /var local desc string = [str ", " [arg 2]]
+    /else                    ;DESCRIPTION not supplied
+      /var local desc string = ""
+    /endif
+  /var local name string = [qstr [arg 1]]
+  /var local val string = [vnl [chars name]]
+
+  /if [= [sym name dtype] "STRING"] then
+    /set val [str '"' val '"']
+    /endif
+
+  /show "  " name " " val desc
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine SHOWHEX name [description]
+//
+//   Like SHOWVAL, except that the value is shown in hexadecimal if the data
+//   type of NAME is integer.
+//
+/subroutine showhex
+  /if [exist 2 arg]
+    /then                    ;DESCRIPTION exists
+      /var local desc string = [str ", " [arg 2]]
+    /else                    ;DESCRIPTION not supplied
+      /var local desc string = ""
+    /endif
+  /var local name string = [qstr [arg 1]]
+  /var local val string
+
+  /block
+    /if [= [sym name dtype] "REAL"] then
+      /set val [eng [chars name] 4 ""]
+      /quit
+      /endif
+    /if [= [sym name dtype] "STRING"] then
+      /set val [str '"' [chars name] '"']
+      /quit
+      /endif
+    /if [= [sym name dtype] "INTEGER"] then
+      /set val [str [int [chars name] "base 16 usin"] "h"]
+      /quit
+      /endif
+    /set val [chars name]
+    /endblock
+
+  /show "  " name " " val desc
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine SHOWBIN name [description]
+//
+//   Like SHOWVAL, except that the value is shown in binary if the data type of
+//   NAME is integer.
+//
+/subroutine showbin
+  /if [exist 2 arg]
+    /then                    ;DESCRIPTION exists
+      /var local desc string = [str ", " [arg 2]]
+    /else                    ;DESCRIPTION not supplied
+      /var local desc string = ""
+    /endif
+  /var local name string = [qstr [arg 1]]
+  /var local val string
+
+  /block
+    /if [= [sym name dtype] "REAL"] then
+      /set val [eng [chars name] 4 ""]
+      /quit
+      /endif
+    /if [= [sym name dtype] "STRING"] then
+      /set val [str '"' [chars name] '"']
+      /quit
+      /endif
+    /if [= [sym name dtype] "INTEGER"] then
+      /set val [str [int [chars name] "base 2 usin"] "b"]
+      /quit
+      /endif
+    /set val [chars name]
+    /endblock
+
+  /show "  " name " " val desc
+  /endsub
 
 
 ;*******************************************************************************
@@ -4156,6 +4387,158 @@ pullups_port[chars c] equ 0
          end
   /stop
   /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine PINDATA name
+//
+//   Get data about the named pin NAME.  NAME is a string.
+//
+//   The following variables are set:
+//
+//     PINDATA_NAME, string
+//
+//       The pin name.  This is the same name as passed in by the NAME
+//       parameter.
+//
+//     PINDATA_EXIST, bool
+//
+//       TRUE iff the named pin exists.  This means it was defined with a INBIT,
+//       OUTBIT, etc command.  The values of the remaining variables are
+//       undefined when this variable is FALSE.
+//
+//     PINDATA_PORT, string
+//
+//       Upper case port name single letter.
+//
+//     PINDATA_BIT, integer
+//
+//       0-N bit number within port and other I/O pin registers.
+//
+//     PINDATA_OUT, bool
+//
+//       TRUE iff the pin was defined as an output.
+//
+//     PINDATA_POS, bool
+//
+//       TRUE iff the pin was defined with positive logic.
+//
+//     PINDATA_DIG, bool
+//
+//       TRUE iff the pin was defined as digital, not analog.
+//
+//     PINDATA_AN, integer
+//
+//       ANx analog input number when the pin was defined as analog.  Set to the
+//       special value of -1 when the pin is not analog.
+//
+//     These variables are created if not already existing.  When the pin name
+//     is not defined (PINDATA_EXIST = FALSE), then the state of the remaining
+//     variables is undefined.
+//
+/subroutine pindata
+  /var local name string = [vnl [arg 1]] //pin name
+  /var local vn string //scratch variable name
+  /var local ind integer //parse index
+  /var local tk string //parsed token
+
+  /var exist pindata_name string
+  /var exist pindata_exist bool
+  /var exist pindata_port string
+  /var exist pindata_bit integer
+  /var exist pindata_out bool
+  /var exist pindata_pos bool
+  /var exist pindata_dig bool
+  /var exist pindata_an integer
+
+  /set pindata_name name //save name of pin other vars pertain to
+  /set pindata_exist false //init to pin is not defined.
+//
+//   Get PORT, BIT, and OUT by looking at the Inbit/Outbit PORT and BIT
+//   constants.
+//
+  /block
+    /set vn [str "Outbit_" name "_port"] //try output pin
+    /if [exist vn] then
+      /set pindata_exist true
+      /set pindata_port [chars vn]
+      /set pindata_out true
+      /set vn [str "Outbit_" name "_bit"]
+      /quit
+      /endif
+    /set vn [str "Inbit_" name "_port"] //try input pin
+    /if [exist vn] then
+      /set pindata_exist true
+      /set pindata_port [chars vn]
+      /set pindata_out false
+      /set vn [str "Inbit_" name "_bit"]
+      /quit
+      /endif
+    /return //pin doesn't exist
+    /endblock
+
+  /set pindata_bit [chars vn]
+//
+//   Get POS, DIG, and AN by parsing Portdata_xxx for this pin.
+//
+  /set vn [str "Portdata_" [lcase pindata_port] pindata_bit]
+  /set ind 1 //init parse index
+
+  /call string_token [chars vn] ind tk //get name
+
+  /call string_token [chars vn] ind tk //get IN/OUT
+
+  /call string_token [chars vn] ind tk //get POS/NEG
+  /set pindata_pos [= tk "POS"]
+
+  /call string_token [chars vn] ind tk //get DIG/ANA
+  /set pindata_dig [= tk "DIG"]
+
+  /set pindata_an -1 //init to no analog pin
+  /if [not pindata_dig] then //is analog pin ?
+    /call string_token [chars vn] ind tk //get ANx
+    /call showval tk
+    /set tk [substr 3 [- [slen tk] 2] tk] //extract analog input number string
+    /call showval tk
+    /set pindata_an [chars [v tk]]
+    /endif
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro SETPIN name state
+//
+//   Set a pin to a particular state.
+//
+//   NAME is the pin name as defined with the INBIT, OUTBIT, INANA, etc,
+//   command.  NAME is a token, not a string.
+//
+//   STATE is one of the keywords:
+//
+//     ON  -  The pin will be driven.
+//
+//     OFF  -  Set the pin to high impedance.
+//
+//     HIGH  -  Logic high.  This does not set the pin to driven, only the state
+//       it will be driven to if driven.
+//
+//     LOW  -  Logic low.  This does not set the pint to driven, only the state
+//       it will be driven to if driven.
+//
+//     TRUE  -  Like HIGH or LOW according to the logic polarity the pin is
+//       defined with.
+//
+//     FALSE  -  Like HIGH or LOW according to the logic polarity the pin is
+//       defined with.
+//
+/macro setpin
+  /var local name string = [qstr [arg 1]]
+
+  /pick one by [ucase [qstr [arg 2]]]
+
+    /endpick
+  /endmac
+
 
 ;*******************************************************************************
 ;*******************************************************************************
@@ -8603,237 +8986,6 @@ task_create macro runadr, stackadr
          return              ;return from the subroutine
          unbank              ;invalidate bank assumptions in following source code
   /endmac
-
-
-;*******************************************************************************
-;*******************************************************************************
-;
-;   General preprocessor string manipulation.
-;
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine TABTO varname column
-//
-//   Add blanks to the end of the string VARNAME so that the next next character
-//   appended to its end will be at column COLUMN or later.
-//
-//   The Embed conventions for assembler code are:
-//
-//       1         2         3         4
-//3456789_123456789_123456789_123456789_
-//       opcode  operand     ;comment
-//
-//   which means the tabto columns are:
-//
-//     opcode    10
-//     operand   18
-//     comment   30
-//
-/subroutine tabto
-  /block                     ;back here until at the right column
-    /if [>= [slen [arg 1]] [- [arg 2] 1]] then
-      /quit
-      /endif
-    /append [arg 1] " "
-    /repeat
-    /endblock
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine TABOPCODE varname
-//
-//   Append spaces as necessary to the end of the string in VARNAME so that the
-//   next character will be at or after the opcode start column.  VARNAME is
-//   always returned ending in a blank.
-//
-/subroutine tabopcode
-  /if [<> [sindx [slen [arg 1]] [arg 1]] " "] then ;not already ending in blank ?
-    /set [arg 1] [str [arg 1] " "] ;add one blank at end
-    /endif
-  /call tabto [arg 1] 10
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine TABOPERAND varname
-//
-//   Append spaces as necessary to the end of the string in VARNAME so that the
-//   next character will be at or after the operand start column.  VARNAME is
-//   always returned ending in a blank.
-//
-/subroutine taboperand
-  /if [<> [sindx [slen [arg 1]] [arg 1]] " "] then ;not already ending in blank ?
-    /set [arg 1] [str [arg 1] " "] ;add one blank at end
-    /endif
-  /call tabto [arg 1] 18
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine STARTCOMM varname
-//
-//   Add the start of a MPASM comment to the end of the string in the variable
-//   VARNAME.  The string will end in the comment delimeter character, which
-//   will be in the usual comment column or later.  There will always be at
-//   least one blank before the comment start character.  The caller can
-//   directly append the text of the comment to the string.
-//
-/subroutine startcomm
-  /if [<> [sindx [slen [arg 1]] [arg 1]] " "] then ;not already ending in blank ?
-    /set [arg 1] [str [arg 1] " "] ;add one blank at end
-    /endif
-  /call tabto [arg 1] 30
-  /set [arg 1] [str [arg 1] ";"]
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine STRING_TOKEN str ind tok
-//
-//   Parses the next token from the string STR.  IND must be the name of a
-//   integer variable that is the string index to start parsing at.  IND is
-//   updated to after the token.  TOK must be a string variable into which the
-//   parsed token is returned.  IND should be started at 1 in a sequence to get
-//   all tokens from the string.  IND is returned past the end of the string
-//   when the input string has been exhausted.
-//
-/subroutine string_token
-  /set [arg 3] ""            ;init the token to the empty string
-  /if [< [arg 2] 1] then     ;invalid IND ?
-    /return
-    /endif
-  //
-  //   Skip over leading blanks.
-  //
-  /block
-    /if [> [arg 2] [slen [arg 1]]] then ;past end of string ?
-      /return
-      /endif
-    /if [= [sindx [arg 2] [arg 1]] " "] then ;another blank ?
-      /set [arg 2] [+ [arg 2] 1] ;advance the parse index
-      /repeat
-      /endif
-    /endblock
-  //
-  //   Grab string characters up to the first blank or end of input string.
-  //
-  /block
-    /if [= [sindx [arg 2] [arg 1]] " "] then ;hit a blank ?
-      /set [arg 2] [+ [arg 2] 1] ;start at next character next time
-      /return
-      /endif
-    /set [arg 3] [str [arg 3] [sindx [arg 2] [arg 1]]] ;add this char to token
-    /set [arg 2] [+ [arg 2] 1] ;advance to next input string index
-    /if [> [arg 2] [slen [arg 1]]] then ;past end of string ?
-      /return
-      /endif
-    /repeat
-    /endblock
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine SHOWVAL name [description]
-//
-//   Show the value of the preprocessor symbol NAME.  When no DESCRIPTION
-//   parameter is present, the following will be written to standard output:
-//
-//     NAME <value>
-//
-//   When DESCRIPTION is present, this is followed by ", <description>".  The
-//   description argument must be a single argument.  It will generally be a
-//   string of characters  enclosed in quotes.
-//
-/subroutine showval
-  /if [exist 2 arg]
-    /then                    ;DESCRIPTION exists
-      /var local desc string = [str ", " [arg 2]]
-    /else                    ;DESCRIPTION not supplied
-      /var local desc string = ""
-    /endif
-  /var local name string = [qstr [arg 1]]
-  /var local val string = [vnl [chars name]]
-
-  /if [= [sym name dtype] "STRING"] then
-    /set val [str '"' val '"']
-    /endif
-
-  /show "  " name " " val desc
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine SHOWHEX name [description]
-//
-//   Like SHOWVAL, except that the value is shown in hexadecimal if the data
-//   type of NAME is integer.
-//
-/subroutine showhex
-  /if [exist 2 arg]
-    /then                    ;DESCRIPTION exists
-      /var local desc string = [str ", " [arg 2]]
-    /else                    ;DESCRIPTION not supplied
-      /var local desc string = ""
-    /endif
-  /var local name string = [qstr [arg 1]]
-  /var local val string
-
-  /block
-    /if [= [sym name dtype] "REAL"] then
-      /set val [eng [chars name] 4 ""]
-      /quit
-      /endif
-    /if [= [sym name dtype] "STRING"] then
-      /set val [str '"' [chars name] '"']
-      /quit
-      /endif
-    /if [= [sym name dtype] "INTEGER"] then
-      /set val [str [int [chars name] "base 16 usin"] "h"]
-      /quit
-      /endif
-    /set val [chars name]
-    /endblock
-
-  /show "  " name " " val desc
-  /endsub
-
-////////////////////////////////////////////////////////////////////////////////
-//
-//   Subroutine SHOWBIN name [description]
-//
-//   Like SHOWVAL, except that the value is shown in binary if the data type of
-//   NAME is integer.
-//
-/subroutine showbin
-  /if [exist 2 arg]
-    /then                    ;DESCRIPTION exists
-      /var local desc string = [str ", " [arg 2]]
-    /else                    ;DESCRIPTION not supplied
-      /var local desc string = ""
-    /endif
-  /var local name string = [qstr [arg 1]]
-  /var local val string
-
-  /block
-    /if [= [sym name dtype] "REAL"] then
-      /set val [eng [chars name] 4 ""]
-      /quit
-      /endif
-    /if [= [sym name dtype] "STRING"] then
-      /set val [str '"' [chars name] '"']
-      /quit
-      /endif
-    /if [= [sym name dtype] "INTEGER"] then
-      /set val [str [int [chars name] "base 2 usin"] "b"]
-      /quit
-      /endif
-    /set val [chars name]
-    /endblock
-
-  /show "  " name " " val desc
-  /endsub
 
 
 ;*******************************************************************************
