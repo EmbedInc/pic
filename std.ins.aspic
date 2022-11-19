@@ -525,6 +525,22 @@ ii       set     ii + 1      ;advance to next config word address
 //
 /var exist no_intr_disable bool = false
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutine DEBUGSW name
+//
+//   Make sure the debug switch DEBUG_name exists.  If it does not exist, then
+//   it is created as a BOOL constant set to FALSE.  NAME is a token, not a
+//   string.
+//
+/subroutine debugsw
+  /var local sym string = [str "debug_" [qstr [arg 1]]]
+
+  /if [not [exist [str sym ":vcon"]]] then
+    /const [chars sym] bool = false
+    /endif
+  /endsub
+
 
 ;*******************************************************************************
 ;*******************************************************************************
