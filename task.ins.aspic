@@ -62,24 +62,22 @@ task#v(ii)p res  2
 ii       set     ii + 1
     endw
 ;
-;   Per-task state.  Three distinct RAM areas are allocated for each
-;   task.  There is a two byte pointer in TASKSP (above) for each task.
-;   This pointer provides the start address of the per-task control
-;   state TASKnCTRL, where N is the 0-MAXTASK task number.  The third
-;   piece of per-task state is the data stack for that task.  These are
-;   allocated in the individual modules for each task, and can be
-;   different sizes between tasks.
+;   Per-task state.  Three distinct RAM areas are allocated for each task.
+;   There is a two byte pointer in TASKSP (above) for each task.  This pointer
+;   provides the start address of the per-task control state TASKnCTRL, where N
+;   is the 0-MAXTASK task number.  The third piece of per-task state is the data
+;   stack for that task.  These are allocated in the individual modules for each
+;   task, and can be different sizes between tasks.
 ;
-;   TASKnCTRL per-task control state.  Each of these is fairly large
-;   since they must be able to save a complete copy of the hardware
-;   call stack.  Due to their size, each is allocated in a separate
-;   linker section .TASKnCTRL to allow the linker to place each
-;   individually.  They can be placed anywhere in memory regardless
-;   of page boundaries because the code here only accesses them
-;   indirectly via FSRs.
+;   TASKnCTRL per-task control state.  Each of these is fairly large since they
+;   must be able to save a complete copy of the hardware call stack.  Due to
+;   their size, each is allocated in a separate linker section .TASKnCTRL to
+;   allow the linker to place each individually.  They can be placed anywhere in
+;   memory regardless of page boundaries because the code here only accesses
+;   them indirectly via FSRs.
 ;
-;   Byte offsets of the fields in each task control state.  These can not
-;   be altered without adjusting the code.  Some code makes implicit assumptions
+;   Byte offsets of the fields in each task control state.  These can not be
+;   altered without adjusting the code.  Some code makes implicit assumptions
 ;   about the order of the fields in the task control state.
 ;
 ncstack  equ     0           ;1-31 number of call stack entries, 0 = unused task slot
@@ -107,7 +105,6 @@ ii       set     ii + 1
 
 
 .task    code
-;
 ;*******************************************************************************
 ;
 ;   Subroutine TASK_INIT
@@ -143,9 +140,9 @@ ii       set     ii + 1
 ;
 ;   Create a new task.  The address of the first byte of the new task's data
 ;   stack is passed in REG1:REG0.  The task's initial start address is passed
-;   in REG4:REG3:REG2.  The new task will be initialized to have an empty
-;   call stack and data stack.  REG4 is ignored on processors with only
-;   64Kb of program memory or less (when PROGADRB is 2 instead of 3).
+;   in REG4:REG3:REG2.  The new task will be initialized to have an empty call
+;   stack and data stack.  REG4 is ignored on processors with only 64Kb of
+;   program memory or less (when PROGADRB is 2 instead of 3).
 ;
 ;   For the set of registers listed in TSKSAVE, their initial values in the new
 ;   task will be whatever they are on entry to this routine.  This means that
@@ -153,12 +150,12 @@ ii       set     ii + 1
 ;   can be used to pass startup values to the new task.  The registers other
 ;   than those listed in TSKSAVE will be initially undefined in the new task.
 ;
-;   The existing task will continue to run.  The new task will not be run
-;   until TASK_YIELD is called at least once.
+;   The existing task will continue to run.  The new task will not be run until
+;   TASK_YIELD is called at least once.
 ;
-;   The processor is restarted on an attempt to create a new task if all
-;   task slots are already in use.  This would be a serious firmware bug from
-;   which there is no reasonable recovery.
+;   The processor is restarted on an attempt to create a new task if all task
+;   slots are already in use.  This would be a serious firmware bug from which
+;   there is no reasonable recovery.
 ;
          glbsub  task_new, regf0 | regf1
 
@@ -182,9 +179,11 @@ tkn_loop unbank              ;back here to check out each new task save area
          decfsz  reg5        ;count one less save area left to check
          jump    tkn_loop    ;back to check next save area
 
+         nop                 ;to allow for debugger breakpoint
+         nop
          reset               ;no empty save areas, fatal error
 
-tkn_fnd  unbank              ;found empty save area.
+tkn_fnd  unbank              ;found empty save area
          popreg  reg5        ;restore the original REG5
 ;
 ;   FSR0 is pointing to the start of the save area for this new task, and all
@@ -194,7 +193,7 @@ tkn_fnd  unbank              ;found empty save area.
 ;   listed in TSKSAVE pushed in forwards order.  The second scratch FSR will be
 ;   left pointing to the first free byte on the new task stack.
 ;
-         movff   reg0, fsr#v(fsrsc2)l ;point the second scatch FSR to task data stack
+         movff   reg0, fsr#v(fsrsc2)l ;point the second scratch FSR to task data stack
          movff   reg1, fsr#v(fsrsc2)h
 
 iireg    set     0           ;init REGn register number
@@ -219,10 +218,10 @@ iireg    set     iireg + 1   ;advance to next register number
          ;
          incf    postinc0    ;the start address will be the only call stack entry
          ;
-         ;   Initialize all the task's FSRs to be set up as the data stack pointer.
-         ;   Currently the second scratch FSR is pointing to the first unused byte
-         ;   of the new task's data stack, and REG1:REG0 is pointing to the first
-         ;   byte of the stack.
+         ;   Initialize all the task's FSRs to be set up as the data stack
+         ;   pointer.  Currently the second scratch FSR is pointing to the first
+         ;   unused byte of the new task's data stack, and REG1:REG0 is pointing
+         ;   to the first byte of the stack.
          ;
          ;   The data stack pointer must be initialized to where it would be
          ;   after the state saved accross a task swap has been pushed onto the
@@ -230,10 +229,10 @@ iireg    set     iireg + 1   ;advance to next register number
          ;   pointers for the empty stack.  This is compatible with the frame
          ;   pointer mechanism used by C18.
          ;
-         ;   If using the normal Embed Inc stack convention, then the stack pointer
-         ;   address for an empty stack is one address before the first stack byte.
-         ;   If C18 compatibility is enabled, then this will be the first stack
-         ;   byte.
+         ;   If using the normal Embed Inc stack convention, then the stack
+         ;   pointer address for an empty stack is one address before the first
+         ;   stack byte.  If C18 compatibility is enabled, then this will be the
+         ;   first stack byte.
          ;
   if c18comp == 0
          movlw   0
@@ -414,7 +413,8 @@ ty_next  unbank              ;back here to try each new task slot
          movff   postinc0, reg1 ;get number of call stack levels to restore
          movff   postinc0, reg2 ;get FSR0 restore value into REG3:REG2
          movff   postinc0, reg3
-         intr_off            ;disable interrupts while changing stack pointer
+
+         intr_off            ;disable interrupts while changing data stack pointer
          clrf    stkptr      ;init call stack of new task to empty
          movff   postinc0, fsr1l ;restore FSR1
          movff   postinc0, fsr1h
