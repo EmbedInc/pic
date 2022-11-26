@@ -215,6 +215,7 @@ fifo_ou[chars n] fifo_define [v fousz] ;defin input FIFO
          global  fifo_ou[chars n]
         /endif
     /endif
+  /endif
 ;
 ;   Symbolic names for the local flag bits.
 ;
@@ -228,7 +229,7 @@ fifo_ou[chars n] fifo_define [v fousz] ;defin input FIFO
 ;
 ;   Set the bank for access to the input FIFO.
 ;
-  /if fifin then
+/if fifin then
 bank_fifoin macro
   if fam_18
          banksel fifo_in[chars n]
@@ -238,7 +239,7 @@ bank_fifoin macro
          ibankif lbankadr
     endif
          endm
-    /endif
+  /endif
 
 ;*******************************************************************************
 ;
@@ -246,7 +247,7 @@ bank_fifoin macro
 ;
 ;   Set the bank for access to the output FIFO.
 ;
-  /if fifout then
+/if fifout then
 bank_fifout macro
   if fam_18
          banksel fifo_ou[chars n]
@@ -256,7 +257,7 @@ bank_fifout macro
          ibankif lbankadr
     endif
          endm
-    /endif
+  /endif
 
 ;*******************************************************************************
 ;
@@ -268,15 +269,15 @@ bank_fifout macro
 ;
 ;   Initialize the local state.
 ;
-  /if fifin then
+/if fifin then
          bank_fifoin
          fifo_init fifo_in[chars n] ;init input stream FIFO
-    /endif
+  /endif
 
-  /if fifout then
+/if fifout then
          bank_fifout
          fifo_init fifo_ou[chars n] ;init output stream FIFO
-    /endif
+  /endif
 
          dbankif lbankadr
          clrf    uart[chars n]_flags ;init all local flags to off
@@ -284,6 +285,10 @@ bank_fifout macro
 ;   Set up the UART hardware.
 ;
          uart_setup          ;init to config from UART_BAUD, above
+
+/if [exist "uart_init1:macro"] then
+         uart_init1          ;do app-specific initialization
+  /endif
 ;
 ;   Enable the UART interrupts.  Interrupts are still globally disabled
 ;   at this point.  Only the individual peripheral interrupts are enabled
@@ -291,50 +296,50 @@ bank_fifout macro
 ;   output FIFO is definitely empty now.  The interrupt will be enabled
 ;   when a byte is stuffed into the output FIFO.
 ;
-  /if fifin then             ;using interrupt driven input ?
+/if fifin then               ;using interrupt driven input ?
          dbankif rcie_reg
          bsf     rcie_flag
-    /endif
+  /endif
 ;
 ;   Initialize global state.
 ;
-  /if enab_outflag then
+/if enab_outflag then
          dbankif gbankadr
          bsf     flag_sout[chars n] ;UARTn_PUT is ready to accept byte immediately
-    /endif
+  /endif
 
-  /if [<> recv_ready ""] then
+/if [<> recv_ready ""] then
          set_[chars recv_ready]_on ;indicate ready to receive
-    /endif
+  /endif
 ;
 ;   Set up the NSEND interrupt, if used.  The NSEND line is connected to one of
 ;   the INTn inputs.  We take an interrupt when the line is deasserted, meaning
 ;   that it is OK to send again.
 ;
-  /if [<> nsend_name ""] then ;NSEND input is in use ?
+/if [<> nsend_name ""] then  ;NSEND input is in use ?
          dbankif intcon2
-    /if nsend_high
-      /then                  ;allowed to send when low
+  /if nsend_high
+    /then                    ;allowed to send when low
          bcf     intcon2, intedg[v nsend_int] ;interrupt on falling edge
-      /else                  ;allowed to send when high
+    /else                    ;allowed to send when high
          bsf     intcon2, intedg[v nsend_int] ;interrupt on rising edge
-      /endif
+    /endif
 
-    /pick one by nsend_int   ;which INTn input is being used ?
-    /option 0                ;INT0
+  /pick one by nsend_int     ;which INTn input is being used ?
+  /option 0                  ;INT0
          dbankif intcon
          bcf     intcon, tmr0if ;clear any pending interrupt condition
          bsf     intcon, int0ie ;enable the interrupt
-    /optionelse              ;INT1 to INTn
+  /optionelse                ;INT1 to INTn
          dbankif intcon3
          bcf     intcon3, int[v nsend_int]if ;clear any pending interrupt condition
          bsf     intcon3, int[v nsend_int]ie ;enable the interrupt
-      /endpick
-    /endif                   ;end of NSEND input is used
+    /endpick
+  /endif                     ;end of NSEND input is used
 
          leaverest
 
-  /if enab_in then           ;this section only gets built if input is enabled
+/if enab_in then             ;this section only gets built if input is enabled
 ;*******************************************************************************
 ;
 ;   Routine UARTn_INTR_RECV
@@ -347,8 +352,8 @@ bank_fifout macro
 ;   the general registers and other global state.  Any call stack locations
 ;   used here will not be available to the foreground code.
 ;
-    /if fifin then           ;using interrupt driven input ?
-      /set no_intr_disable true ;disable intr on/off in nested macros
+  /if fifin then             ;using interrupt driven input ?
+    /set no_intr_disable true ;disable intr on/off in nested macros
          glbent  uart[chars n]_intr_recv ;UART receive interrupt handler
 ;
 ;   Save the original RCSTA register value in UARTn_ITMP2, then save the
@@ -392,38 +397,38 @@ recv_derrov                  ;done dealing with overrun error condition
 ;
 ;     ITMP3  -
 ;
-      /if fifos_new
-        /then
+    /if fifos_new
+      /then
          bank_fifoin
          fifo_br_full fifo_in[chars n], 0, intr_leave, uart[chars n]_itmp2 ;full ?
          fifo_put fifo_in[chars n], uart[chars n]_itmp1 ;write the byte into the FIFO
-        /else
+      /else
          bank_fifoin
          fifo_skip_nfull fifo_in[chars n], finsz ;FIFO has room for another byte ?
          jump    intr_leave  ;FIFO is full, ignore the new byte
          fifo_put fifo_in[chars n], finsz, uart[chars n]_itmp1 ;stuff new byte into the FIFO
-        /endif
+      /endif
 ;
 ;   De-assert the RECV_READY output line if there is now room for RECV_NREADY
 ;   new bytes or less in the FIFO.
 ;
-      /if [<> recv_ready ""] then
-        /if fifos_new
-          /then
+    /if [<> recv_ready ""] then
+      /if fifos_new
+        /then
          bank_fifoin
          fifo_br_empty fifo_in[chars n], [- finsz recv_nready 1], intr_dready, uart[chars n]_itmp2
-          /else
+        /else
          bank_fifoin
          fifo_n_full fifo_in[chars n] ;get number of bytes now in the FIFO
          sublw   finsz       ;make number of empty FIFO slots
          sublw   [v recv_nready] ;compare to flow control full threshold
          skip_wle            ;FIFO full enough to de-assert RECV_READY ?
          jump    intr_dready ;no, done with RECV_READY
-          /endif
+        /endif
 
          set_[chars recv_ready]_off ;indicate we are not ready for more bytes
 intr_dready unbank           ;done updating RECV_READY as appropriate
-        /endif
+      /endif
 
          dbankif gbankadr
          bsf     flag_sin[chars n] ;indicate a serial line input byte is available
@@ -431,8 +436,8 @@ intr_dready unbank           ;done updating RECV_READY as appropriate
 intr_leave unbank            ;common code to return to interrupt handler
          gjump   intr_ret_uart ;done handling this interrupt
 
-      /set no_intr_disable true ;re-enable intr on/off in nested macros
-      /endif                 ;end of using interrupt driven input case
+    /set no_intr_disable true ;re-enable intr on/off in nested macros
+    /endif                   ;end of using interrupt driven input case
 
 ;*******************************************************************************
 ;
@@ -443,8 +448,8 @@ intr_leave unbank            ;common code to return to interrupt handler
 ;   UARTn_GET can be called without it waiting for a new input byte.  FLAG_SINn
 ;   is also updated according to whether a byte is immediately available.
 ;
-    /if fifin
-      /then
+  /if fifin
+    /then
 
 ;*****************************
 ;
@@ -452,8 +457,8 @@ intr_leave unbank            ;common code to return to interrupt handler
 ;   modified here since it is automatically kept up to date as bytes are moved
 ;   into and out of the FIFO.
 ;
-        /if fifos_new
-          /then
+      /if fifos_new
+        /then
          glbsub  uart[chars n]_inn, regf1
 
          clrf    reg1        ;init possibly unused high byte
@@ -464,7 +469,7 @@ intr_leave unbank            ;common code to return to interrupt handler
          setf    reg0        ;more than 256 bytes, clip at 255
 
          leaverest
-          /else
+        /else
          glbsub  uart[chars n]_inn, noregs
 
          bank_fifoin
@@ -472,13 +477,13 @@ intr_leave unbank            ;common code to return to interrupt handler
          movwf   reg0
 
          leaverest
-          /endif
+        /endif
 
 ;*****************************
 ;
 ;   This version is for programmed I/O.
 ;
-      /else
+    /else
          glbsub  uart[chars n]_inn, noregs
 
          dbankif gbankadr
@@ -489,18 +494,18 @@ intr_leave unbank            ;common code to return to interrupt handler
          btfss   rcif_reg, rcif_bit ;a byte is available ?
          jump    inn_leave   ;no
 
-        /if enab_inflag then
+      /if enab_inflag then
          dbankif gbankadr
          bsf     flag_sin[chars n]
-          /endif
+        /endif
          incf    reg0        ;indicate one byte available
 
 inn_leave unbank
          leaverest
-      /endif
+    /endif
 
 
-    /if fifin then           ;this routine only exists when input FIFO in use
+  /if fifin then             ;this routine only exists when input FIFO in use
 ;*******************************************************************************
 ;
 ;   Subroutine UARTn_IN_ROOM
@@ -511,8 +516,8 @@ inn_leave unbank
 ;
 ;   This routine only exists when a input FIFO is in use.
 ;
-      /if fifos_new
-        /then
+    /if fifos_new
+      /then
          glbsub  uart[chars n]_in_room, regf1
 
          clrf    reg1        ;init possibly unused high byte
@@ -523,7 +528,7 @@ inn_leave unbank
          setf    reg0        ;more than 256 bytes, clip at 255
 
          leaverest
-        /else
+      /else
          glbsub  uart[chars n]_in_room, noregs
 
          bank_fifoin
@@ -532,12 +537,12 @@ inn_leave unbank
          movwf   reg0        ;return the result
 
          leaverest
-        /endif               ;end of new/old FIFO cases
+      /endif                 ;end of new/old FIFO cases
 
-      /endif                 ;end of input FIFO exists
+    /endif                   ;end of input FIFO exists
 
 
-    /if enab_inflag then     ;this routine is pointless when FLAG_SIN not in use
+  /if enab_inflag then       ;this routine is pointless when FLAG_SIN not in use
 ;*******************************************************************************
 ;
 ;   Subroutine UARTn_GET_CHECK
@@ -545,8 +550,8 @@ inn_leave unbank
 ;   Check whether at least one byte is immediately available to read.  FLAG_SINn
 ;   is set accordingly.
 ;
-      /if fifin
-        /then
+    /if fifin
+      /then
 
 ;*****************************
 ;
@@ -561,7 +566,7 @@ inn_leave unbank
 ;
 ;   This version is for programmed I/O.
 ;
-        /else
+      /else
          glbsub  uart[chars n]_get_check, noregs
 
          dbankif gbankadr
@@ -574,8 +579,8 @@ inn_leave unbank
 
 gch_leave unbank
          leaverest
-        /endif
-      /endif                 ;end of configured for FLAG_SIN case
+      /endif
+    /endif                   ;end of configured for FLAG_SIN case
 
 ;*******************************************************************************
 ;
@@ -585,8 +590,8 @@ gch_leave unbank
 ;   available, this routine will wait until one is.  On return, FLAG_SINn will
 ;   indicate whether another byte is immediately available.
 ;
-    /if fifin
-      /then
+  /if fifin
+    /then
 
 ;*****************************
 ;
@@ -598,8 +603,8 @@ gch_leave unbank
 ;
 ;   Wait for a byte to be available.
 ;
-        /if tasking
-          /then              ;the multi-tasking system is in use
+      /if tasking
+        /then                ;the multi-tasking system is in use
 get_wait unbank
          dbankif gbankadr
          btfsc   flag_sin[chars n] ;no input byte available right now ?
@@ -608,20 +613,20 @@ get_wait unbank
          jump    get_wait    ;back and check again for input byte available
 get_ready dbankis gbankadr   ;an input byte is available in the FIFO
 
-          /else              ;no multi-tasking, do a busy wait
+        /else                ;no multi-tasking, do a busy wait
          dbankif gbankadr
 get_wait
          btfss   flag_sin[chars n] ;input byte is available ?
          jump    get_wait    ;no, go back and check again
 
-          /endif             ;end of multi-tasking yes/no cases
+        /endif               ;end of multi-tasking yes/no cases
 ;
 ;   The FIFO contains at least one input byte.  Get the next input byte into
 ;   REG0 and clear the SIN flag if no more input bytes are immediately
 ;   available.
 ;
-        /if fifos_new
-          /then
+      /if fifos_new
+        /then
          bank_fifoin
          fifo_get fifo_in[chars n], reg0 ;get the data byte into REG0
          clrflag sin         ;init to no more bytes immediately available
@@ -629,7 +634,7 @@ get_wait
          fifo_br_empty fifo_in[chars n], 0, get_dmpt, uart[chars n]_itmp2 ;really is empty ?
          setflag sin         ;no, indicate another byte is immediately available
 get_dmpt unbank              ;done checking for FIFO empty
-          /else
+        /else
          bank_fifoin
          intr_off            ;temp disable UART interrupts
          fifo_get fifo_in[chars n], finsz, reg0 ;get the byte from the FIFO into REG0
@@ -639,19 +644,19 @@ get_dmpt unbank              ;done checking for FIFO empty
          bcf     flag_sin[chars n] ;indicate no input byte immediately available
 get_nemt dbank?              ;skip to here if FIFO is not completely empty
          intr_on             ;re-enable interrupts
-          /endif
+        /endif
 ;
 ;   Assert the RECV_READY output line if the FIFO now has room for more than
 ;   RECV_NREADY bytes.
 ;
-        /if [<> recv_ready ""] then
+      /if [<> recv_ready ""] then
 
-          /if fifos_new
-            /then
+        /if fifos_new
+          /then
          bank_fifoin
          fifo_br_full fifo_in[chars n], [- finsz recv_nready], get_dready, uart[chars n]_itmp2 ;still too full ?
          set_[chars recv_ready]_on ;indicate we are ready to receive more bytes
-            /else
+          /else
          bank_fifoin
          fifo_n_full fifo_in[chars n] ;get number of bytes now in the FIFO
          sublw   finsz       ;make number of empty FIFO slots
@@ -660,10 +665,10 @@ get_nemt dbank?              ;skip to here if FIFO is not completely empty
          jump    get_dready  ;no, done with RECV_READY
 
          set_[chars recv_ready]_on ;indicate we are ready to receive more bytes
-            /endif
+          /endif
 
 get_dready unbank            ;done updating RECV_READY as appropriate
-          /endif
+        /endif
 
          leaverest
 
@@ -671,13 +676,13 @@ get_dready unbank            ;done updating RECV_READY as appropriate
 ;
 ;   This version is for programmed I/O.
 ;
-      /else
+    /else
          glbsub  uart[chars n]_get, regf1
 ;
 ;   Wait for a byte to be available.
 ;
-        /if tasking
-          /then              ;the multi-tasking system is in use
+      /if tasking
+        /then                ;the multi-tasking system is in use
 get_wait unbank
          dbankif rcif_reg
          btfsc   rcif_reg, rcif_bit ;no byte available now ?
@@ -686,14 +691,14 @@ get_wait unbank
          jump    get_wait    ;back and check again for input byte available
 get_ready dbankis gbankadr   ;an input byte is available from the UART
 
-          /else              ;no multi-tasking, do a busy wait
+        /else                ;no multi-tasking, do a busy wait
 get_wait unbank
          dbankif rcif_reg
 get_waitloop
          btfss   rcif_reg, rcif_bit ;a byte is available now ?
          jump    get_waitloop ;no, go back and check again
 
-          /endif             ;end of multi-tasking yes/no cases
+        /endif               ;end of multi-tasking yes/no cases
 ;
 ;   Get and return the input byte.
 ;
@@ -721,17 +726,17 @@ recv_derrov                  ;done dealing with overrun error condition
          btfsc   reg1, ferr  ;no framing error with this data byte ?
          jump    get_wait    ;framing error, back to get next byte
 
-        /if enab_inflag then
+      /if enab_inflag then
          mcall   uart[chars n]_get_check ;set FLAG_SIN according to new byte avail
-          /endif
+        /endif
          leaverest
-      /endif
+    /endif
 
-    /endif                   ;end of input is enabled code
+  /endif                     ;end of input is enabled code
 
-  /if enab_out then          ;this section only gets built if output is enabled
+/if enab_out then            ;this section only gets built if output is enabled
 
-    /if tasking then
+  /if tasking then
 ;*******************************************************************************
 ;
 ;   Subroutine UARTn_LOCK
@@ -754,9 +759,9 @@ lock_avail dbankis lbankadr  ;the lock is available
          bsf     flg_lock    ;set the lock
 
          leaverest
-      /endif                 ;end of multi-tasking in use
+    /endif                   ;end of multi-tasking in use
 
-    /if tasking then
+  /if tasking then
 ;*******************************************************************************
 ;
 ;   Subroutine UARTn_UNLOCK
@@ -771,7 +776,7 @@ lock_avail dbankis lbankadr  ;the lock is available
          bcf     flg_lock    ;release the lock
 
          leaverest
-      /endif                 ;end of multi-tasking in use
+    /endif                   ;end of multi-tasking in use
 
 ;*******************************************************************************
 ;
@@ -780,14 +785,14 @@ lock_avail dbankis lbankadr  ;the lock is available
 ;   Send the byte in REG0 over the serial line.  If the byte can not be sent
 ;   immediately, then this routine waits until it can be sent.
 ;
-    /if [and use_txmt [not fifout]] then
+  /if [and use_txmt [not fifout]] then
 ;   This version works around a bug in the UART where an extra zero
 ;   byte gets sent if TXREG is written just as a value would normally
 ;   be transferred from TXREG into TSR.
 ;
-      /endif
-    /if fifout
-      /then
+    /endif
+  /if fifout
+    /then
 
 ;*****************************
 ;
@@ -797,9 +802,9 @@ lock_avail dbankis lbankadr  ;the lock is available
 ;   the interrupt routine, which sets FLAG_SOUT when the FIFO is not full.
 ;
          glbsub  uart[chars n]_put, noregs
-        /if tasking
+      /if tasking
 
-          /then              ;the multi-tasking system is in use
+        /then                ;the multi-tasking system is in use
 put_wait unbank
          dbankif gbankadr
          btfsc   flag_sout[chars n] ;FIFO still full ?
@@ -808,16 +813,16 @@ put_wait unbank
          jump    put_wait    ;back and check again
 put_dwait dbankis gbankadr   ;done waiting, FIFO has room
 
-          /else              ;no multi-tasking, do a busy wait
+        /else                ;no multi-tasking, do a busy wait
          dbankif gbankadr
 put_wait
          btfss   flag_sout[chars n] ;output FIFO can accept another byte ?
          jump    put_wait    ;FIFO is full, go back and check again
 
-          /endif             ;end of multi-tasking yes/no cases
+        /endif               ;end of multi-tasking yes/no cases
 
 
-        /if [not fifos_new] then
+      /if [not fifos_new] then
 ;
 ;   The FIFO has room for at least one more byte.  Write the data byte in REG0
 ;   to the FIFO, make sure the UART transmit interrupt is enabled, and clear
@@ -828,13 +833,13 @@ put_wait
          bank_fifout
          intr_off            ;temp disable interrupts
          fifo_put fifo_ou[chars n], fousz, reg0 ;stuff the byte into the output FIFO
-          /if using_txie then
+        /if using_txie then
          dbankif txie_reg
          bsf     txie_flag   ;make sure UART transmit interrupt is enabled
-            /if [<> txie_pin ""] then
+          /if [<> txie_pin ""] then
          set_[chars txie_pin]_on ;show TXIE state on output pin
-              /endif
             /endif
+          /endif
          ;
          ;   Clear FLAG_SOUT if the FIFO is full.  FLAG_SOUT is currently set.
          ;
@@ -844,9 +849,9 @@ put_wait
          clrflag sout[chars n] ;indicate serial line output FIFO is full
 put_nfull unbank             ;skip to here if FIFO not completely full
          intr_on             ;re-enable interrupts
-          /endif             ;end of old FIFO type case
+        /endif               ;end of old FIFO type case
 
-        /if fifos_new then
+      /if fifos_new then
 ;
 ;   The FIFO has room for at least one more byte.  Write the data byte in REG0
 ;   to the FIFO, make sure the UART transmit interrupt is enabled, and clear
@@ -863,76 +868,76 @@ put_nfull unbank             ;skip to here if FIFO not completely full
 put_dfull unbank             ;done determining FIFO now full
          dbankif txie_reg
          bsf     txie_flag   ;make sure UART transmit interrupt is enabled
-          /endif             ;end of new FIFO type case
+        /endif               ;end of new FIFO type case
 
          leaverest
 
-      /else
+    /else
 ;*****************************
 ;
 ;   This version is for programmed I/O.
 ;
          glbsub  uart[chars n]_put, noregs
-        /if tasking
-          /then              ;the multi-tasking system is in use
+      /if tasking
+        /then                ;the multi-tasking system is in use
          ;
          ;   This section is for when multi-tasking is in use.
          ;
 put_wait unbank              ;back here until UART can accept a new byte
-            /if use_txmt
-              /then
+          /if use_txmt
+            /then
          dbankif txsta
          btfsc   txsta, trmt ;UART not ready for another byte yet ?
-              /else
+            /else
          dbankif pir1
          btfsc   pir1, txif  ;UART not ready for another byte yet ?
-              /endif
+            /endif
 
          jump    put_dwait   ;UART is ready for another byte
          call    task_yield_save ;let all other tasks run once
          jump    put_wait    ;back to check for UART ready again
 
 put_dwait
-            /if use_txmt
-              /then
+          /if use_txmt
+            /then
          dbankis txsta
-              /else
+            /else
          dbankis pir1
-              /endif
+            /endif
          ;
          ;   This section is for when multi-tasking is not in use.
          ;
-          /else              ;no multi-tasking, do a busy wait
+        /else                ;no multi-tasking, do a busy wait
 
-            /if use_txmt
-              /then
+          /if use_txmt
+            /then
          dbankif txsta
 put_wait
          btfss   txsta, trmt ;UART can accept another byte now ?
          jump    put_wait    ;no, go back and check again
-              /else
+            /else
          dbankif pir1
 put_wait
          btfss   pir1, txif  ;UART can accept another byte now ?
          jump    put_wait    ;no, go back and check again
-              /endif
+            /endif
 
-          /endif             ;end of multi-tasking yes/no cases
+        /endif               ;end of multi-tasking yes/no cases
 ;
 ;   The UART can accept another byte now.
 ;
          dbankif txreg
          movf    reg0, w
          movwf   txreg       ;write the byte to the UART
-        /if enab_outflag then
+      /if enab_outflag then
          mcall   uart[chars n]_put_check ;update FLAG_SOUT
-          /endif
+        /endif
 
          leaverest
-      /endif
+    /endif
 
 
-    /if enab_outflag then    ;this routine is pointless if FLAG_SOUT doesn't exist
+  /if enab_outflag then      ;this routine is pointless if FLAG_SOUT doesn't exist
 ;*******************************************************************************
 ;
 ;   Subroutine UARTn_PUT_CHECK
@@ -940,8 +945,8 @@ put_wait
 ;   Checks whether the UART can accept a new byte right now.  FLAG_SOUTn is set
 ;   if it can and reset if it can't.
 ;
-      /if fifout
-        /then
+    /if fifout
+      /then
 
 ;*****************************
 ;
@@ -953,7 +958,7 @@ put_wait
          glbsub  uart[chars n]_put_check, noregs
          leaverest
 
-        /else
+      /else
 ;*****************************
 ;
 ;   This version is for programmed I/O.
@@ -971,11 +976,11 @@ put_wait
 
 pch_leave unbank
          leaverest
-        /endif
-      /endif                 ;end of configured for FLAG_SOUT
+      /endif
+    /endif                   ;end of configured for FLAG_SOUT
 
 
-    /if fifout then          ;using interrupt driven output ?
+  /if fifout then            ;using interrupt driven output ?
 ;*******************************************************************************
 ;
 ;   Routine UARTn_INTR_XMIT
@@ -988,11 +993,11 @@ pch_leave unbank
 ;   the general registers and other global state.  Any call stack locations
 ;   used here will not be available to the foreground code.
 ;
-      /set no_intr_disable true ;disable intr on/off in nested macros
+    /set no_intr_disable true ;disable intr on/off in nested macros
          glbent  uart[chars n]_intr_xmit ;UART transmit interrupt handler
 
-      /if using_txie
-        /then
+    /if using_txie
+      /then
 
 ;*****************************
 ;
@@ -1004,18 +1009,18 @@ pch_leave unbank
 ;   Disable this interrupt and leave if the not-send flow control input is
 ;   asserted.  The interrupt will be re-enabled when the line is de-asserted.
 ;
-          /if [<> nsend_name ""] then
+        /if [<> nsend_name ""] then
          dbankif [chars nsend_name "_reg"]
 
-            /if nsend_high
-              /then
+          /if nsend_high
+            /then
          btfsc   [chars nsend_name "_pin"] ;we are allowed to send ?
-              /else
+            /else
          btfss   [chars nsend_name "_pin"] ;we are allowed to send ?
-              /endif
+            /endif
 
          jump    xmit_off    ;no, disable UART xmit interrupt and leave
-            /endif           ;end of not-send input exists
+          /endif             ;end of not-send input exists
 
 
          dbankif gbankadr
@@ -1024,26 +1029,26 @@ pch_leave unbank
 ;   Disable this interrupt if the serial line output FIFO is empty.  The
 ;   interrupt is always enabled when a byte is put into the FIFO.
 ;
-          /if fifos_new
-            /then
+        /if fifos_new
+          /then
          bank_fifout
          fifo_br_empty fifo_ou[chars n], 0, xmit_off, uart[chars n]_itmp2 ;empty ?
-            /else
+          /else
          bank_fifout
          fifo_skip_nempty fifo_ou[chars n] ;a byte is available in the FIFO
          jump    xmit_off    ;no byte available, disable this interrupt
-            /endif
+          /endif
 ;
 ;   There is at least one byte in the FIFO.  Send it.
 ;
-          /if fifos_new
-            /then
+        /if fifos_new
+          /then
          bank_fifout
          fifo_get fifo_ou[chars n], uart[chars n]_itmp1 ;get byte into ITMP1
-            /else
+          /else
          bank_fifout
          fifo_get fifo_ou[chars n], fousz, uart[chars n]_itmp1 ;get byte into ITMP1
-            /endif
+          /endif
 
          dbankif lbankadr
          movf    uart[chars n]_itmp1, w ;get the data byte into W
@@ -1052,27 +1057,27 @@ pch_leave unbank
 ;
 ;   Disable this interrupt if the FIFO is now empty.
 ;
-          /if fifos_new
-            /then
+        /if fifos_new
+          /then
          bank_fifout
          fifo_br_empty fifo_ou[chars n], 0, xmit_off, uart[chars n]_itmp2 ;empty ?
-            /else
+          /else
          bank_fifout
          fifo_skip_nempty fifo_ou[chars n] ;a byte is available in the FIFO
          jump    xmit_off    ;no byte available, disable this interrupt
-            /endif
+          /endif
 
          gjump   intr_ret_uart
 
 xmit_off unbank              ;disable the UART transmit ready interrupt
          dbankif txie_reg
          bcf     txie_flag   ;disable this interrupt
-          /if [<> txie_pin ""] then
+        /if [<> txie_pin ""] then
          set_[chars txie_pin]_off ;echo TXIE state on output pin
-            /endif
+          /endif
          gjump   intr_ret_uart
 
-        /else
+      /else
 ;*****************************
 ;
 ;   This version is for when the UART transmit interrupt is not used.  This
@@ -1080,38 +1085,38 @@ xmit_off unbank              ;disable the UART transmit ready interrupt
 ;
 ;   Get out of here quickly if there is no byte waiting in the output FIFO.
 ;
-          /if fifos_new
-            /then
+        /if fifos_new
+          /then
          bank_fifout
          fifo_br_empty fifo_ou[chars n], 0, intr_ret_uart, uart[chars n]_itmp2 ;empty ?
-            /else
+          /else
          bank_fifout
          fifo_skip_empty fifo_ou[chars n] ;the FIFO is empty ?
          jump    xmit_byte   ;no, there is a byte to transmit
          gjump   intr_ret_uart ;yes, get outta here
-            /endif
+          /endif
 
 xmit_byte                    ;there is a byte to transmit
 ;
 ;   There is a byte in the FIFO to send.
 ;
-          /if fifos_new
-            /then
+        /if fifos_new
+          /then
          bank_fifout
          fifo_get fifo_ou[chars n], uart[chars n]_itmp1 ;get byte into ITMP1
-            /else
+          /else
          bank_fifout
          fifo_get fifo_ou[chars n], fousz, uart[chars n]_itmp1 ;get the byte
-            /endif
+          /endif
 
          dbankif lbankadr
          movf    uart[chars n]_itmp1, w ;get the data byte into W
          dbankif txreg
          movwf   txreg       ;write the data byte to the UART
          gjump   intr_ret_uart
-        /endif               ;end of using transmit interrupt yes/no cases
-      /set no_intr_disable true ;re-enable intr on/off in nested macros
-      /endif                 ;end of using interrupt driven output case
+      /endif                 ;end of using transmit interrupt yes/no cases
+    /set no_intr_disable true ;re-enable intr on/off in nested macros
+    /endif                   ;end of using interrupt driven output case
 
 ;*******************************************************************************
 ;
@@ -1122,26 +1127,26 @@ xmit_byte                    ;there is a byte to transmit
 ;   This is one of the INTn interrupts, with the preprocessor constant NSEND_INT
 ;   indicating the INTn interrupt number.
 ;
-    /if [<> nsend_name ""] then ;using not_send flow control input ?
+  /if [<> nsend_name ""] then ;using not_send flow control input ?
          glbent  uart[chars n]_intr_send
 
-      /if [= nsend_int 0]
-        /then
+    /if [= nsend_int 0]
+      /then
          dbankif intcon
          bcf     intcon, int0if ;clear the interrupt condition
-        /else
+      /else
          dbankif intcon3
          bcf     intcon3, int[v nsend_int]if ;clear the interrupt condition
-        /endif
+      /endif
 
          dbankif txie_reg
          bsf     txie_flag   ;re-enable the UART transmit interrupt
-      /if [<> txie_pin ""] then
+    /if [<> txie_pin ""] then
          set_[chars txie_pin]_on ;show TXIE state on output pin
-        /endif
+      /endif
          gjump   intr_ret_uart
 
-      /endif                 ;end of using not-send flow control input
+    /endif                   ;end of using not-send flow control input
 
 ;*******************************************************************************
 ;
@@ -1153,25 +1158,25 @@ xmit_byte                    ;there is a byte to transmit
 ;
 ;   Wait for the software output FIFO to drain.
 ;
-    /if fifout then          ;configured for software output FIFO
+  /if fifout then            ;configured for software output FIFO
 idl_wfifo unbank
 
-      /if fifos_new
-        /then
+    /if fifos_new
+      /then
          bank_fifout
          fifo_br_empty fifo_ou[chars n], 0, idl_dfifo, uart[chars n]_itmp2 ;empty ?
-        /else
+      /else
          bank_fifout
          fifo_skip_nempty fifo_ou[chars n] ;still chars waiting in software FIFO ?
          jump    idl_dfifo   ;no, done with this section
-        /endif
+      /endif
 
-      /if tasking then
+    /if tasking then
          gcall   task_yield_save ;give other tasks a chance to run
-        /endif
+      /endif
          jump    idl_wfifo   ;back and check FIFO again
 idl_dfifo unbank             ;FIFO is now empty
-      /endif
+    /endif
 ;
 ;   Wait for the hardware to be idle.
 ;
@@ -1179,9 +1184,9 @@ idl_whw  unbank              ;back here until hardware is idle
          dbankif txsta
          btfsc   txsta, trmt ;hardware still busy ?
          jump    idl_dhw     ;no
-    /if tasking then
+  /if tasking then
          gcall   task_yield_save ;give other tasks a chance to run
-      /endif
+    /endif
          jump    idl_whw     ;back to check hardware again
 
 idl_dhw  dbankis txsta       ;TRMT flag was found set
@@ -1191,4 +1196,4 @@ idl_dhw  dbankis txsta       ;TRMT flag was found set
 
          leaverest
 
-    /endif                   ;end of UART output is enabled
+  /endif                     ;end of UART output is enabled
