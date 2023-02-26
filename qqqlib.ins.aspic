@@ -16,7 +16,7 @@
 ;
 ;   This include file sets up the environment for the QQ2 firmware.
 ;
-/const   picname = "QQ4"     ;specific PIC model name
+/const   picname = [evar "PICTYPE"] ;specific PIC model, from BUILD_VAR script
 /const   fwname  = "qq2"     ;name of this project
 /const   srcdir  = "qq1"     ;top level SOURCE directory name
 /const   buildname = "qq2"   ;name of subdirectory within top level SOURCE dir
