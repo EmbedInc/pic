@@ -1,0 +1,33 @@
+//   ***************************************************************
+//   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+//   *                                                             *
+//   * Permission to copy this file is granted as long as this     *
+//   * copyright notice is included in its entirety at the         *
+//   * beginning of the file, whether the file is copied in whole  *
+//   * or in part and regardless of whether other information is   *
+//   * added to the copy.                                          *
+//   *                                                             *
+//   * The contents of this file may be used in any way,           *
+//   * commercial or otherwise.  This file is provided "as is",    *
+//   * and Embed Inc makes no claims of suitability for a          *
+//   * particular purpose nor assumes any liability resulting from *
+//   * its use.                                                    *
+//   ***************************************************************
+//
+//   Export the command and response opcodes as symbolic constants to the Pascal
+//   environment.
+//
+//   This file is intended to be run thru the PIC preprocessor, but the
+//   resulting .as file ignored and not assembled.  The purpose of preprocessing
+//   this file is to produce the QQ2_CMDRSP.INS.PAS include file.
+//
+//   To simplify the dependencies, this file does NOT reference the project
+//   include file.  This means that standard constants defined in the assembler
+//   environment are not available here.  The code here and in the
+//   CMDRSP.INS.ASPIC library module does not have access to the definitions in
+//   STD.INS.ASPIC.
+//
+/const   buildname string = "qq2"
+/include [str buildname "_cmdrsp.ins.aspic"] //get the CMD_xxx and RSP_xxx definitions
+/include "(cog)src/pic/cmdrsp.ins.aspic" //write them to a Pascal include file
+         end

@@ -1,0 +1,67 @@
+//   ***************************************************************
+//   * Copyright (C) 2005, Embed Inc (http://www.embedinc.com)     *
+//   *                                                             *
+//   * Permission to copy this file is granted as long as this     *
+//   * copyright notice is included in its entirety at the         *
+//   * beginning of the file, whether the file is copied in whole  *
+//   * or in part and regardless of whether other information is   *
+//   * added to the copy.                                          *
+//   *                                                             *
+//   * The contents of this file may be used in any way,           *
+//   * commercial or otherwise.  This file is provided "as is",    *
+//   * and Embed Inc makes no claims of suitability for a          *
+//   * particular purpose nor assumes any liability resulting from *
+//   * its use.                                                    *
+//   ***************************************************************
+//
+//   Define the command and response opcodes used by this firmware.
+//
+//   This file must have no other dependencies so that it can be used in
+//   isolation to export the command and response names and opcodes to elsewhere
+//   without requiring the full firmware build environment to be set up.
+//
+//   This file is included from the CMDRSP module to make include files for
+//   other languages that define the command and response opcodes.  It is also
+//   included from the main project include file so that all ASPIC modules have
+//   access to the command and response opcode definitions.
+//
+
+//******************************************************************************
+//
+//   Command opcodes.
+//
+//   These are string constants named cmd_<commandname>.  Their contents is:
+//
+//     opc [entrypoint]
+//
+//   The integer opcode value is the first token, and is required.  The optional
+//   second token is the entry point of the command routine to run for that
+//   opcode.  The default is cm_<commandname>.
+//
+//   Examples
+//
+//     cmd_blork = "3"
+//
+//       Opcode 3, command routine "cm_blork".
+//
+//     cmd_barf = "7 gopuke"
+//
+//       Opcode 7, command routine "gopuke".
+//
+/const   cmd_nop = 0         ;NOP
+/const   cmd_ping = 1        ;send PONG response
+/const   cmd_fwinfo = 2      ;send FWINFO response, gives FW type, ver and seq
+/const   cmd_nameset = 3     ;set user-settable device name, ignored
+/const   cmd_nameget = 4     ;get device name, fixed from DEVNAME constant
+
+//******************************************************************************
+//
+//   Response opcodes.
+//
+//   These are integer constants named rsp_<responsename>.  The value of each
+//   constant is the 0-255 opcode for that response.
+//
+/const   rsp_nop integer = 0 ;NOP
+/const   rsp_pong integer = 1 ;response to PING command
+/const   rsp_fwinfo integer = 2 ;firmware type, version, and sequence
+/const   rsp_name integer = 3 ;reports unit name string

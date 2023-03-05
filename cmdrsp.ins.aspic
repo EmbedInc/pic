@@ -1,0 +1,134 @@
+//   ***************************************************************
+//   * Copyright (C) 2019, Embed Inc (http://www.embedinc.com)     *
+//   *                                                             *
+//   * Permission to copy this file is granted as long as this     *
+//   * copyright notice is included in its entirety at the         *
+//   * beginning of the file, whether the file is copied in whole  *
+//   * or in part and regardless of whether other information is   *
+//   * added to the copy.                                          *
+//   *                                                             *
+//   * The contents of this file may be used in any way,           *
+//   * commercial or otherwise.  This file is provided "as is",    *
+//   * and Embed Inc makes no claims of suitability for a          *
+//   * particular purpose nor assumes any liability resulting from *
+//   * its use.                                                    *
+//   ***************************************************************
+//
+//   Export the command and response opcodes as symbolic constants to the Pascal
+//   environment.
+//
+//   The code here is "stand-alone".  It does not have access to the definitions
+//   in the firmware project include file nor STD.INS.ASPIC.
+//
+//   The standard CMDRSP module (template QQQ_CMDRSP.ASPIC) includes the
+//   project-specific <fwname>_CMDRSP.INS.ASPIC file that defines the command
+//   response opcodes, then includes this file to process them and create the
+//   output files derived from the opcodes.
+//
+
+////////////////////////////////////////
+//
+//   Subroutine STRING_TOKEN str ind tok
+//
+//   Parses the next token from the string STR.  IND must be the name of an
+//   integer variable that is the string index to start parsing at.  IND is
+//   updated to after the token.  TOK must be a string variable into which the
+//   parsed token is returned.  IND should be started at 1 in a sequence to get
+//   all tokens from the string.  IND is returned past the end of the string
+//   when the input string has been exhausted.
+//
+/subroutine string_token
+  /set [arg 3] ""            ;init the token to the empty string
+  /if [< [arg 2] 1] then     ;invalid IND ?
+    /return
+    /endif
+  //
+  //   Skip over leading blanks.
+  //
+  /block
+    /if [> [arg 2] [slen [arg 1]]] then ;past end of string ?
+      /return
+      /endif
+    /if [= [sindx [arg 2] [arg 1]] " "] then ;another blank ?
+      /set [arg 2] [+ [arg 2] 1] ;advance the parse index
+      /repeat
+      /endif
+    /endblock
+  //
+  //   Grab string characters up to the first blank or end of input string.
+  //
+  /block
+    /if [= [sindx [arg 2] [arg 1]] " "] then ;hit a blank ?
+      /set [arg 2] [+ [arg 2] 1] ;start at next character next time
+      /return
+      /endif
+    /set [arg 3] [str [arg 3] [sindx [arg 2] [arg 1]]] ;add this char to token
+    /set [arg 2] [+ [arg 2] 1] ;advance to next input string index
+    /if [> [arg 2] [slen [arg 1]]] then ;past end of string ?
+      /return
+      /endif
+    /repeat
+    /endblock
+  /endsub
+
+////////////////////////////////////////
+//
+//   Start of main routine.
+//
+/var new fnam string
+/var new sy string //bare (not qualified) symbol name
+/var new p integer //string parse index
+/var new tk string //scratch token
+/var new name string //command or response name
+/var new opc integer //opcode value
+
+/const   srcdir  string = [evar "srcdir"]
+/const   buildname string = [evar "buildname"]
+
+/set fnam [str "(cog)src/" srcdir "/debug_" buildname ".ins.aspic"]
+/run "make_debug """ fnam """ icd"
+/include fnam
+/const   debug   bool = debugging //for compatibility with old code
+
+/set fnam [str "(cog)src/" srcdir "/" buildname "_cmdrsp.ins.aspic"]
+/include fnam //get command and response opcode definitions
+
+/set fnam [str buildname "_cmdrsp.ins.pas"]
+/writepush fnam
+/show "  Writing " fnam
+
+/write "const"
+//
+//   Do the CMD_xxx symbols.
+//
+/loop symbols sym const //scan all constants
+  /set sy [sym sym name] //get bare symbol name
+  /if [<= [slen sy] 4] then //too short ?
+    /repeat
+    /endif
+  /if [<> [substr 1 4 sy] "cmd_"] then
+    /repeat
+    /endif
+  /set p 1 //init parse index
+  /call string_token [v [chars sym]] p tk //get opcode value token
+  /set opc [chars tk] //get the opcode value
+  /set name [substr 5 [slen sy] sy] //get the opcode name
+  /write "  cmd_" name "_k = " opc ";"
+  /endloop
+//
+//   Do the RSP_xxx symbols.
+//
+/write
+/loop symbols sym const //scan all constants
+  /set sy [sym sym name] //get bare symbol name
+  /if [<= [slen sy] 4] then //too short ?
+    /repeat
+    /endif
+  /if [<> [substr 1 4 sy] "rsp_"] then
+    /repeat
+    /endif
+  /set opc [chars sym]
+  /set name [substr 5 [slen sy] sy] //get the opcode name
+  /write "  rsp_" name "_k = " opc ";"
+  /endloop
+/writepop
