@@ -382,7 +382,7 @@ cmd_waitusb unbank
 ;
 ;   Command routines jump here when done.
 ;
-cmd_done unbank              ;done successfully processing last command
+cmd_done glbent              ;done successfully processing last command
          dbankif stkptr
          clrf    stkptr      ;reset the call stack to empty
          stack_set cmdstack  ;reset the data stack to empty
@@ -423,109 +423,16 @@ cmd_next unbank              ;back here to interpret next byte as command opcode
 
 ;*******************************************************************************
 ;
-;   Macro SENDK const
-;
-;   Send the indicated 8 bit constant value to the host.
-;
-;   W, REG0, and the current bank setting are trashed.  All registers not listed
-;   in MSKSAVE may be trashed.
-;
-sendk    macro   const
-         loadk8  reg0, const
-         mcall   cmd_put8
-         endm
-
-;*******************************************************************************
-;
-;   Command PING
-;
-;   Send the PONG response.
-;
-cm_ping  unbank
-         mcall   cmd_lock_out
-         sendk   rsp_pong
-         return
-
-;*******************************************************************************
-;
-;   Command FWINFO
-;
-;   Send FWINFO response, which indicates the firmware version.
-;
-cm_fwinfo unbank
-         mcall   cmd_lock_out
-
-         sendk   rsp_fwinfo  ;send FWINFO response opcode
-         sendk   fwtype      ;type ID for this firmware
-         sendk   fwver       ;1-255 firmware version number
-         sendk   fwseq       ;1-255 firmware sequence number
-
-         return
-
-;*******************************************************************************
-;
-;   Command NAMESET n string
-;
-;   Sets the new non-volatile name of this unit.  Exactly N name characters
-;   follow N.
-;
-cm_nameset unbank
-         mcall   cmd_get8    ;get N
-         movf    reg0, w
-         bz      nameset_leave ;no name string bytes to get ?
-         movwf   reg1        ;init number of name string bytes left to get
-
-nameset_byte unbank
-         mcall   cmd_get8    ;get and ignore this name string byte
-         decfsz  reg1        ;count one less name byte left to get
-         jump    nameset_byte ;back to get the next name byte
-
-nameset_leave unbank
-         jump    cmd_done    ;done processing this command
-
-;*******************************************************************************
-;
-;   Command NAMEGET
-;
-;   Send NAME response to indicate the user-settable unit name.
-;
-cm_nameget unbank
-         gcall   name_get_start ;set up for getting name, length into REG0
-         dbankif gbankadr
-         bsf     flag_namecmd ;indicate we have the NAME_GET lock
-         movff   reg0, reg1  ;save number of name characters
-
-         mcall   cmd_lock_out ;acquire lock on the response stream
-         sendk   rsp_name    ;send response opcode
-         movff   reg1, reg0
-         mcall   cmd_put8    ;send the number of name characters to follow
-name_loop unbank             ;back here to send each new name character
-         movf    reg1
-         bz      name_done   ;done sending all the name characters ?
-         gcall   name_get_char ;get this name character
-         mcall   cmd_put8    ;send it
-         decf    reg1        ;count one less character left to do
-         jump    name_loop   ;back to send next name char
-name_done unbank             ;done sending all the name characters
-         mcall   cmd_unlock_out ;release lock on response stream to host
-
-         gcall   name_get_end ;done getting unit name
-         dbankif gbankadr
-         bcf     flag_namecmd ;indicate we are not holding the NAME_GET lock
-         return
-
-;*******************************************************************************
-;
 ;   Commands dispatch table.
 ;
 .cmdtable code_pack
          dsp_start cmd_table ;start command opcodes dispatch table
 
          dsp_entry 0, cmd_done ;NOP
-         dsp_entry 1, cm_ping ;PING, send PONG response
-         dsp_entry 2, cm_fwinfo ;send firmware information
-         dsp_entry 3, cm_nameset ;set unique name (accepted but ignored)
-         dsp_entry 4, cm_nameget ;send unique name of this unit
+         dsp_extrn 1, cm_ping ;PING, send PONG response
+         dsp_extrn 2, cm_fwinfo ;send firmware information
+         dsp_extrn 3, cm_nameset ;set unique name (accepted but ignored)
+         dsp_extrn 4, cm_nameget ;send unique name of this unit
 
          dsp_end cmd_table   ;end of command opcodes dispatch table
 

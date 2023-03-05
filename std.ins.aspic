@@ -550,6 +550,80 @@ ii       set     ii + 1      ;advance to next config word address
 
 ////////////////////////////////////////////////////////////////////////////////
 //
+//   Subroutine PARSE_CMD var [suff]
+//
+//   Parse the contents of the constant or variable VAR.  VAR must be of data
+//   type STRING.  The contents of VAR is:
+//
+//     n [entpnt]
+//
+//   N is a 0 to 255 decimal integer indicating the opcode value of a command.
+//   ENTPNT is the name of the entry point to the command routine.  When ENTPNT
+//   is not present, the entry point name is derived from the variable name.  In
+//   that case the name of VAR must be "cmd_xxx".  The entry point name is
+//   interpreted to be "cm_xxx".
+//
+//   The optional SUFF parameter is a unique string added to the fixed part of
+//   the variable name.  The fixed part of the variable name is cmd_<suff>_,
+//   which is removed from the variable name to make the default entry point
+//   name.  With a variable name "cmd_xyz_abc" and SUFF "_xyz", the default
+//   entry point name is "cm_abc", not "cm_xyz_abc".
+//
+//   This subroutine sets two variables:
+//
+//     OPC  -  Integer.  Opcode value.
+//
+//     ENTPNT  -  String.  Command routine entry point name.
+//
+//   OPC and ENTPNT are created if they do not already exist.
+//
+//   For exampe, if this routine is called with constant "cmd_abcd" containing
+//   "5", then OPC will be 5 and ENTPNT "cm_abcd".  If the constant contains
+//   "13 send_blork", then OPC will be 13 and ENTPNT "send_blork".
+//
+/subroutine parse_cmd
+  /var exist opc integer //make sure return values exist
+  /var exist entpnt string
+  /var local vname string = [qstr [arg 1]] //get variable or constant name
+  /var local vnam string = [sym vname name] //make bare var or const name
+  /var local vstr string = [vnl [chars vname]] //get input string
+  /var local pref string = [str "cmd" [qstr [arg 2]] "_"] //fixed var name prefix
+  /var local p integer = 1 //parse index
+  /var local tk string //token parsed from input string
+
+  /call string_token [v vstr] p tk //get opcode token
+  /set opc [chars tk]
+
+  /if [> p [slen vstr]] then //no ENTPNT token ?
+    /block //block to abort out of on error
+      /set tk [substr 1 [slen pref] vnam]
+      /if [<> tk pref] then //name doesn't start with "cmd_" ?
+        /quit
+        /endif
+      /set tk [substr [+ [slen pref] 1] 99 vnam]
+      /if [< [slen tk] 1] then //nothing after "cmd_" ?
+        /quit
+        /endif
+      /set entpnt [str "cm_" tk] //make full default entry point name
+      /return
+      /endblock
+    /show "  Bad name """ vname """ passed to PARSE_CMD."
+         .error  "Bad var/const name"
+    /stop
+    /endif
+
+  /call string_token [v vstr] p tk //get ENTPNT token
+  /if [<= p [slen vstr]] then //extra tokens in string ?
+    /show "  Extra token in variable or constant """ vname """".
+    /show "  String is """ vstr """".
+         .error  "Extra token"
+    /stop
+    /endif
+  /set entpnt tk
+  /endsub
+
+////////////////////////////////////////////////////////////////////////////////
+//
 //   Subroutine TABTO varname column
 //
 //   Add blanks to the end of the string VARNAME so that the next next character
@@ -8955,7 +9029,7 @@ next_entry set   next_entry + 1 ;update expected index for next time
 ;
 ;   Like DSP_ENTRY, except that ADR is external to the module this macro is in.
 ;
-dsp_extern macro index, adr
+dsp_extrn macro  index, adr
          extern  adr
          dsp_entry index, adr
          endm
@@ -8974,6 +9048,70 @@ name#v(0)nent equ next_entry ;define symbol for number of entries in this table
     endif
          endm
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Function CmdRef ent
+//
+//   Returns TRUE iff the entry point ENT is referenced as a command routine.
+//   The ENT parameter is a sequence of characters, not a string.
+//
+//   Commands are defined by variables or constants named "cmd_xxx".  A
+//   additional name can be inserted after "cmd_".  This is necessary, for
+//   example, when there are multiple command processors with different command
+//   sets.  The constant or variable SUFF denotes this additional part of the
+//   CMD_ symbol names, if present and not set to the empty string.  In that
+//   case, the variable or constants defining commands are named "cmd<suff>_xxx"
+//   where <suff> indicates the contents of the SUFF variable or constant.
+//
+/function CmdRef
+  /var local ent string = [qstr [arg 1]] //entry point name checking for
+  /var local opc integer //command opcode
+  /var local entpnt string //command routine entry point name
+  /var local retval bool //function return value
+  /var local ii integer //scratch integer
+  /var local tk string //scratch token
+  /if [not [exist "suff:vcon"]] then
+    /var local suff string
+    /endif
+
+  /set tk [str "cmd" suff "_"] //starting fixed part of CMD_xxx names
+  /set ii [slen tk] //length of fixed part of CMD_xxx names
+  /loop symbols sym vcon
+    /var local sy string
+    /set sy [sym sym name]
+    /if [<= [slen sy] ii] then
+      /repeat
+      /endif
+    /if [<> [substr 1 ii sy] tk] then
+      /repeat
+      /endif
+    /call parse_cmd [chars sym] [chars suff] //get entry point of this command
+    /if [= entpnt ent] then
+      /set retval True
+      /quit
+      /endif
+    /endloop
+
+  /funcval retval
+  /endfunc
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Function Command entpnt
+//
+//   Returns TRUE if the entry point ENTPNT is referenced as a command routine,
+//   otherwise FALSE.  When returning TRUE, the entry point of the command is
+//   defined.  ENTPNT is a sequence of characters, not a string.
+//
+/function Command
+  /if [CmdRef [arg 1]]
+    /then
+      /funcval TRUE
+         glbent  [arg 1]
+    /else
+      /funcval FALSE
+    /endif
+  /endfunc
 
 ;*******************************************************************************
 ;*******************************************************************************
