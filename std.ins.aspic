@@ -8951,6 +8951,17 @@ next_entry set   next_entry + 1 ;update expected index for next time
 
 ;*******************************************************************************
 ;
+;   Macro DSP_EXTRN index, adr
+;
+;   Like DSP_ENTRY, except that ADR is external to the module this macro is in.
+;
+dsp_extern macro index, adr
+         extern  adr
+         dsp_entry index, adr
+         endm
+
+;*******************************************************************************
+;
 ;   Macro DSP_END name
 ;
 ;   End the definition of a dispatch table started with DSP_START and filled

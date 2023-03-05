@@ -21,11 +21,20 @@
 ;   standard USB flags.  The flags below are defined such that they can be
 ;   copied into the project include file and uncommented.
 ;
-;   /flag    namelock            ;name get routines are locked
 ;   /flag    cmdreset            ;reset command processor logic next time run
 ;   /flag    namecmd             ;name get routines acquired by command processor
 ;   /flag    rsp_lock            ;response to host is locked by a task
 ;   /flag    cmd_rsplock         ;response lock is being held by command proc task
+;
+;   The CMDRESET flag is not needed if USE_USBRESET set to TRUE below.  The USB
+;   code automatically sets USBRESET when a USB reset is detected.  This is the
+;   only app interface for getting notified about a USB reset.  The application
+;   may need to do other things than just resetting the command processor on a
+;   USB reset.  In that case, USBRESET should be a condition handled in the main
+;   event loop, which then sets CMDRESET as one of its tasks.  If the only
+;   response to a USB reset is to reset the command processor, then the USBRESET
+;   flag can be used here directly.  That is done by setting USE_USBRESET to
+;   TRUE.
 ;
 /include "qq2.ins.aspic"
 
@@ -34,10 +43,11 @@
 
 ;*******************************************************************************
 ;
-;   Configuration constants.
+;   Configuration settings.
 ;
+/const   use_usbreset bool = False ;use USBRESET flag directly, CMDRESET not used
 stacksz  equ     64          ;size of command processor data stack
-lbank    equ     1           ;register bank for the local state of this module
+lbank    equ     0           ;register bank for the local state of this module
 ;
 ;   Derived constants.
 ;
@@ -82,7 +92,11 @@ cmdstack res     stacksz     ;command processing task data stack
 
 ;*******************************************************************************
 ;
-;   Local subroutine YIELD
+;   Subroutine CMD_YIELD
+;
+;   Special task yield routine for the command processing task only.  This
+;   routine may only be called by command processing code run from the command
+;   processor.
 ;
 ;   Let other tasks run for a time slice.  In addition, this routine restarts
 ;   the command processing logic if a USB reset was received.  That means the
@@ -91,133 +105,116 @@ cmdstack res     stacksz     ;command processing task data stack
 ;   Since this routine calls TASK_YIELD, all registers not listed in TSKSAVE are
 ;   trashed.
 ;
-         locsub  yield, noregs
+         glbsub  cmd_yield
 
          gcall   task_yield  ;give other tasks a chance to run
 
-         dbankif gbankadr
-         btfsc   flag_cmdreset ;don't need to reset the command processor ?
-         jump    task_restart ;reset the command processor
+/if use_usbreset
+  /then
+         skip_nflag usbreset
+  /else
+         skip_nflag cmdreset
+  /endif
+         jump    task_restart ;USB was reset, reset the command processor
 
          leaverest
 
 ;*******************************************************************************
 ;
-;   Local subroutine GET_BYTE
+;   Subroutine CMD_GET8
 ;
 ;   Get the next input byte into REG0.  This subroutine will not return until an
 ;   input byte is available.  Only the registers listed in TSKSAVE will be
 ;   preserved.  Other tasks will be run while waiting for a new input byte to
-;   become available.  A YIELD is guaranteed to be performed at least once.
+;   become available.  No yield is performed if a byte is immediately available.
 ;
-         locsub  get_byte, regf1
+         glbsub  cmd_get8, regf1
 
-gbloop   unbank              ;back here until input byte is available
-         popregs savedregs
-         mcall   yield       ;give other tasks a chance to run
-         pushregs savedregs
-         dbankif gbankadr
+get8_byte unbank             ;back here until input byte is available
          clrf    reg1        ;indicate to transfer byte if one is available
          gcall   usb_get1    ;try to get a byte from the USB
-         btfsc   reg1, usbs_noxf ;we got a byte ?
-         jump    gbloop      ;no, go back and try again
+         btfss   reg1, usbs_noxf ;didn't get a byte ?
+         jump    get8_leave  ;got a byte, all done
+         ;
+         ;   No byte was received.  Let all other tasks run, then try again.
+         ;
+         popregs savedregs
+         mcall   cmd_yield   ;give other tasks a chance to run
+         pushregs savedregs
+         jump    get8_byte   ;back to try getting a byte again
+
+get8_leave unbank            ;returning with received byte in REG0
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine CMD_GET16
+;
+;   Get the next 2 input bytes as a 16 bit value into REG1:REG0.  The input
+;   bytes are assumed to be in high to low byte order.
+;
+         glbsub  cmd_get16
+
+         mcall   cmd_get8    ;get the high byte into REG1
+         movff   reg0, reg1
+         mcall   cmd_get8    ;get the low byte into REG0
 
          leaverest
 
 ;*******************************************************************************
 ;
-;   Macro GETBYTE
+;   Subroutine CMD_GET24
 ;
-;   Call GET_BYTE, which is defined immediately above.  This macro is to make it
-;   easier to exchange code with other firmware that does not use a subroutine
-;   to get the next byte.
+;   Get the next 3 input bytes as a 24 bit value into REG2:REG1:REG0.  The input
+;   bytes are assumed to be in high to low byte order.
 ;
-;   Registers not listed in MSKSAVE may be trashed.
-;
-getbyte  macro
-         mcall   get_byte    ;get the next byte into REG0
-         endm
+         glbsub  cmd_get24
 
-;*******************************************************************************
-;
-;   Local subroutine GET16
-;
-;   Get the next 2 input bytes as a 16 bit value and return it in REG1:REG0.
-;   The input bytes are assumed to be in low to high byte order.
-;
-         locsub  get16, noregs
-
-         getbyte             ;get low byte into REG0
-         pushreg reg0        ;temp save it on the stack
-         getbyte
-         movff   reg0, reg1
-
-         popreg  reg0        ;restore low byte into REG0
-
-         leaverest
-
-;*******************************************************************************
-;
-;   Local subroutine GET24
-;
-;   Get the next 3 input bytes as a 24 bit value and return it in
-;   REG2:REG1:REG0.  The input bytes are assumed to be in low to high byte
-;   order.
-;
-         locsub  get24, noregs
-
-         getbyte             ;get low byte into REG0
-         pushreg reg0        ;temp save it on the stack
-         getbyte
-         movff   reg0, reg1
-         getbyte
+         mcall   cmd_get8    ;get byte 2 into REG2
          movff   reg0, reg2
-
-         popreg  reg0        ;restore low byte into REG0
+         mcall   cmd_get8    ;get byte 1 into REG1
+         movff   reg0, reg1
+         mcall   cmd_get8    ;get byte 0 into REG0
 
          leaverest
 
 ;*******************************************************************************
 ;
-;   Local subroutine GET32
+;   Subroutine CMD_GET32
 ;
-;   Get the next 4 input bytes as a 32 bit value and return it in
-;   REG3:REG2:REG1:REG0.  The input bytes are assumed to be in low to high byte
-;   order.
+;   Get the next 4 input bytes as a 32 bit value into REG:3REG2:REG1:REG0.  The
+;   input bytes are assumed to be in high to low byte order.
 ;
-         locsub  get32, noregs
+         glbsub  cmd_get32
 
-         getbyte             ;get low byte into REG0
-         pushreg reg0        ;temp save it on the stack
-         getbyte
-         movff   reg0, reg1
-         getbyte
-         movff   reg0, reg2
-         getbyte
+         mcall   cmd_get8    ;get byte 3 into REG3
          movff   reg0, reg3
-
-         popreg  reg0        ;restore low byte into REG0
+         mcall   cmd_get8    ;get byte 2 into REG2
+         movff   reg0, reg2
+         mcall   cmd_get8    ;get byte 1 into REG1
+         movff   reg0, reg1
+         mcall   cmd_get8    ;get byte 0 into REG0
 
          leaverest
 
 ;*******************************************************************************
 ;
-;   Subroutine CMD_LOCK
+;   Subroutine CMD_LOCK_OUT
 ;
 ;   Acquire exclusive access to sending to the host.  The lock must be held
 ;   while sending a response to guarantee the bytes from responses from multiple
 ;   tasks do not get interleaved.
 ;
-         glbsub  cmd_lock, noregs
+         glbsub  cmd_lock_out
 
 lck_loop unbank
          dbankif gbankadr
-         btfss   flag_rsp_lock ;lock not available now ?
-         jump    lck_ready   ;lock is available
+         skip_flag rsp_lock  ;already locked ?
+         jump    lck_avail   ;no, the lock is available
          gcall   task_yield_save ;let all other tasks run for a bit
          jump    lck_loop    ;back and check lock again
 
-lck_ready dbankis gbankadr   ;the lock is availabe
+lck_avail dbankis gbankadr   ;the lock is available
          bsf     flag_rsp_lock ;grab the lock
 
          dbankif lbankadr
@@ -231,11 +228,11 @@ lck_ready dbankis gbankadr   ;the lock is availabe
 
 ;*******************************************************************************
 ;
-;   Subroutine CMD_UNLOCK
+;   Subroutine CMD_UNLOCK_OUT
 ;
 ;   Release the exclusive lock on sending to the host.
 ;
-         glbsub  cmd_unlock, noregs
+         glbsub  cmd_unlock_out
 
          dbankif gbankadr
          bcf     flag_rsp_lock ;response stream is not locked
@@ -245,55 +242,88 @@ lck_ready dbankis gbankadr   ;the lock is availabe
 
 ;*******************************************************************************
 ;
-;   Subroutine PUT_BYTE
+;   Subroutine CMD_PUT8
 ;
 ;   Send the byte in REG0 as a response byte to the host.  Registers not listed
 ;   in MSKSAVE may be trashed.
 ;
-         locsub  put_byte, regf1
+         glbsub  cmd_put8, regf1
 
-pb_loopu unbank              ;back here to retry sending byte via USB
+put8_byte unbank             ;back here to retry sending byte
          clrf    reg1        ;indicate to tranfer byte if possible
          gcall   usb_put1    ;try to send the byte
          btfss   reg1, usbs_noxf ;the byte was not sent ?
-         jump    pb_leave    ;the byte was sent
-
+         jump    put8_leave  ;the byte was sent
+         ;
+         ;   No byte was sent.  Let all other tasks run, then try again.
+         ;
          popregs savedregs
-         mcall   yield       ;give other tasks a chance to run
+         mcall   cmd_yield   ;give other tasks a chance to run
          pushregs savedregs
-         jump    pb_loopu
+         jump    put8_byte
 
-pb_leave unbank              ;common exit point
+put8_leave unbank            ;common exit point
          leaverest
 
 ;*******************************************************************************
 ;
-;   Macro SENDBYTE
+;   Subroutine CMD_PUT16
 ;
-;   Send the byte in REG0 as a response to the current command.  This macro
-;   provides a means to customize the code for sending a byte depending on
-;   implementation.  Some implementations may not use a subroutine to send a
-;   byte.  Command code should use SENDBYTE instead of the PUT_BYTE subroutine.
+;   Send the 16 bits in REG1:REG0 out the response stream.  The bytes are sent
+;   in most to least significant order.
 ;
-;   Registers not listed in MSKSAVE may be trashed.
-;
-sendbyte macro
-         mcall   put_byte
-         endm
+         glbsub  cmd_put16
+
+         pushreg reg0        ;temp save byte 0 on the stack
+
+         movff   reg1, reg0
+         mcall   cmd_put8    ;send byte 1
+
+         popreg  reg0        ;get byte 0 back into REG0
+         mcall   cmd_put8    ;send byte 0
+         leaverest
 
 ;*******************************************************************************
 ;
-;   Macro SENDK const
+;   Subroutine CMD_PUT24
 ;
-;   Send the indicated 8 bit constant value to the host.
+;   Send the 24 bits in REG2:REG1:REG0 out the response stream.  The bytes are
+;   sent in most to least significant order.
 ;
-;   W, REG0, and the current bank setting are trashed.  All registers not listed
-;   in MSKSAVE may be trashed.
+         glbsub  cmd_put24
+
+         pushreg reg0        ;temp save byte 0 on the stack
+
+         movff   reg2, reg0
+         mcall   cmd_put8    ;send byte 2
+         movff   reg1, reg0
+         mcall   cmd_put8    ;send byte 1
+
+         popreg  reg0        ;get byte 0 back into REG0
+         mcall   cmd_put8    ;send byte 0
+         leaverest
+
+;*******************************************************************************
 ;
-sendk    macro   const
-         loadk8  reg0, const
-         sendbyte
-         endm
+;   Subroutine CMD_PUT32
+;
+;   Send the 32 bits in REG3:REG2:REG1:REG0 out the response stream.  The bytes
+;   are sent in most to least significant order.
+;
+         glbsub  cmd_put32
+
+         pushreg reg0        ;temp save byte 0 on the stack
+
+         movff   reg3, reg0
+         mcall   cmd_put8    ;send byte 3
+         movff   reg2, reg0
+         mcall   cmd_put8    ;send byte 2
+         movff   reg1, reg0
+         mcall   cmd_put8    ;send byte 1
+
+         popreg  reg0        ;get byte 0 back into REG0
+         mcall   cmd_put8    ;send byte 0
+         leaverest
 
 ;*******************************************************************************
 ;
@@ -323,19 +353,15 @@ task_restart unbank          ;will restart here on a USB reset
          clrf    stkptr      ;reset the call stack to empty
          stack_set cmdstack  ;reset the data stack to empty
          dbankif gbankadr
-         bcf     flag_cmdreset ;clear any pending reset
+/if use_usbreset
+  /then
+         clrflag usbreset    ;clear any pending reset
+  /else
+         clrflag cmdreset    ;clear any pending reset
+  /endif
 ;
 ;   Initialize command processing state for after a USB reset.
 ;
-         ;
-         ;   Release the lock on the response stream to the host if it is held
-         ;   by this task.
-         ;
-         dbankif gbankadr
-         btfss   flag_cmd_rsplock ;response stream locked by this task ?
-         jump    no_rsplock  ;no
-         mcall   cmd_unlock  ;release lock on the response stream
-no_rsplock unbank
          ;
          ;   Release the NAME_GET_xxx routines if locked by this task.
          ;
@@ -349,7 +375,7 @@ no_namelock unbank
 ;   Wait for the USB to be usable before attempting to do USB I/O.
 ;
 cmd_waitusb unbank
-         mcall   yield       ;give other tasks a chance to run
+         mcall   cmd_yield   ;give other tasks a chance to run
          dbankif gbankadr
          btfss   flag_usbon  ;USB is ready for app use ?
          jump    cmd_waitusb ;no, go back and check again
@@ -360,14 +386,54 @@ cmd_done unbank              ;done successfully processing last command
          dbankif stkptr
          clrf    stkptr      ;reset the call stack to empty
          stack_set cmdstack  ;reset the data stack to empty
+         ;
+         ;   Release the lock on the response stream to the host if it is held
+         ;   by this task.
+         ;
+         dbankif gbankadr
+         btfss   flag_cmd_rsplock ;response stream locked by this task ?
+         jump    no_rsplock  ;no
+         mcall   cmd_unlock_out ;release lock on the response stream
+no_rsplock unbank
 ;
 ;   Process next command.
 ;
+         ;
+         ;   Seed the address of CMD_DONE onto the call stack.  This allows
+         ;   command routines to be subroutines with a return from the top level
+         ;   ending the command by going to CMD_DONE.
+         ;
+         dbankif stkptr
+         incf    stkptr      ;claim one stack location
+         dbankif tosl
+         movlw   low cmd_done
+         movwf   tosl        ;set low byte of return address
+         dbankif tosh
+         movlw   high cmd_done
+         movwf   tosh        ;set high byte of return address
+         dbankif tosu
+         movlw   upper cmd_done
+         movwf   tosu        ;set upper byte of return address
+
 cmd_next unbank              ;back here to interpret next byte as command opcode
          gcall   task_yield  ;give other tasks a chance to run
-         getbyte             ;get the next opcode byte into REG0
+         mcall   cmd_get8    ;get command opcode byte into REG0
          dispatch cmd_table  ;jump to the selected command routine
          jump    cmd_next    ;not a valid opcode, back to get next
+
+;*******************************************************************************
+;
+;   Macro SENDK const
+;
+;   Send the indicated 8 bit constant value to the host.
+;
+;   W, REG0, and the current bank setting are trashed.  All registers not listed
+;   in MSKSAVE may be trashed.
+;
+sendk    macro   const
+         loadk8  reg0, const
+         mcall   cmd_put8
+         endm
 
 ;*******************************************************************************
 ;
@@ -376,10 +442,9 @@ cmd_next unbank              ;back here to interpret next byte as command opcode
 ;   Send the PONG response.
 ;
 cm_ping  unbank
-         mcall   cmd_lock
+         mcall   cmd_lock_out
          sendk   rsp_pong
-         mcall   cmd_unlock
-         jump    cmd_done
+         return
 
 ;*******************************************************************************
 ;
@@ -388,46 +453,66 @@ cm_ping  unbank
 ;   Send FWINFO response, which indicates the firmware version.
 ;
 cm_fwinfo unbank
-         mcall   cmd_lock
+         mcall   cmd_lock_out
 
          sendk   rsp_fwinfo  ;send FWINFO response opcode
          sendk   fwtype      ;type ID for this firmware
          sendk   fwver       ;1-255 firmware version number
          sendk   fwseq       ;1-255 firmware sequence number
 
-         mcall   cmd_unlock
+         return
+
+;*******************************************************************************
+;
+;   Command NAMESET n string
+;
+;   Sets the new non-volatile name of this unit.  Exactly N name characters
+;   follow N.
+;
+cm_nameset unbank
+         mcall   cmd_get8    ;get N
+         movf    reg0, w
+         bz      nameset_leave ;no name string bytes to get ?
+         movwf   reg1        ;init number of name string bytes left to get
+
+nameset_byte unbank
+         mcall   cmd_get8    ;get and ignore this name string byte
+         decfsz  reg1        ;count one less name byte left to get
+         jump    nameset_byte ;back to get the next name byte
+
+nameset_leave unbank
          jump    cmd_done    ;done processing this command
 
 ;*******************************************************************************
 ;
-;   Command NAME
+;   Command NAMEGET
 ;
 ;   Send NAME response to indicate the user-settable unit name.
 ;
-cm_name  unbank
+cm_nameget unbank
          gcall   name_get_start ;set up for getting name, length into REG0
          dbankif gbankadr
          bsf     flag_namecmd ;indicate we have the NAME_GET lock
          movff   reg0, reg1  ;save number of name characters
 
-         mcall   cmd_lock    ;acquire lock on the response stream
+         mcall   cmd_lock_out ;acquire lock on the response stream
          sendk   rsp_name    ;send response opcode
          movff   reg1, reg0
-         sendbyte            ;send the number of name characters to follow
+         mcall   cmd_put8    ;send the number of name characters to follow
 name_loop unbank             ;back here to send each new name character
          movf    reg1
          bz      name_done   ;done sending all the name characters ?
          gcall   name_get_char ;get this name character
-         sendbyte            ;send it
+         mcall   cmd_put8    ;send it
          decf    reg1        ;count one less character left to do
          jump    name_loop   ;back to send next name char
 name_done unbank             ;done sending all the name characters
-         mcall   cmd_unlock  ;release lock on response stream to host
+         mcall   cmd_unlock_out ;release lock on response stream to host
 
          gcall   name_get_end ;done getting unit name
          dbankif gbankadr
          bcf     flag_namecmd ;indicate we are not holding the NAME_GET lock
-         jump    cmd_done    ;done processing this command
+         return
 
 ;*******************************************************************************
 ;
@@ -439,7 +524,8 @@ name_done unbank             ;done sending all the name characters
          dsp_entry 0, cmd_done ;NOP
          dsp_entry 1, cm_ping ;PING, send PONG response
          dsp_entry 2, cm_fwinfo ;send firmware information
-         dsp_entry 3, cm_name ;send unique name of this unit
+         dsp_entry 3, cm_nameset ;set unique name (accepted but ignored)
+         dsp_entry 4, cm_nameget ;send unique name of this unit
 
          dsp_end cmd_table   ;end of command opcodes dispatch table
 
