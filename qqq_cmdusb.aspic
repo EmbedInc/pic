@@ -46,12 +46,60 @@
 ;   Configuration settings.
 ;
 /const   use_usbreset bool = False ;use USBRESET flag directly, CMDRESET not used
+/const   cmdpref string = "cmd_" ;start of command opcode symbol names
 stacksz  equ     64          ;size of command processor data stack
 lbank    equ     0           ;register bank for the local state of this module
 ;
 ;   Derived constants.
 ;
 lbankadr equ     bankadr(lbank) ;address within local state register bank
+/var new ii integer //scratch integer
+/var new tk string //scratch token
+//
+//   Gather information on the implemented commands.  Commands are defined by
+//   constants CMD_xxx, where xxx is a command name.  These are string constants
+//   containing the command number, optionally followed by the name of the
+//   command routine entry point.
+//
+//   This section creates the following constants:
+//
+//     CMDnENTRY
+//
+//       N is the 0 to 255 opcode value in decimal.  These are string constants
+//       containing the name of the command routine entry point for that
+//       command.  One of these constants is created for each implemented
+//       command.
+//
+//     LASTCMD
+//
+//       Integer value of the largest opcode of any implemented command.
+//
+//     NCOMMANDS
+//
+//       Number of implemented commands.
+//
+/var new lastcmd integer
+/var new ncommands integer
+/set ii [slen cmdpref] //length of fixed starting part of command opcode symbols
+
+/loop symbols sym vcon
+  /var local sy string //bare variable or constant name
+  /var local opc integer //command opcode
+  /var local entpnt string //command routine entry point name
+
+  /set sy [sym sym name]
+  /if [<= [slen sy] ii] then
+    /repeat
+    /endif
+  /if [<> [substr 1 ii sy] cmdpref] then
+    /repeat
+    /endif
+
+  /call parse_cmd [chars sy] //set OPC and ENTPNT for this command
+  /set lastcmd [max lastcmd opc] //update last-implemented opcode
+  /const cmd[v opc]entry string = entpnt //make constant for this opcode
+  /set ncommands [+ ncommands 1] //count one more implemented command
+  /endloop
 
 ;*******************************************************************************
 ;
@@ -428,11 +476,31 @@ cmd_next unbank              ;back here to interpret next byte as command opcode
 .cmdtable code_pack
          dsp_start cmd_table ;start command opcodes dispatch table
 
-         dsp_entry 0, cmd_done ;NOP
-         dsp_extrn 1, cm_ping ;PING, send PONG response
-         dsp_extrn 2, cm_fwinfo ;send firmware information
-         dsp_extrn 3, cm_nameset ;set unique name (accepted but ignored)
-         dsp_extrn 4, cm_nameget ;send unique name of this unit
+//   Build the table from the CMDnENTRY constants.  One of these constants exist
+//   for each implemented opcode.  The constant is a string that is the name
+//   of the command routine entry point.
+//
+/loop with ii from 0 to lastcmd
+  /if [not [exist [str "cmd" ii "entry"]]] then
+    /repeat
+    /endif
+  /set tk ""
+  /call tabopcode tk
+  /if [= [chars "cmd" ii "entry"] "cmd_done"]
+    /then                    ;dummy command, dispatches to local CMD_DONE
+      /append tk "dsp_entry"
+    /else                    ;real command, routine is external
+      /append tk "dsp_extrn"
+    /endif
+  /call taboperand tk
+  /append tk ii ", " [chars "cmd" ii "entry"]
+  /write tk
+  /endloop
+/set tk ""
+/append tk ncommands " commands implemented"
+/append tk ", in 0 to " lastcmd " range."
+/append tk "  " [rnd [/ ncommands 2.56]] "% of total 0-255 range used."
+/show "  " tk
 
          dsp_end cmd_table   ;end of command opcodes dispatch table
 
