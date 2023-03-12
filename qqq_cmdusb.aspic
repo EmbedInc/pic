@@ -42,7 +42,7 @@
 ;
 ;   Configuration settings.
 ;
-/const   use_usbreset bool = False ;use USBRESET flag directly, CMDRESET not used
+/const   use_usbreset bool = False ;use CMDRESET flag, not USBRESET directly
 /const   cmdpref string = "cmd_" ;start of command opcode symbol names
 stacksz  equ     64          ;size of command processor data stack
 lbank    equ     0           ;register bank for the local state of this module

@@ -109,34 +109,27 @@ cmdstack res     stacksz     ;command processing task data stack
 
          leaverest
 
-;*******************************************************************************
-;
-;   Subroutine CMD_YIELD
-;
-;   Special task yield routine for the command processing task only.  This
-;   routine may only be called by command processing code run from the command
-;   processor.
-;
-;   Let other tasks run for a time slice.  In addition, this routine restarts
-;   the command processing logic if a USB reset was received.  That means the
-;   previous command stream was aborted and a new one has been started.
-;
-;   Since this routine calls TASK_YIELD, all registers not listed in TSKSAVE are
-;   trashed.
-;
-         glbsub  cmd_yield
-
-         gcall   task_yield  ;give other tasks a chance to run
-
-/if use_usbreset
-  /then
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro USBRESET_RESTART
+//
+//   Jump to TASK_RESTART if the USB was reset.  This macro may only be used in
+//   code that is only run by the command processing task.  Execution falls thru
+//   when no USB reset has occurred.
+//
+//   The preprocessor constant USB_USBRESET is taken into account to decide
+//   global flag to check to detect a USB reset.  See the comments in the
+//   QQQ_CMDUSB module for details.
+//
+/macro usbreset_restart
+  /if use_usbreset
+    /then
          skip_nflag usbreset
-  /else
+    /else
          skip_nflag cmdreset
-  /endif
+    /endif
          jump    task_restart ;USB was reset, reset the command processor
-
-         leaverest
+  /endmac
 
 ;*******************************************************************************
 ;
@@ -147,6 +140,8 @@ cmdstack res     stacksz     ;command processing task data stack
 ;   preserved.  Other tasks will be run while waiting for a new input byte to
 ;   become available.  No yield is performed if a byte is immediately available.
 ;
+;   This routine may only be called by the command processing task.
+
          glbsub  cmd_get8, regf1
 
 get8_byte unbank             ;back here until input byte is available
@@ -158,7 +153,8 @@ get8_byte unbank             ;back here until input byte is available
          ;   No byte was received.  Let all other tasks run, then try again.
          ;
          popregs savedregs
-         mcall   cmd_yield   ;give other tasks a chance to run
+         gcall   task_yield  ;give other tasks a chance to run
+         usbreset_restart    ;restart task if USB was reset
          pushregs savedregs
          jump    get8_byte   ;back to try getting a byte again
 
@@ -172,6 +168,7 @@ get8_leave unbank            ;returning with received byte in REG0
 ;   Get the next 2 input bytes as a 16 bit value into REG1:REG0.  The input
 ;   bytes are assumed to be in high to low byte order.
 ;
+;   This routine may only be called by the command processing task.
          glbsub  cmd_get16
 
          mcall   cmd_get8    ;get the high byte into REG1
@@ -186,6 +183,8 @@ get8_leave unbank            ;returning with received byte in REG0
 ;
 ;   Get the next 3 input bytes as a 24 bit value into REG2:REG1:REG0.  The input
 ;   bytes are assumed to be in high to low byte order.
+;
+;   This routine may only be called by the command processing task.
 ;
          glbsub  cmd_get24
 
@@ -203,6 +202,8 @@ get8_leave unbank            ;returning with received byte in REG0
 ;
 ;   Get the next 4 input bytes as a 32 bit value into REG:3REG2:REG1:REG0.  The
 ;   input bytes are assumed to be in high to low byte order.
+;
+;   This routine may only be called by the command processing task.
 ;
          glbsub  cmd_get32
 
@@ -263,8 +264,10 @@ lck_avail dbankis gbankadr   ;the lock is available
 ;
 ;   Subroutine CMD_PUT8
 ;
-;   Send the byte in REG0 as a response byte to the host.  Registers not listed
-;   in MSKSAVE may be trashed.
+;   Send the byte in REG0 as a response byte to the host.
+;
+;   The host sending lock must be held when this routine is called.  Registers
+;   not listed in MSKSAVE may be trashed.
 ;
          glbsub  cmd_put8, regf1
 
@@ -277,7 +280,7 @@ put8_byte unbank             ;back here to retry sending byte
          ;   No byte was sent.  Let all other tasks run, then try again.
          ;
          popregs savedregs
-         mcall   cmd_yield   ;give other tasks a chance to run
+         gcall   task_yield  ;give other tasks a chance to run
          pushregs savedregs
          jump    put8_byte
 
@@ -290,6 +293,9 @@ put8_leave unbank            ;common exit point
 ;
 ;   Send the 16 bits in REG1:REG0 out the response stream.  The bytes are sent
 ;   in most to least significant order.
+;
+;   The host sending lock must be held when this routine is called.  Registers
+;   not listed in MSKSAVE may be trashed.
 ;
          glbsub  cmd_put16
 
@@ -308,6 +314,9 @@ put8_leave unbank            ;common exit point
 ;
 ;   Send the 24 bits in REG2:REG1:REG0 out the response stream.  The bytes are
 ;   sent in most to least significant order.
+;
+;   The host sending lock must be held when this routine is called.  Registers
+;   not listed in MSKSAVE may be trashed.
 ;
          glbsub  cmd_put24
 
@@ -328,6 +337,9 @@ put8_leave unbank            ;common exit point
 ;
 ;   Send the 32 bits in REG3:REG2:REG1:REG0 out the response stream.  The bytes
 ;   are sent in most to least significant order.
+;
+;   The host sending lock must be held when this routine is called.  Registers
+;   not listed in MSKSAVE may be trashed.
 ;
          glbsub  cmd_put32
 
@@ -394,7 +406,8 @@ no_namelock unbank
 ;   Wait for the USB to be usable before attempting to do USB I/O.
 ;
 cmd_waitusb unbank
-         mcall   cmd_yield   ;give other tasks a chance to run
+         gcall   task_yield  ;give other tasks a chance to run
+         usbreset_restart    ;restart task if USB was reset
          dbankif gbankadr
          btfss   flag_usbon  ;USB is ready for app use ?
          jump    cmd_waitusb ;no, go back and check again
@@ -436,6 +449,8 @@ no_rsplock unbank
 
 cmd_next unbank              ;back here to interpret next byte as command opcode
          gcall   task_yield  ;give other tasks a chance to run
+         usbreset_restart    ;restart task if USB was reset
+
          mcall   cmd_get8    ;get command opcode byte into REG0
          dispatch cmd_table  ;jump to the selected command routine
          jump    cmd_next    ;not a valid opcode, back to get next
