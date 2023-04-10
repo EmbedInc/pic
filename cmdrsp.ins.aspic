@@ -82,8 +82,12 @@
 /var new name string //command or response name
 /var new opc integer //opcode value
 
-/const   srcdir  string = [evar "srcdir"]
-/const   buildname string = [evar "buildname"]
+/if [not [exist "srcdir:const"]] then
+  /const srcdir string = [evar "srcdir"]
+  /endif
+/if [not [exist "buildname:const"]] then
+  /const buildname string = [evar "buildname"]
+  /endif
 
 /set fnam [str "(cog)src/" srcdir "/debug_" buildname ".ins.aspic"]
 /run "make_debug """ fnam """ icd"
