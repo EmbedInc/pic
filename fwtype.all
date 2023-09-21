@@ -292,6 +292,9 @@
 /if [and [= unam "DB25"] [= udir "THEL"]] then
   /set ty 71
   /endif
+/if [and [= unam "RESCAL"] [= udir "JOWA"]] then
+  /set ty 72
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
