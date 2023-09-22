@@ -24,6 +24,9 @@
          extern  init        ;system startup after individual modules initialized
 
 /show "  Instruction clock = " [eng freq_inst 4] "Hz"
+/if debug_icd then
+  /show "  Configured for ICD debugging"
+  /endif
 
 ;*******************************************************************************
 ;

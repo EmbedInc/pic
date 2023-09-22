@@ -2048,6 +2048,42 @@ waitus   macro   us, cy
          waitns  ((us) * 1000), cy
          endm
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro WAITSEC seconds
+//
+//   Wait the indicated number of seconds, which can be a floating point value.
+//
+//   This macro relies on the following subroutines to exist:
+//
+//     WAITMS  -  Wait the number of milliseconds in REG0.
+//
+//     WAITMS16  -  Wait the number of milliseconds in REG1:REG0.
+//
+//   The appropriate wait routine is chosen, depending on the length of the
+//   wait.  Only REG0 is trashed for up to 255 ms.  REG1 and REG0 are trashed
+//   for longer waits.
+//
+/macro waitsec
+  /var local ms integer = [rnd [* 1000 [vnl [arg 1]]]] ;num of ms to wait
+
+  /if [> ms 65535] then
+    /show "  ERROR: Wait time too long, must be 65.535 seconds or less"
+         .error  "Wait time"
+         .end
+    /stop
+    /endif
+
+  /if [<= ms 255]
+    /then                    ;use single byte wait
+         loadk8  reg0, [v ms]
+         gcall   waitms
+    /else                    ;use double byte wait
+         loadk16 reg0, [v ms]
+         gcall   waitms16
+    /endif
+  /endmac
+
 ;*******************************************************************************
 ;
 ;   Macro TIMER0_PER cy
