@@ -48,7 +48,7 @@
 //
 //       Opcode 7, command routine "gopuke".
 //
-/const   cmd_nop = 0         ;NOP
+/const   cmd_nop = "0 cmd_done" ;NOP
 /const   cmd_ping = 1        ;send PONG response
 /const   cmd_fwinfo = 2      ;send FWINFO response, gives FW type, ver and seq
 /const   cmd_nameset = 3     ;set user-settable device name, ignored
