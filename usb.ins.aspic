@@ -429,7 +429,7 @@ ii       set     ii + 1      ;advance to next endpoint number
 ;   Start up USB communication.  This must be the first USB routine called after
 ;   USB_INIT or USB_OFF.
 ;
-         glbsub  usb_start, regf0 | regf1 | regf2 | regf3
+         glbsub  usb_start, regf0 | regf1 | regf2 | regf3 | regf4
 
          mcall   usb_reset   ;set USB hardware/software to the reset state
          dbankif ucon
