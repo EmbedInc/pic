@@ -186,13 +186,27 @@ lck_avail dbankis gbankadr   ;the PROM routines lock is available
          movff   adr1, eeadrh ;set address high byte
     endif
 ;
-;   Set the EEPROM data to write.
+;   Check for writing the same value as already in this location.  Since each
+;   write wears out the EEPROM, nothing is done if the data is already as
+;   desired.  This also allows software to re-write entire sections of the
+;   EEPROM without causing unnecessary wear.
 ;
-         movff   reg0, eedata
+         dbankif eecon1
+         clrf    eecon1      ;set up for access to the data EEPROM
+         bsf     eecon1, rd  ;read from the current EEPROM location
+
+         movf    reg0, w     ;get the desired data value
+         dbankif eedata
+         xorwf   eedata, w   ;compare to data already in this byte
+         bz      pwr_leave   ;byte already set as desired ?
 ;
-;   Perform special sequence to enable writing to the EEPROM.  Yes, this
-;   is a bit strange, but that's what is required.
+;   Do the physical write.
 ;
+         movff   reg0, eedata ;set the data to write
+         ;
+         ;   Perform special sequence to enable writing to the EEPROM.  Yes,
+         ;   this is a bit strange, but that's what is required.
+         ;
          dbankif eecon1
          clrf    eecon1      ;set up for access to the data EEPROM
          bsf     eecon1, wren ;set bit to enable writes to EEPROM
@@ -212,6 +226,7 @@ lck_avail dbankis gbankadr   ;the PROM routines lock is available
 ;
 ;   Increment the current EEPROM address.
 ;
+pwr_leave unbank             ;common exit point
          dbankif lbankadr
          incf    adr0        ;increment low address byte
   ifdef adr1
