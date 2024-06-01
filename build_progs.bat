@@ -7,18 +7,18 @@ rem
 setlocal
 call build_pasinit
 
-call src_prog %srcdir% asmpic %1
-call src_prog %srcdir% aspic_fix %1
-call src_prog %srcdir% filtbits %1
-call src_prog %srcdir% fp32fh %1
-call src_prog %srcdir% fph %1
-call src_prog %srcdir% fxh %1
-call src_prog %srcdir% hf32 %1
-call src_prog %srcdir% hfp %1
-call src_prog %srcdir% hfp32 %1
-call src_prog %srcdir% hfx %1
-call src_prog %srcdir% hfx29 %1
-call src_prog %srcdir% libpic %1
-call src_prog %srcdir% linkpic %1
+call src_progl asmpic
+call src_progl aspic_fix
+call src_progl filtbits
+call src_progl fp32fh
+call src_progl fph
+call src_progl fxh
+call src_progl hf32
+call src_progl hfp
+call src_progl hfp32
+call src_progl hfx
+call src_progl hfx29
+call src_progl libpic
+call src_progl linkpic
 
 call callbat "%sourcedir%\build_prog_prepic" %1

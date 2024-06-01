@@ -4,7 +4,7 @@
 *   details.
 }
 program linkpic;
-%include '(cog)lib/base.ins.pas';
+%include 'base.ins.pas';
 
 const
   prog_name = '(cog)extern/mplab/mplink.exe'; {linker executable pathname}

@@ -3,7 +3,7 @@
 *   Fix the formatting of a PIC assembler source file.
 }
 program aspic_fix;
-%include '(cog)lib/base.ins.pas';
+%include 'base.ins.pas';
 
 const
   def_col_opc_k = 10;                  {default column for opcodes}

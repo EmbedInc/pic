@@ -7,11 +7,8 @@ call build_vars
 call src_get %srcdir% %libname%.ins.pas
 call src_get %srcdir% %libname%2.ins.pas
 
-call src_getfrom sys base.ins.pas
-call src_getfrom sys sys.ins.pas
-call src_getfrom util util.ins.pas
-call src_getfrom string string.ins.pas
-call src_getfrom file file.ins.pas
+call src_getbase
+call src_getfrom math math.ins.pas
 call src_getfrom strflex strflex.ins.pas
 call src_getfrom fline fline.ins.pas
 

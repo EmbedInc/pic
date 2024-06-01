@@ -7,11 +7,8 @@
 *   the new value plus 7/8 of the old value.
 }
 program filtbits;
-%include '(cog)lib/sys.ins.pas';
-%include '(cog)lib/util.ins.pas';
-%include '(cog)lib/string.ins.pas';
-%include '(cog)lib/file.ins.pas';
-%include '(cog)lib/math.ins.pas';
+%include 'base.ins.pas';
+%include 'math.ins.pas';
 
 const
   max_poles = 100;                     {maximum poles allowed in the filter}

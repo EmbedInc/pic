@@ -5,8 +5,8 @@
 *   standard output.
 }
 program hf32;
-%include '(cog)lib/base.ins.pas';
-%include '(cog)lib/pic.ins.pas';
+%include 'base.ins.pas';
+%include 'pic.ins.pas';
 
 var
   h: sys_int_min32_t;                  {HEX value as integer}
