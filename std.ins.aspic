@@ -1917,7 +1917,7 @@ ii       set     ii - 1
 ;   WAITNOP originally just wrote the indicated number of sequential NOP
 ;   instructions although it was intended for instruction timing.  Some time
 ;   later it was modified to use GOTO $+1 on PIC 16 and BRA $+2 on PIC 18 to act
-;   as NOPs that took 2 cycles but only one instruction word.  The was
+;   as NOPs that took 2 cycles but only one instruction word.  That was
 ;   beneficial for the intended use.
 ;
 ;   However, WAITNOP was also used to create a table of sequential NOP
