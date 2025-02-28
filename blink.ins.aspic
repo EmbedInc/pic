@@ -1,0 +1,257 @@
+;   ***************************************************************
+;   * Copyright (C) 2025, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Canned code for the BLINK module.  See the header comments in
+;   QQQ_BLINK.DSPIC for a description of the possible configuration parameters.
+;
+
+         extern  tick1ms     ;incremented automatically every 1 ms
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/if [not [exist "name"]] then
+  /const name string = "ledstat"
+  /endif
+
+/if [not [exist "pin"]] then
+  /const pin string = "ledstat"
+  /endif
+
+/if [not [exist "nstbits"]] then
+  /const nstbits integer = 48
+  /endif
+
+/if [not [exist "pattms"]] then
+  /const pattms integer = 3000
+  /endif
+;
+;   Derived constants.
+;
+/block
+  /var local ii integer
+  /var local r real
+  /var local s string
+
+  /const nstbyte integer = [div [+ nstbits 7] 8] ;prog mem bytes per status pattern
+  /set r [/ pattms nstbits]  ;ms ticks per display pattern slice
+  /const add1ms integer = [rnd [/ 65536 r]] ;accumulator increment per ms
+  /endblock
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+lastick  res     1           ;last TICK1MS value updated to
+accslice res     2           ;overflows when time for next display slice
+slice    res     1           ;0 to NSTBITS-1 current display slice number
+slmask   res     1           ;mask of bit within byte for this slice
+pattn    res     1           ;0-N number of pattern being displayed
+
+
+.[chars name] code
+;*******************************************************************************
+;
+;   Subroutine name_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  [chars name]_init,
+
+         dbankif lbankadr
+         movff   tick1ms, lastick ;init last clock value current with
+         loadk16 accslice, 0xFFFF ;init to next tick starts new slice
+         loadk8  slice, [- nstbits 1] ;init to in last slice of pattern
+         loadk8  pattn, 0xFF ;init current pattern to invalid
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine name_UPDATE
+;
+;   This routine is intended to be called periodically by the main event loop.
+;   It determines the current system state, where it is within the current
+;   display pattern, and updates the display accordingly.
+;
+;   Timing for the display is derived here from the global TICK1MS clock
+;   variable.  This routine need not be called with any particular timing.
+;   Since elapsed time is detected in whole ms, calling it faster than that has
+;   no benefit, although it does no harm other than to take more excution
+;   cycles.  Calling it less often than that will not cause time to be lost, but
+;   will cause the display to be updated in bursts so as to appear to "stutter"
+;   if too slow.
+;
+         glbsub  [chars name]_update, regf0 | regf1 | regf2 | regf3
+
+upd_recheck unbank           ;back here after processing each clock tick
+         dbankif gbankadr
+         movf    tick1ms, w  ;get the current 1 ms clock value
+         dbankif lbankadr
+         xorwf   lastick, w  ;compare to clock value current with
+         skip_nz             ;new clock tick ?
+         jump    upd_leave   ;no, nothing more to do
+;
+;   A new clock tick has occurred.
+;
+         ;
+         ;   Update the clock value we will now be current with.  Each tick is
+         ;   handled individually, even when this routine is called with
+         ;   multiple ticks elapsed since the last call.  We therefore don't
+         ;   care what the new current clock value is, just advance our own
+         ;   state by one tick.
+         ;
+         dbankif lbankadr
+         incf    lastick     ;update clock value will now be current with
+         ;
+         ;   Add ADD1MS into the accumulator.  This value is precomputed so that
+         ;   the accumulator will overflow when ADD1MS is added the number of
+         ;   times there are ticks in a slice.  There may not be integer number
+         ;   of ticks in a slice.  This mechanism allows for that while keeping
+         ;   long term time reasonably accurate.
+         ;
+         dbankif lbankadr
+         movlw   low [v add1ms] ;update slice accumulator to this new tick
+         addwf   accslice+0
+         movlw   high [v add1ms]
+         addwfc  accslice+1
+         skip_carr           ;ACC overflowed, time for next pattern slice ?
+         jump    upd_recheck ;no, nothing more to do this tick, check for next tick
+         ;
+         ;   Advance to the next slice in the current pattern.
+         ;
+         dbankif lbankadr
+         incf    slice       ;advance to next slice number
+         rrncf   slmask      ;update mask of bit within byte
+         movf    slice, w    ;get the new slice number
+         sublw   [v nstbits] ;compare to first invalid slice number
+         skip_wgt            ;just advanced past the end of the pattern ?
+         jump    upd_hslice  ;no, SLICE and SLMASK all set
+
+         clrf    slice       ;wrap back to the start of the pattern
+         loadk8  slmask, 0x80 ;to first bit in current byte
+
+upd_hslice                   ;SLICE and SLMASK all set
+;
+;   Update the display.
+;
+         pattnum             ;get 0-N number of pattern to display in W
+
+         dbankif lbankadr
+         movwf   reg0        ;temp save new pattern number in REG0
+         xorwf   pattn, w    ;compare to current pattern number
+         skip_nz             ;switching to a new pattern ?
+         jump    upd_patt    ;no, pattern ID all set
+         ;
+         ;   Switch to the new pattern in REG0.  The new pattern is started at
+         ;   its beginning.
+         ;
+         movff   reg0, pattn ;update the current pattern number
+         clrf    slice       ;start the new pattern at its beginning
+upd_patt                     ;PATTN and SLICE all set for displaying
+;
+;   Update the display.  PATTN is the 0-N number of the pattern to display, and
+;   SLICE is the 0-N bit to display within that pattern.
+;
+         ;
+         ;   Check for the special pattern 255, which keeps the light off.
+         ;
+         dbankif lbankadr
+         comf    pattn, w    ;set Z on special pattern 255
+         bz      upd_off     ;special pattern, display always off ?
+         ;
+         ;   Index into the pattern according to PATTN, SLICE, and SLMASK, then
+         ;   set the light according to the value of that bit.
+         ;
+         set_tblptr stpatt   ;point TBLPTR to start of first pattern
+         dbankif lbankadr
+         movf    pattn, w    ;get 0-N number of the pattern to index into
+         mullw   [v nstbyte] ;make byte offset for selected pattern
+         movf    prodl, w
+         addw_tblptr         ;update pointer to start of selected pattern
+
+         rrncf   slice, w    ;make byte offset for the current slice
+         rrncf   wreg
+         rrncf   wreg
+         andlw   0x1F
+         addw_tblptr         ;update pointer to the current byte in the pattern
+
+         tblrd*              ;get the pattern byte containing the current slice
+         movf    tablat, w
+         andwf   slmask, w   ;apply mask for the slice bit within the byte
+         bz      upd_off     ;pattern bit is 0 ?
+
+         set_[chars pin]_on  ;turn on the light for this slice
+         jump    upd_recheck ;back to check for another clock tick
+
+upd_off  unbank
+         set_[chars pin]_off ;turn off the light for this slice
+         jump    upd_recheck ;back to check for another clock tick
+
+upd_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro PATTERN patt
+;
+;   Create the table entry for one status display pattern.  PATT must be a
+;   sequence of "*" and "-" characters.  "*" lights the LED for that time slice
+;   and "-" makes it dark.  There must be exactly NSTBITS characters in PATT.
+;
+/macro pattern
+  /var local patt string = [qstr [arg 1]] ;get the pattern string
+  /var local ind integer = 1 ;init PATT index
+  /var local pchar string    ;single character extracted from PATT
+  /var local byte integer    ;current byte being built
+  /var local bybit integer   ;number of bits generated in current pattern byte
+  /var local biton bool      ;current pattern bit is on
+  /block                     ;back here each new byte
+    /if [> ind nstbits] then ;done all bits ?
+      /quit
+      /endif
+    /set byte 0              ;init value of this pattern byte
+    /set bybit 0             ;init number of bits so far in this byte
+    /block                   ;back here each bit in this pattern byte
+      /set pchar [sindx ind patt] ;get the pattern character for this bit
+      /if [not [or [= pchar "*"] [= pchar "-"]]] then
+        /show 'Invalid character in the display pattern "' patt '"'
+         error   PATTERN
+         end
+        /stop
+        /endif
+      /set biton [= pchar "*"] ;TRUE for this bit should be on
+      /set ind [+ ind 1]     ;update PATT index for next time
+      /set byte [shiftl byte 1] ;make room for the new bit
+      /if biton then         ;this bit is on ?
+        /set byte [or byte 1]
+        /endif
+      /set bybit [+ bybit 1] ;count one more bit in this data byte
+      /if [> ind nstbits] then ;exhausted all input bits ?
+        /quit
+        /endif
+      /if [>= bybit 8] then  ;this byte is full ?
+        /quit                ;done with this byte
+        /endif
+      /repeat                ;back to do next bit in this byte
+      /endblock
+         db      [chars "b'" [int byte "fw 8 lz base 2 usin"] "'"]
+    /repeat                  ;back to do the next data byte
+    /endblock
+  /endmac

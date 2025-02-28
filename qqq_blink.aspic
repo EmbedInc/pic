@@ -1,0 +1,125 @@
+;   ***************************************************************
+;   * Copyright (C) 2025, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   This module manages the blinking of a single LED.  The LED is always
+;   either fully on or fully off, but can display different blink patterns
+;   depending on system conditions.  The LED is driven from a single output
+;   line using programmed I/O.
+;
+;   To support multiple different LEDs in a system, the name of this module
+;   is customizable.
+;
+;   Exported routines:
+;
+;     name_INIT
+;
+;       Must be first call into this module.
+;
+;     name_UPDATE
+;
+;       Must be called periodically.  It determines the system state, decides
+;       what pattern to display, tracks real time, and updates the LED
+;       accordingly.  It is intended to be called from the main event loop as
+;       a low priority event or during idle time.
+;
+;   Configuration parameters:
+;
+;     NAME, string
+;
+;       The generic name of all symbols exported from this module.  If multiple
+;       LEDs are being controlled, then multiple versions of this module can be
+;       used, but each must have a different name.
+;
+;       The default is the same as the module name.  If the module is not
+;       renamed from the template, then the default is "ledstat".
+;
+;     PIN, string
+;
+;       Name of the /OUTBIT pin that controls the LED.  Setting this line to ON
+;       is assumed to enable the LED, and OFF to disable it.  The LED can be
+;       wired either way, as long as the polarity in the /OUTBIT command is set
+;       accordingly.
+;
+;       The default is the same as the module name.  If the module is not
+;       renamed from the template, then the default is "ledstat".
+;
+;     NSTBITS, integer
+;
+;       Number of bits in a pattern.  Whole program memory bytes are allocated
+;       to each pattern.  Since there are 8 bits in a program memory byte,
+;       NSTBITS should usually be a multiple of 8.  If not, the next full
+;       multiple of 8 bits is allocated anyway, but the bits are not used.
+;
+;       The default is 48 (6 program memory bytes per pattern).
+;
+;     PATTMS, integer
+;
+;       The length of a whole pattern in milliseconds.
+;
+;       The default is 3000 (3 seconds).
+;
+/include "qq2.ins.aspic"
+
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   name    string = "qq3" ;generic name of exported symbols in this module
+/const   pin     string = "qq3" ;name of output pin controlling the LED
+/const   nstbits integer = 48 ;number of bits in a status indicator pattern
+/const   pattms  integer = 3000 ;length of whole pattern, ms
+lbank    equ     0           ;register bank for the local state of this module
+;
+;   Derived constants.
+;
+lbankadr equ     bankadr(lbank) ;address within local state register bank
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro PATTNUM
+//
+//   Determine the number of the pattern to display.  This macro leaves the 0-N
+//   pattern number in W.  REG0-REG3 may be trashed.
+//
+/macro pattnum
+         movlw   0
+
+havepatt:                    ;W contains the 0-N number of the pattern to display
+  /endmac
+
+/include "(cog)src/pic/blink.ins.aspic"
+
+;*******************************************************************************
+;
+;   Display patterns table.
+;
+;   Each display pattern must be defined here.  Patterns are defined
+;   sequentially starting with 0 at STPATT.
+;
+;   Each pattern is defined with the PATTERN macro.  The parameter to this macro
+;   is a series of stars (*) or dashes (-).  A star represents LED on, and a
+;   dash LED off.  There must be exactly NSTBITS total characters in the
+;   pattern.  Patterns are displayed in left to right order as defined by the
+;   PATTERN macro parameter.
+;
+;
+.stpatt  code_pack
+stpatt                       ;start of display patterns table
+         pattern ********--------********--------********-------- ;0 - 1 Hz, normal operation
+
+         end
