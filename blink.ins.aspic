@@ -173,8 +173,8 @@ upd_patt                     ;PATTN and SLICE all set for displaying
          ;   Check for the special pattern 255, which keeps the light off.
          ;
          dbankif lbankadr
-         comf    pattn, w    ;set Z on special pattern 255
-         bz      upd_off     ;special pattern, display always off ?
+         infsnz  pattn, w    ;not special always-off pattern ?
+         jump    upd_off     ;is special pattern, keep the light off
          ;
          ;   Index into the pattern according to PATTN, SLICE, and SLMASK, then
          ;   set the light according to the value of that bit.
