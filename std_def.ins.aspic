@@ -938,6 +938,36 @@ bra_bug  set     true        ;interrupt during BRA corrupts PC
 pullups_porta set h'FF'
     endif
 
+  ifdef __16lf1783
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   2
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'2EF'
+stacksize set    32
+ee_start set     h'F000'
+progadrb set     2
+create_tempw set false
+bra_bug  set     true        ;interrupt during BRA corrupts PC
+pullups_porta set h'FF'
+    endif
+
+  ifdef __16f1786
+fam_16b  set     1           ;enhanced 14 bit core part
+nregbanks set    32
+ncodepages set   4
+commregs_first set h'70'
+commregs_last set h'7F'
+stacklast set    h'64F'
+stacksize set    48
+ee_start set     h'F000'
+progadrb set     2
+create_tempw set false
+bra_bug  set     true        ;interrupt during BRA corrupts PC
+pullups_porta set h'FF'
+    endif
+
   ifdef __16lf1786
 fam_16b  set     1           ;enhanced 14 bit core part
 nregbanks set    32
