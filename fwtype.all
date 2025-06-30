@@ -298,6 +298,12 @@
 /if [and [= unam "BWRAM"] [= udir "JOWA"]] then
   /set ty 73
   /endif
+/if [and [= unam "AGLPWR"] [= udir "JOWA"]] then
+  /set ty 74
+  /endif
+/if [and [= unam "AGLITE"] [= udir "JOWA"]] then
+  /set ty 75
+  /endif
 
 /if [= ty -1]
   /then                      //ID is not known here
